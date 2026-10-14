@@ -23,13 +23,14 @@ export interface Check {
 
 export function doctorUsage(): string {
   return [
-    "Usage: hotline doctor [--home <dir>]",
+    "Usage: hotline doctor [--home <dir>] [--command <path>]",
     "",
     "Checks the config, secrets (set or not, never their values), the daemon and its",
     "token, the Claude Code and Codex installs and their timeouts, the deployed",
     "ElevenLabs agent and the webhook URL. Exits 1 if any check fails.",
     "",
-    "  --home <dir>   Look for agent configs under <dir> instead of your home folder",
+    "  --home <dir>       Look for agent configs under <dir> instead of your home folder",
+    "  --command <path>   The --command the hooks were installed with, if any",
   ].join("\n");
 }
 
@@ -126,7 +127,12 @@ async function daemonCheck(context: CliContext, config: Config, token: string | 
   }
 }
 
-async function agentChecks(agent: AgentFlag, where: ConfigLocation, config: Config): Promise<Check[]> {
+async function agentChecks(
+  agent: AgentFlag,
+  where: ConfigLocation,
+  config: Config,
+  launcher: string,
+): Promise<Check[]> {
   const name = agent === "claude" ? "claude code" : "codex";
   const scope = where.project === undefined ? "user" : "project";
   const files = agentConfigFiles(agent, where);
@@ -135,7 +141,7 @@ async function agentChecks(agent: AgentFlag, where: ConfigLocation, config: Conf
   try {
     const hooksText = (await readConfigFile(files.hooks))?.text;
     const mcpText = (await readConfigFile(files.mcp))?.text;
-    const hooks = readHooks(hooksText, files.hooks, agent);
+    const hooks = readHooks(hooksText, files.hooks, agent, launcher);
     const claudeMcp = agent === "claude" ? readClaudeMcp(mcpText, files.mcp) : undefined;
     const codexMcp = agent === "codex" ? readCodexMcp(mcpText) : undefined;
     const installed = claudeMcp?.installed === true || codexMcp?.installed === true;
@@ -346,7 +352,11 @@ function webhookCheck(config: Config): Check {
     : { status: "pass", name: "webhooks", detail: "no public URL needed with fake providers" };
 }
 
-export async function runChecks(context: CliContext, home: string | undefined): Promise<Check[]> {
+export async function runChecks(
+  context: CliContext,
+  home: string | undefined,
+  launcher = "hotline",
+): Promise<Check[]> {
   const { hotlinePaths, loadConfig, readAwayState } = await import("@hotline/daemon");
   const checks: Check[] = [];
   let paths: ReturnType<typeof hotlinePaths>;
@@ -391,7 +401,7 @@ export async function runChecks(context: CliContext, home: string | undefined): 
     return checks;
   }
   for (const agent of ["claude", "codex"] as const) {
-    for (const scope of scopes) checks.push(...(await agentChecks(agent, scope, config)));
+    for (const scope of scopes) checks.push(...(await agentChecks(agent, scope, config, launcher)));
   }
   checks.push(claudeIdleCheck(context, config));
   checks.push(...(await elevenLabsChecks(context, config, values.get("elevenlabs.apiKey"))));
@@ -405,6 +415,7 @@ export async function doctorCommand(
   context: CliContext,
 ): Promise<number> {
   let home: string | undefined;
+  let launcher = "hotline";
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
     if (arg === "--help" || arg === "-h") {
@@ -415,10 +426,14 @@ export async function doctorCommand(
       home = args[++index];
       continue;
     }
+    if (arg === "--command" && args[index + 1]) {
+      launcher = args[++index] as string;
+      continue;
+    }
     out.stderr(`hotline doctor: unexpected "${arg}"\n\n${doctorUsage()}`);
     return 2;
   }
-  const checks = await runChecks(context, home);
+  const checks = await runChecks(context, home, launcher);
   const width = Math.max(...checks.map((check) => check.name.length));
   for (const check of checks) {
     out.stdout(`${check.status.toUpperCase().padEnd(4)}  ${check.name.padEnd(width)}  ${check.detail}`);

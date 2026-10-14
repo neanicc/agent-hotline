@@ -56,15 +56,14 @@ function isHotlineHook(command: unknown, agent: AgentFlag, event: HookEvent, lau
   const at = words.indexOf("hook");
   if (at < 1) return false;
   const program = words.slice(0, at);
-  // `hotline`, this run's launcher, an absolute path whose file name contains
-  // "hotline" (a `--command` wrapper), or `node <file>.js`. Never another program.
+  // `hotline`, this run's `--command`, an absolute path to a file named exactly
+  // `hotline`, or `node <...>/apps/cli/dist/main.js` (the hand-written form in
+  // docs/hooks.md). Never another program.
   const first = program[0] ?? "";
   const programOk =
     (program.length === 1 &&
-      (first === "hotline" ||
-        first === launcher ||
-        (first.startsWith("/") && /hotline[^/]*$/i.test(first)))) ||
-    (program.length === 2 && first === "node" && /\.js$/.test(program[1] ?? ""));
+      (first === "hotline" || first === launcher || /^\/(.+\/)?hotline$/.test(first))) ||
+    (program.length === 2 && first === "node" && /\/apps\/cli\/dist\/main\.js$/.test(program[1] ?? ""));
   if (!programOk || words[at + 1] !== agent || words[at + 2] !== HOOK_EVENTS[event]) return false;
   const options = words.slice(at + 3);
   for (let index = 0; index < options.length; index += 2) {
@@ -282,7 +281,12 @@ export interface InstalledHook {
 }
 
 /** Hotline's hooks in a hooks file, with their wait and timeout (defaults filled in). */
-export function readHooks(text: string | undefined, label: string, agent: AgentFlag): InstalledHook[] {
+export function readHooks(
+  text: string | undefined,
+  label: string,
+  agent: AgentFlag,
+  launcher = "hotline",
+): InstalledHook[] {
   const settings = parseJsonConfig(text, label);
   const hooks = isObject(settings.hooks) ? settings.hooks : {};
   const found: InstalledHook[] = [];
@@ -292,7 +296,7 @@ export function readHooks(text: string | undefined, label: string, agent: AgentF
     for (const group of groups) {
       if (!isObject(group) || !Array.isArray(group.hooks)) continue;
       for (const hook of group.hooks) {
-        if (!isObject(hook) || !isHotlineHook(hook.command, agent, event)) continue;
+        if (!isObject(hook) || !isHotlineHook(hook.command, agent, event, launcher)) continue;
         const wait = /--wait-seconds\s+(\d{1,6})\b/.exec(String(hook.command));
         found.push({
           event: HOOK_EVENTS[event],

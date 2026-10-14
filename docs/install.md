@@ -40,7 +40,11 @@ users can open is made private.
 | Twilio account SID and auth token | never | yes, no echo | `HOTLINE_TWILIO_ACCOUNT_SID`, `HOTLINE_TWILIO_AUTH_TOKEN` |
 
 - The PIN and credentials are never accepted as flags: other users on the Mac
-  can see a process's arguments, and shells keep them in history.
+  can see a process's arguments, and shells keep them in history. The
+  `HOTLINE_*` variables are for scripted setup only: other processes of the
+  same user can read a process's environment, so prefer the prompts.
+- Switching `--secret-store` with `--force` stores the secrets in the new store
+  and leaves the old store's copies alone; `init` says so.
 - Only the PIN's scrypt hash is stored (`owner.pinHash`), never the PIN. A PIN
   shorter than 6 digits works but prints a warning: caller ID can be spoofed,
   and the PIN is what stops a spoofed call.
@@ -105,11 +109,11 @@ Writes the entries from [mcp.md](mcp.md#config-snippets) and
   asks you to run it again. Quitting Claude Code first avoids that.
 - Running it again changes nothing. An older Hotline hook (another launcher, a
   different wait) is replaced, not duplicated. A hook counts as Hotline's when
-  its command starts with `hotline`, an absolute path whose file name contains
-  `hotline`, this run's `--command`, or `node <file>.js`, followed by exactly
-  `hook <agent> <event>` and only `--wait-seconds` or `--port`. A `--command`
-  whose file name lacks `hotline` is recognised only when the same `--command`
-  is given again, including for `--uninstall`.
+  its command starts with `hotline`, an absolute path to a file named exactly
+  `hotline`, this run's `--command`, or `node <...>/apps/cli/dist/main.js`,
+  followed by exactly `hook <agent> <event>` and only `--wait-seconds` or
+  `--port`. Any other `--command` is recognised only when the same `--command`
+  is given again (`install --uninstall --command ...`, `doctor --command ...`).
 - A Codex config that already defines `mcp_servers.hotline` in any TOML form
   (a table, a quoted name, `hotline = {...}` under `[mcp_servers]`, dotted or
   inline keys) is refused, never edited.

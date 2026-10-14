@@ -58,6 +58,16 @@ type Flag = (typeof FLAGS)[keyof typeof FLAGS];
 
 class InitError extends Error {}
 
+/** `secrets.store` of a config's text as written, defaulting to auto. */
+function storeChoiceOf(text: string): string {
+  try {
+    const store = (JSON.parse(text) as { secrets?: { store?: unknown } }).secrets?.store;
+    return typeof store === "string" ? store : "auto";
+  } catch {
+    return "auto";
+  }
+}
+
 export async function initCommand(
   args: readonly string[],
   out: Output,
@@ -164,6 +174,7 @@ export async function initCommand(
     raw.version = 1;
     // Validate everything before touching the disk.
     const config = parseConfig(raw);
+    const previousStore = existing === undefined ? undefined : storeChoiceOf(existing);
 
     await mkdir(paths.home, { recursive: true, mode: 0o700 });
     const homeInfo = await lstat(paths.home);
@@ -199,6 +210,11 @@ export async function initCommand(
 
     out.stdout(`wrote ${paths.config} (owner ${lastFour(config.owner.phoneNumber)}, quiet hours in ${zone})`);
     out.stdout(`secret store: ${secrets.kind}`);
+    if (previousStore !== undefined && previousStore !== config.secrets.store) {
+      out.stdout(
+        `note: the old ${previousStore} store still holds Hotline's earlier secrets; remove them there if you no longer use it`,
+      );
+    }
     for (const label of stored) out.stdout(`stored: ${label}`);
     for (const label of missing) out.stdout(`not set: ${label} (run hotline init --force again to add it)`);
     out.stdout(

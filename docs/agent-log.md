@@ -1539,6 +1539,14 @@ Template:
     `hotline` or it is this run's `--command`.
   - The test-call cooldown fails closed on an untrusted or unreadable stamp.
   - 1304 tests in 53 files pass (`scripts/ci/run.sh build` and `test`).
+- Staff review fixes on PR #45 (head 7182d3c):
+  - Hook ownership is exact: `hotline`, this run's `--command`, an absolute
+    path to a file named `hotline`, or `node .../apps/cli/dist/main.js`.
+    Other wrappers need the same `--command` again; `doctor` takes it too.
+  - `install` checks for a concurrent write before writing the backup, so
+    an aborted run leaves no stray backup.
+  - `init --force` names the old store when `--secret-store` changes, and
+    the docs say the `HOTLINE_*` variables are for scripted setup only.
 - Open issues or follow-ups:
   - `doctor` does not show the monthly cost estimate from plan section 8 yet.
   - Move the ElevenLabs management client into `packages/providers` once

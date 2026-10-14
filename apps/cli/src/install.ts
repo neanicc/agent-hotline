@@ -223,6 +223,14 @@ export async function installCommand(
       changed++;
       out.stdout(lineDiff(path, current?.text ?? "", next, redactConfigLine));
       if (dryRun) continue;
+      // Claude Code rewrites ~/.claude.json while it runs: never replace a newer
+      // write. Checked before the backup, so an aborted run leaves no backup behind.
+      const latest = await readConfigFile(path);
+      if (latest?.text !== current?.text) {
+        throw new AgentConfigError(
+          `${path} changed while installing; nothing was written to it, run this again`,
+        );
+      }
       if (current !== undefined) {
         const backup = `${path}.hotline-backup-${stamp(now)}`;
         // "wx": never overwrite an earlier backup. Backups can hold private
@@ -231,13 +239,6 @@ export async function installCommand(
         out.stdout(`backup: ${backup}`);
       } else {
         await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-      }
-      // Claude Code rewrites ~/.claude.json while it runs: never replace a newer write.
-      const latest = await readConfigFile(path);
-      if (latest?.text !== current?.text) {
-        throw new AgentConfigError(
-          `${path} changed while installing; nothing was written to it, run this again`,
-        );
       }
       await writeAtomically(path, next, current?.mode ?? 0o600);
       out.stdout(`${remove ? "removed Hotline from" : "wrote"}: ${path}`);

@@ -104,14 +104,26 @@ describe("editHooks", () => {
     expect(editHooks(undefined, "s", "claude", "hotline", true)).toBeUndefined();
   });
 
-  it("owns hooks it wrote with any launcher, and only the exact hook shape", () => {
-    const wrapper = editHooks(undefined, "s", "claude", "/opt/bin/hotline-wrapper", false);
-    expect(readHooks(wrapper, "s", "claude")).toHaveLength(2);
+  it("owns hooks from hotline, a path named hotline, or the same --command, in the exact hook shape", () => {
+    const installed = editHooks(undefined, "s", "claude", "/usr/local/bin/hotline", false);
+    expect(readHooks(installed, "s", "claude")).toHaveLength(2);
     // A later default install replaces them; a default uninstall removes them.
-    const replaced = JSON.parse(editHooks(wrapper, "s", "claude", "hotline", false) ?? "");
+    const replaced = JSON.parse(editHooks(installed, "s", "claude", "hotline", false) ?? "");
     expect(replaced.hooks.Stop).toHaveLength(1);
     expect(replaced.hooks.Stop[0].hooks[0].command).toBe("hotline hook claude stop --wait-seconds 1830");
-    expect(editHooks(wrapper, "s", "claude", "hotline", true)).toBe("{}\n");
+    expect(editHooks(installed, "s", "claude", "hotline", true)).toBe("{}\n");
+    // A wrapper with another name is Hotline's only when the same --command is given.
+    const wrapper = editHooks(undefined, "s", "claude", "/opt/bin/hotline-wrapper", false);
+    expect(readHooks(wrapper, "s", "claude")).toEqual([]);
+    expect(readHooks(wrapper, "s", "claude", "/opt/bin/hotline-wrapper")).toHaveLength(2);
+    expect(editHooks(wrapper, "s", "claude", "/opt/bin/hotline-wrapper", true)).toBe("{}\n");
+    const legacy = JSON.stringify({
+      hooks: {
+        Stop: [{ hooks: [{ type: "command", command: "node /x/apps/cli/dist/main.js hook claude stop" }] }],
+      },
+    });
+    expect(readHooks(legacy, "s", "claude")).toHaveLength(1);
+    expect(readHooks(legacy.replace("apps/cli/dist/main.js", "other.js"), "s", "claude")).toEqual([]);
     const notOurs = JSON.stringify({
       hooks: {
         Stop: [

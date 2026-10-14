@@ -173,6 +173,24 @@ describe("hotline doctor", () => {
     );
   });
 
+  it("finds hooks installed with a wrapper --command when given the same --command", async () => {
+    await writeSetup();
+    const wrapper = "/opt/bin/agent-phone";
+    const installContext = testContext(setup, { fetch: fakeFetch() });
+    for (const agent of ["claude", "codex"]) {
+      const installed = await cli(
+        ["install", agent, "--home", setup.home, "--command", wrapper],
+        installContext,
+      );
+      expect(installed.code).toBe(0);
+    }
+    const without = await cli(["doctor", "--home", setup.home], context());
+    expect(lines(without.stdout, "WARN").join("\n")).toContain("permission hook missing");
+    const withCommand = await cli(["doctor", "--home", setup.home, "--command", wrapper], context());
+    expect(withCommand.stdout).toContain("permission hook waits 1830s, timeout 1900s");
+    expect(lines(withCommand.stdout, "WARN")).toEqual([]);
+  });
+
   it("fails a hook whose wait is not below its timeout, and a short Codex tool timeout", async () => {
     await writeSetup();
     await mkdir(join(setup.home, ".codex"), { recursive: true });

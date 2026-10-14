@@ -178,6 +178,22 @@ describe("hotline init", () => {
     expect(await readFile(configPath, "utf8")).toBe('{"voice": {"agentId": "agent_fake_1"');
   });
 
+  it("names the old store when --force switches secret stores", async () => {
+    const flags = FLAGS.filter((flag) => flag !== "file" && flag !== "--secret-store");
+    const security = fakeSecurity();
+    const first = await cli(
+      ["init", ...flags, "--secret-store", "keychain"],
+      testContext(setup, { env: env(SECRETS), platform: "darwin", exec: security }),
+    );
+    expect(first.code).toBe(0);
+    const switched = await cli(
+      ["init", "--non-interactive", "--force", "--secret-store", "file"],
+      testContext(setup, { env: env(SECRETS) }),
+    );
+    expect(switched.code).toBe(0);
+    expect(switched.stdout).toContain("the old keychain store still holds Hotline's earlier secrets");
+  });
+
   it("validates settings before writing anything", async () => {
     const result = await cli(
       ["init", ...FLAGS.map((flag) => (flag === "+15555550100" ? "5555550100" : flag))],
