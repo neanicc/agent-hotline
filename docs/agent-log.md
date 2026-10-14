@@ -102,8 +102,20 @@ Template:
   and the PIN is stored only as a scrypt hash. It does mean an agent could misuse
   the provider keys, by placing calls or texts or forging provider webhooks.
   Documented in `docs/contracts.md`.
+- Review fixes (staff review and Greptile on the PR): `answerProblem` now takes
+  the daemon's clock reading and rejects an answer for an ask that is not
+  `pending` or `in-flight`, or one given or received at or after `expiresAt`, so a
+  late answer cannot resolve an ask that already returned "no answer". The PIN
+  hash's scrypt cost is capped (log2 N 15–20, r ≤ 16, p ≤ 4) and
+  `pinScryptMaxmem` states the `maxmem` the verifier needs. `ownerExcerpt` and
+  free-text decisions must not be blank. Codex `permission_mode` is any string, so
+  a new Codex mode does not silently disable Hotline. `FileSecretStore` queues
+  `set` and `delete` per path within the process. Declined: Greptile's report that
+  a shared `HOTLINE_HOME` is accepted; every read and write already checks the
+  directory and refuses one with group or other bits.
 - Evidence (automated, worktree, Node 22.23.1 and 24.11.0): `run.sh setup`,
-  `build` and `test` pass, with 106 tests in 12 files. Tests use temporary
+  `build` and `test` pass, with 106 tests in 12 files (117 after the review
+  fixes, Node 24.11.0 locally; CI covers Node 22). Tests use temporary
   directories and a fake `security`. `nodeExec` is exercised only by running Node
   itself. No scenario suite exists yet (HL-12). No real agent or live call evidence
   applies.

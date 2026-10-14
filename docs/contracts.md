@@ -58,17 +58,26 @@ An answer is recorded only from the owner's own words or keypresses.
 | `askId` | id | |
 | `decision` | Decision | See below |
 | `channel` | `voice` \| `sms` | |
-| `ownerExcerpt` | 1–2000 chars | The owner's words, verbatim. Required: no excerpt, no decision |
+| `ownerExcerpt` | 1–2000 chars, not blank | The owner's words, verbatim and untrimmed. Required: no excerpt, no decision |
 | `sourceId` | id | Call (conversation id or call SID) or message SID that carried it |
-| `confirmation` | `none` \| `pin` \| `text`, default `none` | How the owner proved it was them beyond caller ID |
+| `confirmation` | `none` \| `pin` \| `text`, default `none` | How the owner proved it was them beyond caller ID. The daemon sets `pin` or `text` only from its own check (a PIN verified against the stored hash, or a confirming text from the owner's number on a verified webhook), never from model, tool or agent output |
 | `answeredAt` | timestamp | |
 
 `Decision` is one of `{type: "option", option: 1..9}`, `{type: "allow"}`,
-`{type: "deny"}`, `{type: "text", text}` or `{type: "done"}`. There is
-deliberately no variant for silence, a timeout or an assumed answer.
+`{type: "deny"}`, `{type: "text", text}` (not blank) or `{type: "done"}`. There
+is deliberately no variant for silence, a timeout or an assumed answer.
 
-`answerProblem(ask, answer)` returns why an answer cannot resolve an ask, or
-`undefined`. Callers treat any problem as "no answer":
+`answerProblem(ask, answer, receivedAt)` returns why an answer cannot resolve an
+ask, or `undefined`. `receivedAt` is the daemon's injected clock reading when the
+answer arrived; core never reads the wall clock. Callers treat any problem as
+"no answer". Before looking at the decision it rejects:
+
+- an answer for a different ask;
+- an ask whose `status` is not `pending` or `in-flight` (already `answered`,
+  `expired` or `cancelled`), so a late answer cannot resolve an ask twice;
+- an answer received (`receivedAt`) or given (`answeredAt`) at or after the ask's
+  `expiresAt`, even if the stored status has not caught up yet;
+- an invalid `receivedAt`.
 
 | Ask kind | Accepted decisions |
 | --- | --- |
@@ -110,7 +119,7 @@ users can read or write (it holds the PIN hash), so it must be mode `0600`.
 | --- | --- | --- |
 | `version` | required, `1` | |
 | `owner.phoneNumber` | required | The only number Hotline calls, texts or answers |
-| `owner.pinHash` | required | `scrypt$<log2 N>$<r>$<p>$<salt>$<hash>`, base64url salt ≥ 16 bytes and hash ≥ 32 bytes, log2 N ≥ 15. Never the PIN itself |
+| `owner.pinHash` | required | `scrypt$<log2 N>$<r>$<p>$<salt>$<hash>`, base64url salt ≥ 16 bytes and hash ≥ 32 bytes, 15 ≤ log2 N ≤ 20, 1 ≤ r ≤ 16, 1 ≤ p ≤ 4. Never the PIN itself |
 | `quietHours.timeZone` | required | IANA name, such as `America/Toronto` |
 | `quietHours.start` / `end` | `22:00` / `08:00` | `HH:MM`, may wrap past midnight. Always on |
 | `quietHours.allowUrgentCalls` | `false` | |
@@ -127,6 +136,14 @@ users can read or write (it holds the PIN hash), so it must be mode `0600`.
 | `daemon.port` | 7341 | The agent API always binds 127.0.0.1 |
 | `secrets.store` | `auto` | `auto` = Keychain on macOS, file elsewhere; or `keychain`, `file` |
 | `nicknames` | `{}` | Repo folder name to spoken nickname |
+
+The PIN hash's scrypt cost is capped so a hostile or corrupt config cannot hang
+or crash the inbound-call PIN check; `parsePinHash` returns `undefined` outside
+the range, and a verifier treats that as a failed check. scrypt needs
+`128 * r * (N + p + 2)` bytes, which `pinScryptMaxmem` computes; the verifier
+passes it as `maxmem` to Node's `crypto.scrypt`, because the 32 MiB default is
+already too small at the minimum cost (`scrypt$15$8$1` needs 32 MiB plus 3 KiB).
+At the caps it is just over 2 GiB.
 
 Unknown keys are rejected. A key that looks like a credential (`token`, `secret`,
 `password`, `apiKey`, `auth`, `sid`, ...) gets a message pointing to the secret store.
@@ -147,7 +164,10 @@ fine). The daemon package implements it:
   process argument list, and read back to confirm the write. Exit 44 means "not set".
 - `FileSecretStore`: `secrets.json` in the hotline home,
   `{"version": 1, "secrets": {...}}`, written atomically with mode `0600` in a
-  `0700` directory. A file other users can access is refused.
+  `0700` directory. A file other users can access is refused. `set` and `delete`
+  are read-modify-write steps queued per file path within the process, so
+  overlapping calls do not lose each other's changes; two processes writing the
+  same file at once are not coordinated.
 - `openSecretStore` picks one from `config.secrets.store` and the platform.
 
 Both the config and the secrets file are read and written only when neither the
@@ -185,7 +205,8 @@ Inputs are parsed loosely (unknown fields kept, since agents add fields between
 releases) but require what the adapters use: `session_id`, `cwd`,
 `hook_event_name`, plus `tool_name` and `tool_input` for `PermissionRequest`, and
 `stop_hook_active` for `Stop`. Codex inputs also require `model`,
-`permission_mode` (its five documented modes), `turn_id` and a nullable
+`permission_mode` (any string: five modes are documented today, and a new one
+must not stop every payload from parsing), `turn_id` and a nullable
 `transcript_path`; Codex `Stop` has a nullable `last_assistant_message`. An
 adapter that cannot parse its input never approves: it leaves a permission
 request to the agent's own terminal prompt and lets a stopping agent stop.
