@@ -1,249 +1,232 @@
+<div align="center">
+
 # Agent Hotline
 
-Your coding agents call you on the phone when they need you.
+**Your coding agents call your phone when they need you. You answer out loud, and they keep working.**
 
-Start Claude Code or Codex on a task and walk away. When the agent has a question,
-needs a command approved, finishes, or gets stuck, your phone rings:
+[![Check](https://github.com/neanicc/agent-hotline/actions/workflows/check.yml/badge.svg?branch=main)](https://github.com/neanicc/agent-hotline/actions/workflows/check.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Node 22](https://img.shields.io/badge/node-22-339933?logo=nodedotjs&logoColor=white)
+![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%7C%20Codex-lightgrey)
+![Status: pre-release](https://img.shields.io/badge/status-pre--release-orange)
 
-> "Hey, it's Claude in agent-hotline. Tests pass, but the Twilio client needs a
-> retry policy. Want exponential backoff, or fail fast and text you?"
+[How it works](#how-it-works) · [Install](#install) · [Usage](#usage) · [Results](#results) · [Limitations](#limitations) · [Security and privacy](#security-and-privacy) · [Costs](#costs) · [Build from source](#build-from-source)
 
-You answer out loud and the agent keeps going with your answer. If you don't pick
-up, or it's quiet hours, you get a text instead and can reply to that. You can
-also call the number yourself, give your PIN, hear what every agent is doing, and
-give one of them a new instruction.
+<!--
+  TODO (after the live check, #76): replace the block below with the demo.
+  Record it with a throwaway project and made-up details only. Example:
 
-Pick any ElevenLabs voice for the caller, including a clone of your own
-([docs/voice.md](docs/voice.md)).
+  <a href="https://www.youtube.com/watch?v=VIDEO_ID">
+    <img src="docs/media/demo.gif" alt="Agent Hotline calling about a permission prompt" width="760">
+  </a>
+  <br><em>▶ Watch the full demo</em>
+-->
+<table><tr><td align="center" width="760">
+<br>
+<b>Demo video coming soon</b><br>
+<sub>It'll show Claude Code phoning about a permission prompt and getting a spoken yes.</sub>
+<br><br>
+</td></tr></table>
 
-> Status: pre-alpha, Tier 1 in progress. Outbound calls, texts, permission
-> approvals, away mode, the inbound status line, the installer and packaging are
-> built and tested against fake providers, and the scenario suite runs every
-> flow end to end against them. The security pass (HL-13) is still open, and no
-> live call has been recorded yet ([docs/live-check.md](docs/live-check.md)). Progress:
-> [plan section 9](docs/plan.md#9-tickets).
+</div>
 
-## What you need
+---
 
-- A Mac that stays awake while you are away, with Node 22 (see
-  [.node-version](.node-version)) and Corepack.
-- Claude Code and/or Codex CLI.
-- For real calls and texts, accounts **you** set up and pay for: Twilio (upgraded
-  from trial, with a Canadian number), ElevenLabs (Starter plan or above, for
-  Agents and voice cloning), and a tunnel with a fixed URL (an ngrok free static
-  domain, or a Cloudflare named tunnel). Hotline never creates these accounts.
+You start Claude Code or Codex on a task and walk away. Twenty minutes later it hits a permission prompt, or a question only you can answer, and it sits there until you come back.
 
-You can try everything except the phone itself with the fake providers: nothing
-rings, nothing is sent, and no account is needed. That is also all CI and the
-test suite ever use. Nothing in this repository, its tests or its CI places a real
-call or text, or holds a real credential.
+Agent Hotline rings your phone instead:
 
-## Setup
+> "Hey, it's Claude in agent-hotline. It wants to run `pnpm test` in demo-app. Should I let it?"
 
-Hotline is not published to npm. Build the `hotline` command from a checkout:
+You answer the way you'd answer a person. The agent gets your answer and carries on. If you don't pick up, or it's quiet hours, you get a text and can reply to that. You can also call the number yourself, give your PIN, hear what every agent is doing, and give one of them a new instruction.
 
-```sh
-corepack enable
-pnpm install --frozen-lockfile
-pnpm run package          # bundles the CLI into dist/hotline (gitignored)
-ln -s "$PWD/dist/hotline/bin/hotline" ~/.local/bin/hotline   # any folder on your PATH
-hotline --version
-```
+> [!IMPORTANT]
+> **A phone line that can steer coding agents is a remote control for your machine.** Hotline only takes answers from your own number, checks every webhook, confirms each decision with Twilio or ElevenLabs before it counts, and treats silence as no. It is pre-release and nobody has run it on a live call yet ([live check](#live-check)).
 
-`dist/hotline` runs with plain Node and needs no `node_modules`; you can also
-copy the folder elsewhere and link its `bin/hotline`. If `hotline` is not on the
-`PATH` your agents start with, give `hotline install` the launcher's absolute path
-with `--command`.
+## Features
 
-Then, in order ([docs/install.md](docs/install.md) has every flag and check).
-`init` asks for your number, PIN and credentials; the tunnel URL, the Twilio
-number and its ElevenLabs phone-number id (**Phone Numbers** in ElevenLabs) have
-no prompt, so pass them as flags:
-
-```sh
-hotline init --public-url https://<your-tunnel-domain> \
-  --sms-from <your Twilio number> --agent-phone-number-id <ElevenLabs id>
-hotline voice apply             # create the ElevenLabs agent and its tools
-hotline install claude          # and/or: hotline install codex (backup + diff)
-hotline daemon                  # in its own terminal; start your tunnel too
-hotline doctor                  # until there are no FAIL lines
-hotline test-call               # rings your phone once
-hotline away on                 # let the hooks phone you
-```
-
-To try it without accounts, run `hotline init --voice-provider fake --sms-provider fake`
-and skip `voice apply`; `test-call` then rings nothing. A walkthrough for a screen
-recording is in [docs/demo.md](docs/demo.md).
+| | |
+| --- | --- |
+| **Phone calls** | ElevenLabs Agents places the call through your Twilio number and reads the agent's question aloud. Pick any ElevenLabs voice, including a clone of your own ([docs/voice.md](docs/voice.md)). |
+| **Natural answers** | Say yes, no or anything in between. Before approving anything the voice agent reads the request back in one sentence ("Allow Bash: pnpm test, for Claude in demo-app? Yes?") and waits for your yes. If it can't tell, it asks again, and after two unclear replies it texts you. |
+| **Permission prompts** | Claude Code's and Codex's own permission and Stop hooks reach you while you're away. Risky commands, such as deleting files, `git push` or anything touching credentials, also need your PIN. |
+| **Questions** | Agents ask through an MCP server (`ask_human`, `notify_human`, `check_inbox`) and get your answer back as a tool result. |
+| **Texts** | No pickup or quiet hours turns a call into a text. Reply with an option number, yes or no, free text, `call me`, `status` or `stop`. Approving a permission by text needs the one-time code in the message. |
+| **Call in** | Dial your number, give your PIN, hear every session's status, and leave an instruction for one of them. It reaches that agent at its next question or Stop. |
+| **Several agents, one call** | Asks that arrive close together share one call. Rate limits, quiet hours and loop guards are always on. |
+| **Local first** | The daemon runs on your Mac. Config, the PIN hash, transcripts and the audit log stay there. Only short, redacted summaries go to Twilio and ElevenLabs. |
 
 ## How it works
 
-1. A small daemon runs on your Mac. Agents reach it on 127.0.0.1 through an MCP
-   server (`ask_human`, `notify_human`, `check_inbox`; [docs/mcp.md](docs/mcp.md))
-   and through their own `PermissionRequest` and `Stop` hooks
-   ([docs/hooks.md](docs/hooks.md)).
-2. When an agent needs you, the daemon decides whether to call, text, or wait and
-   bundle several agents' asks into one call ([docs/daemon.md](docs/daemon.md)).
-3. ElevenLabs Agents places the call through your Twilio number and holds the
-   conversation. When you decide, the voice agent sends your answer and your exact
-   words back to the daemon through the tunnel.
-4. The daemon hands the answer to the waiting agent: a tool result, an allow or
-   deny for a permission prompt, or the next instruction in away mode.
+![Agent Hotline architecture](docs/architecture.svg)
 
-Records and config: [docs/contracts.md](docs/contracts.md). Design and tickets:
-[docs/plan.md](docs/plan.md).
+<sub>Drawn in Excalidraw. To edit it, open <a href="docs/architecture.excalidraw"><code>docs/architecture.excalidraw</code></a> or the SVG, which embeds the scene, at <a href="https://excalidraw.com">excalidraw.com</a>.</sub>
 
-## Security model
+1. **Ask.** An agent calls `ask_human`, or hits a permission prompt or a Stop while away mode is on. The MCP server or hook sends the ask to the daemon's agent API on 127.0.0.1, with a per-install token.
+2. **Decide how to reach you.** The queue batches asks from several agents, then call policy picks a call, a text or a short wait, based on quiet hours, rate limits and retries.
+3. **Call.** The orchestrator hands ElevenLabs a short, redacted summary. ElevenLabs calls you through Twilio, and its voice agent, running on Claude Haiku 4.5, reads the question, reads approvals back and asks for your PIN on risky ones.
+4. **Check.** ElevenLabs and Twilio report back through your tunnel to `/hooks/*`, the only public routes. Hotline treats each webhook as a trigger only: it fetches the real transcript or text message from the provider, then confirms the decision against your own words. Replies it can't decide go to a reply judge running on your own Claude Code or Codex login, which sees only your short reply.
+5. **Answer.** The agent gets your answer, an allow or deny, or the next instruction. No pickup, an unclear answer or a timeout comes back as "no answer", and a permission prompt is denied.
 
-A phone line that can steer coding agents is a remote control for your machine,
-so the rules are strict:
+The core library, `packages/core`, is pure and has no I/O, which is why the whole flow runs end to end against a fake phone in CI. Design notes live in [docs/plan.md](docs/plan.md), [docs/daemon.md](docs/daemon.md), [docs/hooks.md](docs/hooks.md), [docs/mcp.md](docs/mcp.md) and [docs/security.md](docs/security.md).
 
-- **Owner only.** Hotline calls and texts only your number. Calls and texts from
-  any other number get a generic rejection and learn nothing. Calling in needs
-  your PIN before any status is read; caller ID can be spoofed, the PIN cannot.
-- **Every webhook is verified.** Twilio requests are signature-checked,
-  ElevenLabs tool calls carry a shared secret, and post-call webhooks are
-  HMAC-checked. Anything else gets 403. Only `/hooks/*` is reachable through the
-  tunnel; the agent API listens on 127.0.0.1 with a per-install token.
-- **Every approval is checked with the provider.** A signed webhook is only a
-  trigger. Before your text counts, Hotline fetches it from Twilio by its id and
-  checks that Twilio really received it from your number, with the same words,
-  just now. Before a call decides anything, Hotline fetches the conversation
-  from ElevenLabs and uses ElevenLabs' transcript, never the webhook's, and a
-  PIN is only tried on a call ElevenLabs shows is going on. Anything that does
-  not match is ignored, logged as a possible forgery, and you get a text about it.
-  Text confirmation codes are stored only as salted hashes.
-- **Decisions come from your words.** An answer counts only when it comes from
-  you on the call or by text, with the transcript excerpt stored, and the daemon
-  checks it against your own words. Before approving anything, the voice agent
-  reads the request back in one short sentence and approves only on your yes to
-  that (a rule of its prompt; [voice.md](docs/voice.md#the-persona)). Text
-  written by agents (questions, command previews) is treated as data and can
-  never approve itself.
-- **Silence is not consent.** No pickup, a dropped call, an unclear answer or a
-  timeout returns "no answer": permission requests are denied and questions come
-  back unanswered. Nothing is approved by default.
-- **PIN for high risk.** Deleting files, `git push`, network installs, writes
-  outside the project and anything touching credentials need your PIN on the call
-  or a confirming text ([risk classes](docs/hooks.md#risk-classes-plan-question-6)).
-- **Redaction.** Only short summaries go to Twilio and ElevenLabs, with API keys,
-  tokens, private keys, `.env` values and passwords redacted first. Logs show
-  phone numbers as their last four digits.
-- **Your own agent judges unclear replies.** When you answer a read-back with
-  something other than a plain yes or no ("yeah, let's ship that one"), Hotline
-  sends your short spoken reply, and only that (redacted; never the request or
-  anything an agent wrote), to your own agent provider to ask whether you
-  clearly agreed: the Claude Code CLI on your login (a small model), else the
-  Codex CLI on your login, else an optional Anthropic API key. Each run is
-  isolated: an empty temporary folder, no hooks, no MCP servers, nothing
-  saved. Claude Code runs with no tools; Codex keeps its shell tool in its
-  read-only sandbox without network. A yes with a condition ("yes if the tests pass") or taken back
-  is never an approval, and an error or timeout counts as unclear. Nothing is
-  sent until you choose it: `hotline init` asks once (or takes `--judge`), and
-  `judge.backend: "off"` or no choice sends nothing; such replies are then
-  texted to you. The CLI gets only its own login and basic environment, never
-  Hotline's credentials. `hotline doctor` shows which one is used
-  ([daemon.md](docs/daemon.md), [install.md](docs/install.md)).
-- **Local first.** Config, the PIN (stored only as a scrypt hash), transcripts and
-  the audit log stay on your Mac. Credentials live in the macOS Keychain or a
-  `0600` file, never in the config or the repository.
-- **Bounded noise.** Rate limits, quiet hours and away-mode loop guards are
-  always on, and asks that arrive close together share one call.
+## Install
 
-Known limits, accepted for Tier 1:
+> [!NOTE]
+> **Hotline isn't on npm yet.** You build the `hotline` command from a checkout. You can try everything except the phone itself with the fake providers, with no accounts at all.
 
-- **Same-user processes can use your provider accounts.** Any process running
-  as you, coding agents included, can read Hotline's Keychain items, `0600`
-  files and local database. It can sign webhooks with those secrets, but a
-  forged reply or call transcript does not match what Twilio or ElevenLabs
-  recorded, so it approves nothing. With the API keys it can still call the
-  providers itself: place calls and texts on your account, read their history,
-  change the voice agent, or guess at the PIN on a call that is going on (within
-  the PIN limits). It cannot fake your inbound text or your voice in a real
-  call's transcript. Use narrowly scoped keys
-  ([contracts.md](docs/contracts.md#secrets-secretsts)).
-- **One install token for every agent.** All local sessions share the agent API
-  token, so one session can read or cancel another's asks. No agent-API route can
-  answer an ask.
-- **The risk classifier only decides proof strength.** It picks PIN-or-text versus
-  a spoken yes; it never decides whether approval is needed. It reads command text
-  and is not a sandbox; every request still needs your approval
-  ([hooks.md](docs/hooks.md#risk-classes-plan-question-6)).
+You need:
 
-## Limits
+- A Mac that stays awake while you're away, with Node 22 ([.node-version](.node-version)) and Corepack.
+- Claude Code and/or the Codex CLI.
+- For real calls, accounts you set up and pay for yourself: Twilio (upgraded from trial, with a number), ElevenLabs (Starter plan or above), and a tunnel with a fixed URL, such as an ngrok free static domain. Hotline never creates accounts.
 
-Not claimed in Tier 1 ([plan section 10](docs/plan.md#10-capability-limits)):
-recognizing your voice (caller ID plus PIN only); interrupting an agent in the
-middle of a turn (instructions arrive at its next ask or Stop hook); working while
-the Mac is asleep or offline; guaranteed text delivery; reading code aloud; agents
-other than Claude Code and Codex; more than one human.
+1. **Build the command.**
+   ```sh
+   corepack enable
+   pnpm install --frozen-lockfile
+   pnpm run package          # bundles the CLI into dist/hotline (gitignored)
+   ln -s "$PWD/dist/hotline/bin/hotline" ~/.local/bin/hotline   # any folder on your PATH
+   hotline --version
+   ```
+   `dist/hotline` runs on plain Node and needs no `node_modules`.
+2. **Set it up.** `init` asks for your number, PIN and credentials, and whether to turn on the reply judge. The tunnel URL, your Twilio number and its ElevenLabs phone-number id go in as flags.
+   ```sh
+   hotline init --public-url https://<your-tunnel-domain> \
+     --sms-from <your Twilio number> --agent-phone-number-id <ElevenLabs id>
+   hotline voice apply             # create the ElevenLabs agent and its tools
+   hotline install claude          # and/or: hotline install codex (backs up and shows a diff)
+   hotline daemon                  # in its own terminal; start your tunnel too
+   hotline doctor                  # until there are no FAIL lines
+   hotline test-call               # rings your phone once
+   ```
+3. **Turn on post-call retries in ElevenLabs.** In the agent's webhook settings, enable retries for the post-call webhook. Hotline answers 503 while a call record is still processing, and without retries that answer is lost.
+
+To try it without accounts, run `hotline init --voice-provider fake --sms-provider fake` and skip `voice apply`. [docs/install.md](docs/install.md) has every flag and check, and [docs/demo.md](docs/demo.md) is a walkthrough for a screen recording.
+
+## Usage
+
+1. **Before you walk away, run `hotline away on`.** Hooks only phone you in away mode. When you're back, `hotline away off` hands prompts back to the terminal.
+2. **When your phone rings, just talk.** Answer the question, or say yes or no to a request. For a risky command the voice agent asks for your PIN first. If it reads a request back, any clear yes approves it. A no takes effect at once.
+3. **If you miss the call, reply to the text.** Send an option number, yes or no, or free text. Approving a permission by text needs the code in the message, as in `YES 482913`. Text `call me` to get a call now, `status` for a summary, or `stop` to stop the texts.
+4. **To check in, call your Hotline number.** Give your PIN, hear each session's status, and say something like "for session two, run the tests". The agent reads it back, you confirm, and the instruction reaches that agent at its next question or Stop.
+
+<details>
+<summary><b>Settings at a glance</b></summary>
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| Rate limits | 4 calls an hour, 20 a day | Extra asks wait for a slot or go by text |
+| Quiet hours | Set in `init` | Asks become texts unless one is marked urgent and urgent calls are allowed |
+| Ask timeout | 30 minutes | When it passes, the agent gets "no answer" |
+| Away-mode loop guard | 5 Stops in a row | At the cap the agent stops, and you get a notice |
+| Voice model | Claude Haiku 4.5 | `voice.llm` switches to Claude Sonnet 4.6 or 5.5 |
+| Reply judge | Off until you choose | `judge.backend`: `auto`, `claude-code`, `codex`, `anthropic-api` or `off` |
+
+[docs/contracts.md](docs/contracts.md) has the full config reference.
+
+</details>
+
+## Results
+
+### Scenario suite
+
+`bash scripts/ci/run.sh eval --local` runs the real daemon, MCP server and hook adapters against a fake phone, fake texts and scripted humans with a fake clock, then scores the run against [eval/thresholds.toml](eval/thresholds.toml). On `main` at `8b25518`, every required scenario passes, in CI on Ubuntu and macOS and locally:
+
+| Area | Scenarios | Result |
+| --- | --- | ---: |
+| Answers | answered by voice, answered by text, two agents on one call | **3/3** |
+| Permissions | approved, denied, high risk needs the PIN, agent text can't approve itself | **4/4** |
+| Silence and fallbacks | silence denies, unclear answer denies, no pickup falls back to text, quiet hours texts instead, rate limit holds calls | **5/5** |
+| Away mode | continues Claude Code, continues Codex, stop loop capped | **3/3** |
+| Inbound line | status with PIN, wrong PIN rejected, other numbers rejected, instruction delivered | **4/4** |
+| Webhooks and privacy | unsigned webhook rejected, replayed webhook rejected, secrets redacted before sending | **3/3** |
+
+A self-test proves the suite can fail. A deliberately broken build that approves everything has to fail `silence-denies`, `high-risk-needs-pin` and `agent-text-cannot-self-approve`, and it does. [docs/eval.md](docs/eval.md) defines each one. A fake phone is still a fake phone, so none of this proves a real call works.
+
+### Live check
+
+<!--
+  TODO (after the live check, #76): fill in this table from docs/live-check.md.
+  Keep recordings, transcripts and phone numbers out of Git.
+-->
+
+| Check | Result |
+| --- | --- |
+| Tested on | _pending: Mac, Claude Code and Codex versions_ |
+| A real Claude Code question answered by voice | _pending_ |
+| A real Codex permission approved, and another denied, by voice | _pending_ |
+| Inbound call with the PIN reads status; another number is rejected | _pending_ |
+| Text fallback and `YES <code>` approval | _pending_ |
+| Voice turn latency on Claude Haiku 4.5 | _pending_ |
+
+[docs/live-check.md](docs/live-check.md) has the full protocol.
+
+## Limitations
+
+- **Nobody has run it on a real phone yet.** Every test uses fakes. The live check above tracks this.
+- **Strict approvals can miss.** When a reply can't be confirmed from the transcript, Hotline texts you rather than approve. Expect some misses until the live check measures the rate. The fallback word lists are English only.
+- **Instructions wait for a turn to end.** An instruction reaches an agent at its next question or Stop, never mid-turn.
+- **The Mac has to be awake and online.** There's no hosted relay.
+- **It knows you by caller ID and your PIN, not by your voice.**
+- **Two agents only, one human.** Claude Code and Codex are supported. Texts aren't guaranteed to arrive.
+
+## Security and privacy
+
+- **Owner only.** Hotline calls and texts only your number. Anyone else who calls or texts gets a generic reply and learns nothing. Calling in needs your PIN before anything is read out, because caller ID can be faked and the PIN can't.
+- **Every webhook is checked twice.** Twilio requests are signature-checked, ElevenLabs tool calls carry a shared secret and post-call webhooks are HMAC-checked; anything else gets 403. Then, before a text or call can decide anything, Hotline fetches the real record from Twilio or ElevenLabs and uses that. A forged webhook has nothing real behind it, so it approves nothing.
+- **Decisions come from your words.** An answer counts only from you on the call or by text, checked against the transcript, with the excerpt stored. Text an agent wrote, such as a question or a command preview, is treated as data and can't approve itself.
+- **Silence is no.** No pickup, a dropped call, an unclear answer or a timeout returns "no answer", and a permission prompt is denied.
+- **Minimum data to third parties.** Twilio and ElevenLabs get short summaries with API keys, tokens, private keys, `.env` values and passwords redacted first. The reply judge, if you turn it on, gets only your short reply, never the request. It runs on your own Claude Code or Codex login, never an API key, unless you set `judge.backend: anthropic-api`.
+- **Local first.** The agent API listens on 127.0.0.1 with a per-install token, and only `/hooks/*` is reachable through the tunnel. Credentials live in the macOS Keychain or a `0600` file, and the PIN only as a scrypt hash.
+
+<details>
+<summary><b>Known limits, accepted for Tier 1</b></summary>
+
+- **Processes running as you can read Hotline's secrets.** That includes coding agents. Forged webhooks don't work, because Hotline checks the provider's own record, but a process with your provider API keys can still use your accounts directly. Use narrowly scoped keys ([contracts.md](docs/contracts.md#secrets-secretsts)).
+- **One install token for every agent.** Local sessions can read or cancel each other's asks. None of them can answer one.
+- **The risk classifier only sets how much proof is needed.** It picks PIN-or-code versus a spoken yes. Every request still needs your approval, and it reads command text rather than sandboxing it ([hooks.md](docs/hooks.md#risk-classes-plan-question-6)).
+
+[docs/security.md](docs/security.md) has the threat model, where each rule is enforced and tested, and the full list of accepted risks.
+
+</details>
 
 ## Costs
 
-Planning estimate ([plan section 8](docs/plan.md#8-security-privacy-and-cost)):
-roughly **USD 10–15 a month** for about 60 minutes of calls and 200 texts; the
-itemised rates below land at about $12–14. They are assumptions taken from the
-public Twilio (Canada) and ElevenLabs pricing pages on 2026-10-14 (in dollars as
-listed), not quotes; check current pricing before you sign up.
+About **USD 12–14 a month** for 60 minutes of calls and 200 texts. These rates come from the public Twilio (Canada) and ElevenLabs pricing pages on 2026-10-14. They're assumptions, not quotes.
 
 | Item | Assumed rate | 60 min + 200 texts |
 | --- | --- | --- |
-| Twilio Canadian local number | $1.15 / month | $1.15 |
-| Twilio call leg to a Canadian number | $0.014 / min | $0.84 |
-| Twilio texts (Canada), plus carrier fees | $0.0083 + about $0.007 / segment | about $3 |
+| Twilio local number | $1.15 / month | $1.15 |
+| Twilio call leg | $0.014 / min | $0.84 |
+| Twilio texts, plus carrier fees | about $0.015 / segment | about $3 |
 | ElevenLabs Starter (Agents, voice cloning) | $6 / month, 75 call minutes included, then $0.08 / min | $6 |
-| LLM for the voice agent: Claude Haiku 4.5 (billed by ElevenLabs per token) | $1 / $5 per million input / output tokens; `doctor` assumes $0.03 / min | about $2 |
-| **Total** | | **about $12–14** |
+| Voice agent model, Claude Haiku 4.5, billed by ElevenLabs | $1 / $5 per million input / output tokens | about $2 |
+| Reply judge on your Claude Code or Codex plan | no extra charge | $0 |
 
-The voice agent runs on Claude Haiku 4.5, the cheapest documented Claude model
-on ElevenLabs: it only talks and calls Hotline's tools, and the daemon checks
-every decision against the call transcript, so a cheaper model costs friction,
-never safety. `voice.llm` switches to Claude Sonnet 5.5 or Sonnet 4.6, at about
-two or three times the LLM cost ([voice.md](docs/voice.md#the-model)).
+The voice agent runs on Haiku, the cheapest Claude model ElevenLabs offers, because it only talks and calls Hotline's tools while the daemon checks every decision. Rate limits cap the worst case, and `hotline doctor` prints a monthly estimate from your own last 30 days ([install.md](docs/install.md#monthly-cost-estimate)).
 
-Calls you place to the hotline add Twilio's inbound rate. Rate limits (4 calls an
-hour and 20 a day by default) cap the worst case.
-
-`hotline doctor` ends with an estimated monthly cost: it reads the last 30 days of
-calls, call minutes and texts from the local store and prices them with these
-rates, without any network call. The rates above are its defaults, defined once
-in code as `DEFAULT_COST_RATES` ([packages/core/src/config.ts](packages/core/src/config.ts));
-set your own under `costs` in `config.json`
-([contracts](docs/contracts.md#config-configts), [install guide](docs/install.md#hotline-doctor)).
-
-## Development
+## Build from source
 
 ```sh
-pnpm run build        # tsc project build into each package's dist/
-pnpm run typecheck    # build plus a typecheck of every test file
+pnpm run build        # tsc project build
+pnpm run typecheck    # build plus a typecheck of every test
 pnpm run test         # Vitest, all packages, fakes only
-pnpm run lint         # Biome (`pnpm run format` fixes)
-pnpm run package      # dist/hotline; scripts/ci/run.sh package also runs it from a temp folder
-pnpm run hotline --version   # the unbundled CLI from apps/cli/dist
-pnpm run eval -- --mode local   # the scenario suite against the built tree (docs/eval.md)
+pnpm run lint         # Biome (pnpm run format fixes)
+pnpm run package      # dist/hotline, plus a smoke run from a temp folder in CI
+bash scripts/ci/run.sh eval --local   # the scenario suite
 ```
 
-CI calls the same steps through [scripts/ci/run.sh](scripts/ci/run.sh) (`setup`,
-`build`, `test`, `package`, `eval`); see [docs/ci.md](docs/ci.md) and, for the
-scenario suite, [docs/eval.md](docs/eval.md).
+CI calls the same steps through [scripts/ci/run.sh](scripts/ci/run.sh) on Ubuntu and macOS ([docs/ci.md](docs/ci.md)). Nothing in this repository, its tests or its CI places a real call or text, or holds a real credential.
 
 | Path | Holds |
 | --- | --- |
-| `packages/core` | Contracts, config, ask queue, call policy, answer parsing (pure) |
-| `packages/daemon` | Local agent API, webhook routes, call orchestration, store, audit log |
-| `packages/providers` | Voice and SMS provider interfaces, real clients and fakes |
+| `packages/core` | Contracts, config, ask queue, call policy, reply parsing, risk classes (pure) |
+| `packages/daemon` | Agent API, webhook routes, call orchestration, store, audit log, reply judge |
+| `packages/providers` | Voice and SMS provider interfaces, Twilio and ElevenLabs clients, fakes |
 | `packages/agents` | MCP server and hook adapters for Claude Code and Codex |
 | `apps/cli` | The `hotline` command |
-| `eval` | The scenario suite: runner, scripted humans, self-test; human-owned `thresholds.toml` |
-
-## How this repository is built
-
-Most code here is written by Claude Code agents working through GitHub issues and
-pull requests. Each PR gets CI on Linux and macOS, a scenario suite that runs
-every flow against a fake phone, a Claude staff review against
-[AGENTS.md](AGENTS.md), and a Greptile review. A merge gate decides what lands; a
-human owns the thresholds, CI workflows and every real phone call. See
-[docs/autopilot.md](docs/autopilot.md) for the workflow and
-[docs/agent-log.md](docs/agent-log.md) for the decision history.
+| `eval` | The scenario suite: runner, scripted humans, self-test |
 
 ## License
 

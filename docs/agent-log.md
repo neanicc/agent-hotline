@@ -3585,3 +3585,20 @@ Template:
   requests stays the open follow-up from HL-13b. (P3) `runWaits`' doc
   comment already says the double count is deliberate; (P3) the whitespace
   rule is in `docs/daemon.md` and `docs/security.md`'s verify-by-pull row.
+
+## 2026-10-14 — README reorganized with an architecture diagram
+
+- Owner request: give the README the same shape as Stream Privacy Guard's,
+  with an Excalidraw system diagram and a walkthrough of it.
+- `docs/architecture.excalidraw` is the editable scene and
+  `docs/architecture.svg` its export with the scene embedded, so either file
+  opens at excalidraw.com. The diagram shows the agents, the daemon's parts,
+  the owner's ElevenLabs and Twilio accounts, the phone, the verify-by-pull
+  fetch and what stays local.
+- The README now leads with what Hotline does and the security callout, then
+  features, the diagram with a five-step walkthrough, install, usage, results,
+  limitations, security and privacy, costs and build from source. Facts are
+  unchanged from the previous README or checked against the code: rate limits
+  4 an hour and 20 a day, a 30-minute ask timeout, 5 away-mode continuations,
+  the voice models in `VOICE_LLMS`, and the self-test's three must-fail
+  scenarios. The demo video and live-check table stay pending until #76.
