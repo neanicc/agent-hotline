@@ -17,8 +17,10 @@ import {
   answerProblem,
   CallRecord,
   Id,
+  NoAnswerReason,
   Session,
 } from "@hotline/core";
+import { z } from "zod";
 import { privatePathProblem } from "./private-file.js";
 import { createRedactor, type Redactor } from "./redact.js";
 
@@ -86,7 +88,28 @@ export const MIGRATIONS: readonly string[] = [
   CREATE INDEX audit_by_session ON audit (session_id) WHERE session_id IS NOT NULL;
   CREATE INDEX audit_by_call ON audit (call_id) WHERE call_id IS NOT NULL;
   `,
+  // Call orchestration (HL-09): why an ask ended without an answer, the
+  // orchestrator's saved state, and the owner's texts already handled.
+  `
+  ALTER TABLE asks ADD COLUMN end_reason TEXT;
+  CREATE TABLE daemon_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  ) STRICT;
+  CREATE TABLE inbound_messages (
+    message_sid TEXT PRIMARY KEY,
+    handled_at TEXT NOT NULL,
+    finished INTEGER NOT NULL DEFAULT 0
+  ) STRICT;
+  `,
 ];
+
+/**
+ * Why an ask ended without an answer, stored next to its final status: a
+ * `NoAnswerReason`, or `delivered` for a notification whose text went out.
+ */
+export const AskEndReason = z.enum([...NoAnswerReason.options, "delivered"]);
+export type AskEndReason = z.infer<typeof AskEndReason>;
 
 /**
  * The ask, session and call an audit entry refers to. Validated against core's
@@ -200,9 +223,20 @@ interface Schema<T> {
 /** Told the id of an ask whose status changed, after the change is committed. */
 export type AskChangeListener = (askId: string) => void;
 
+/**
+ * How long a finished owner text's SID is remembered. Twilio signatures carry no
+ * timestamp, so a captured, validly signed reply can be replayed at any time: the
+ * SID memory must outlive any realistic replay. Rows are tiny.
+ */
+export const INBOUND_MESSAGE_RETENTION_MS = 400 * 24 * 60 * 60 * 1000;
+
+/** Told about each ask `addAsk` stored, after the insert. */
+export type AskAddedListener = (ask: Ask) => void;
+
 export class HotlineStore {
   private closed = false;
   private readonly askListeners = new Set<AskChangeListener>();
+  private readonly addListeners = new Set<AskAddedListener>();
 
   constructor(
     private readonly db: DatabaseSync,
@@ -281,6 +315,24 @@ export class HotlineStore {
           JSON.stringify(record),
         ),
     );
+    for (const listener of [...this.addListeners]) {
+      try {
+        listener(record);
+      } catch {
+        // A listener's failure must not undo or hide a committed write.
+      }
+    }
+  }
+
+  /**
+   * Calls `listener` with each ask `addAsk` stores, after the insert. Returns a
+   * function that stops listening. A listener that throws affects nothing else.
+   */
+  onAskAdded(listener: AskAddedListener): () => void {
+    this.addListeners.add(listener);
+    return () => {
+      this.addListeners.delete(listener);
+    };
   }
 
   getAsk(id: string): Ask | undefined {
@@ -355,6 +407,38 @@ export class HotlineStore {
     return changed;
   }
 
+  /**
+   * Ends an ask that is still open with `status` and records why. Returns true
+   * when it changed the status. An ask that is already `expired` or `cancelled`
+   * without a reason (the agent API expired it a moment earlier) gets the reason;
+   * nothing else changes a final ask.
+   */
+  closeAsk(id: string, status: "expired" | "cancelled", reason: AskEndReason): boolean {
+    const valid = AskEndReason.parse(reason);
+    const changed = this.transaction(() => {
+      const ask = this.getAsk(id);
+      if (ask === undefined) return false;
+      if (ask.status === "pending" || ask.status === "in-flight") {
+        this.writeAskStatus({ ...ask, status });
+        this.db.prepare("UPDATE asks SET end_reason = ? WHERE id = ?").run(valid, id);
+        return true;
+      }
+      if (ask.status !== "answered") {
+        this.db.prepare("UPDATE asks SET end_reason = ? WHERE id = ? AND end_reason IS NULL").run(valid, id);
+      }
+      return false;
+    });
+    if (changed) this.askChanged(id);
+    return changed;
+  }
+
+  /** Why a closed ask ended without an answer, when that was recorded. */
+  askEndReason(id: string): AskEndReason | undefined {
+    const row = this.db.prepare("SELECT end_reason FROM asks WHERE id = ?").get(id);
+    const parsed = AskEndReason.safeParse(row?.end_reason);
+    return parsed.success ? parsed.data : undefined;
+  }
+
   // Answers ----------------------------------------------------------------
 
   /**
@@ -406,6 +490,69 @@ export class HotlineStore {
       .prepare("SELECT id, record FROM calls ORDER BY started_at, id")
       .all()
       .map((row) => this.decode(CallRecord, "call", row));
+  }
+
+  // Daemon state ------------------------------------------------------------
+
+  /** A saved JSON value, such as the call orchestrator's state; undefined when none or unreadable. */
+  getState(key: string): unknown {
+    const row = this.db.prepare("SELECT value FROM daemon_state WHERE key = ?").get(key);
+    if (row === undefined) return undefined;
+    try {
+      return JSON.parse(String(row.value)) as unknown;
+    } catch {
+      return undefined;
+    }
+  }
+
+  putState(key: string, value: unknown): void {
+    this.db
+      .prepare(
+        "INSERT INTO daemon_state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+      )
+      .run(key, JSON.stringify(value));
+  }
+
+  // Inbound texts -----------------------------------------------------------
+
+  /** Whether the owner's text with this message SID was already handled, in this run or an earlier one. */
+  inboundMessageHandled(messageSid: string): boolean {
+    return (
+      this.db.prepare("SELECT 1 AS seen FROM inbound_messages WHERE message_sid = ?").get(messageSid) !==
+      undefined
+    );
+  }
+
+  /** Records the owner's text as handled, so a redelivery is never handled again. */
+  markInboundMessage(messageSid: string, at: Date): void {
+    this.db
+      .prepare("INSERT OR IGNORE INTO inbound_messages (message_sid, handled_at) VALUES (?, ?)")
+      .run(messageSid, at.toISOString());
+    // Finished messages are kept for 400 days, unfinished ones until they finish.
+    this.db
+      .prepare("DELETE FROM inbound_messages WHERE finished = 1 AND handled_at < ?")
+      .run(new Date(at.getTime() - INBOUND_MESSAGE_RETENTION_MS).toISOString());
+  }
+
+  /** When a text with this SID was first seen (claimed), if it ever was. */
+  inboundMessageFirstSeen(messageSid: string): Date | undefined {
+    const row = this.db
+      .prepare("SELECT handled_at FROM inbound_messages WHERE message_sid = ?")
+      .get(messageSid);
+    return row === undefined ? undefined : new Date(String(row.handled_at));
+  }
+
+  /** Records that a claimed text was handled to the end, whatever its outcome. */
+  finishInboundMessage(messageSid: string): void {
+    this.db.prepare("UPDATE inbound_messages SET finished = 1 WHERE message_sid = ?").run(messageSid);
+  }
+
+  /** Texts that were claimed but never finished: the daemon stopped part way through them. */
+  unfinishedInboundMessages(): string[] {
+    return this.db
+      .prepare("SELECT message_sid FROM inbound_messages WHERE finished = 0 ORDER BY handled_at, message_sid")
+      .all()
+      .map((row) => String(row.message_sid));
   }
 
   // Audit ------------------------------------------------------------------

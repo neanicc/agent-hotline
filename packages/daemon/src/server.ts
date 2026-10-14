@@ -324,6 +324,8 @@ export interface StartDaemonOptions {
   askTimeoutMinutes?: number;
   /** `config.nicknames`. */
   nicknames?: Readonly<Record<string, string>>;
+  /** Call orchestration's due work, run before an expired ask is read (`AgentRoutesOptions.settle`). */
+  settle?: () => Promise<void>;
   /** For tests: ids for new sessions and asks. */
   newId?: () => string;
 }
@@ -357,6 +359,7 @@ export async function startDaemon(options: StartDaemonOptions): Promise<Daemon> 
       askTimeoutMinutes: options.askTimeoutMinutes ?? DEFAULT_ASK_TIMEOUT_MINUTES,
       nicknames: options.nicknames,
       newId: options.newId,
+      settle: options.settle,
     },
   });
   const hooks = buildWebhookServer({ log: options.log, routes: options.webhookRoutes });

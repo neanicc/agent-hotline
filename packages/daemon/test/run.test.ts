@@ -70,6 +70,10 @@ async function launch(overrides: Partial<RunDaemonOptions> = {}) {
     version: "0.0.0-test",
     port: 0,
     clock: () => NOW,
+    // Providers built from the config must never reach Twilio or ElevenLabs.
+    fetch: async () => {
+      throw new Error("unexpected network request");
+    },
     onReady: ready,
     ...overrides,
   });
@@ -177,7 +181,10 @@ describe("runDaemon", () => {
     };
     const ownerSid = `SM${"1".repeat(32)}`;
     const otherSid = `SM${"2".repeat(32)}`;
-    expect((await sms(OWNER, ownerSid)).status).toBe(200);
+    const owner = await sms(OWNER, ownerSid);
+    expect(owner.status).toBe(200);
+    // Nothing was texted, so a "yes" answers nothing.
+    expect(owner.body).toContain("nothing is waiting for an answer");
     const other = await sms("+15555550199", otherSid);
     expect(other.status).toBe(200);
     expect(other.body).toContain("<Message>");
@@ -194,7 +201,7 @@ describe("runDaemon", () => {
     const db = new DatabaseSync(paths().database, { readOnly: true });
     const audit = db.prepare("SELECT event, detail FROM audit WHERE event LIKE 'sms.%' ORDER BY seq").all();
     db.close();
-    // The owner's words are not stored until orchestration (HL-09) records an answer.
+    // The audit log records the reply type, never the owner's words.
     expect(audit).toEqual([
       { event: "sms.received", detail: JSON.stringify({ messageSid: ownerSid, reply: "yes" }) },
       { event: "sms.other-sender", detail: JSON.stringify({ messageSid: otherSid }) },
@@ -223,7 +230,7 @@ describe("runDaemon", () => {
     expect(off).toMatchObject({ reason: "voice.agentId is not set" });
   });
 
-  it("serves the ElevenLabs routes with the PIN check when configured, recording answers by kind only", async () => {
+  it("serves the ElevenLabs routes with the PIN check, recording no answer for a call it did not place", async () => {
     const publicUrl = "https://hotline.example.test";
     const toolSecret = "fake-elevenlabs-tool-secret-run";
     const webhookSecret = "fake-elevenlabs-webhook-secret-run";
@@ -294,8 +301,10 @@ describe("runDaemon", () => {
     const audit = db.prepare("SELECT event, detail FROM audit WHERE event LIKE 'voice.%' ORDER BY seq").all();
     db.close();
     expect(audit).toEqual([
-      { event: "voice.answer", detail: JSON.stringify({ decision: "allow", recorded: false }) },
+      // A call Hotline did not place answers nothing, and its post-call event changes nothing.
+      { event: "voice.answer", detail: JSON.stringify({ decision: "allow", result: "not-recorded" }) },
       { event: "voice.initiation-failure", detail: JSON.stringify({ reason: "busy" }) },
+      { event: "voice.post-call-ignored", detail: JSON.stringify({ kind: "initiation-failure" }) },
       { event: "voice.pin-lockout", detail: JSON.stringify({ direction: "inbound" }) },
     ]);
     const text = lines.join("");

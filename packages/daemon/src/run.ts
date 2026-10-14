@@ -1,12 +1,20 @@
 // `hotline daemon`: load the config, take the per-home lock, open the secret
-// store and database, start both listeners, and shut down cleanly on SIGINT or
-// SIGTERM.
-import { type Config, parseSmsReply, type SecretStore } from "@hotline/core";
+// store and database, start call orchestration and both listeners, and shut
+// down cleanly on SIGINT or SIGTERM.
+import { type Config, policySettings, type SecretStore } from "@hotline/core";
+import {
+  ElevenLabsVoiceProvider,
+  type HttpFetch,
+  type SmsProvider,
+  TwilioSmsProvider,
+  type VoiceProvider,
+} from "@hotline/providers";
 import { ensureApiToken } from "./api-token.js";
 import { hotlinePaths, loadConfig } from "./config-file.js";
 import { elevenLabsRoutes } from "./elevenlabs-webhook.js";
 import { acquireDaemonLock } from "./lock.js";
 import type { LogDestination, LogLevel } from "./logger.js";
+import { CallOrchestrator } from "./orchestrator.js";
 import { PinGate, verifyPin } from "./pin.js";
 import { createRedactor, type Redactor } from "./redact.js";
 import { type Exec, openSecretStore } from "./secret-store.js";
@@ -80,7 +88,19 @@ export interface RunDaemonOptions {
   /** How long to wait for in-flight requests before giving up on a clean stop. */
   shutdownTimeoutMs?: number;
   /** Called once both listeners are up. If it throws, the daemon stops again. */
-  onReady?: (daemon: Daemon) => void;
+  onReady?: (daemon: Daemon, orchestrator: CallOrchestrator) => void;
+  /**
+   * The HTTP client the Twilio and ElevenLabs providers use. Defaults to
+   * `globalThis.fetch`; tests pass one that never reaches the network.
+   */
+  fetch?: HttpFetch;
+  // Test and scenario-suite seams. `providers` and `autoTick` must never be
+  // wired to user config, CLI flags or the environment: a substituted provider
+  // or a stopped timer would bypass the configured, owner-bound providers.
+  /** For tests and the scenario suite: providers to use instead of the configured ones. */
+  providers?: { voice?: VoiceProvider; sms?: SmsProvider };
+  /** Whether call orchestration ticks on its own timer (default true). */
+  autoTick?: boolean;
 }
 
 export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
@@ -91,67 +111,113 @@ interface WebhookSetup {
   off?: string;
 }
 
-/**
- * The Twilio SMS webhook, when the config and secret store have everything it
- * needs. Otherwise no route is registered and `/hooks/twilio/sms` stays a 403.
- * Until call orchestration (HL-09) handles replies, an owner's text is only
- * recorded in the audit log by its SID and reply type, never its words.
- */
-async function smsWebhook(
-  config: Config,
-  secrets: SecretStore,
-  redactor: Redactor,
-  store: HotlineStore,
-  clock: () => Date,
-): Promise<WebhookSetup> {
-  if (config.sms.provider !== "twilio") return { routes: [], off: "the SMS provider is fake" };
+interface TwilioSetup {
+  accountSid: string;
+  authToken: string;
+  smsNumber: string;
+}
+
+/** The Twilio number and credentials, or why texting is off. */
+async function twilioSetup(config: Config, secrets: SecretStore): Promise<TwilioSetup | string> {
+  if (config.sms.provider !== "twilio") return "the SMS provider is fake";
   const smsNumber = config.sms.fromNumber;
-  const publicUrl = config.tunnel.publicUrl;
-  if (smsNumber === undefined) return { routes: [], off: "sms.fromNumber is not set" };
-  if (publicUrl === undefined) return { routes: [], off: "tunnel.publicUrl is not set" };
+  if (smsNumber === undefined) return "sms.fromNumber is not set";
   const [accountSid, authToken] = await Promise.all([
     secrets.get("twilio.accountSid"),
     secrets.get("twilio.authToken"),
   ]);
   if (accountSid === undefined || authToken === undefined) {
-    return { routes: [], off: "the Twilio account SID or auth token is not in the secret store" };
+    return "the Twilio account SID or auth token is not in the secret store";
   }
-  redactor.addSecret(authToken);
+  return { accountSid, authToken, smsNumber };
+}
+
+/**
+ * The Twilio SMS webhook, when the config and secret store have everything it
+ * needs. Otherwise no route is registered and `/hooks/twilio/sms` stays a 403.
+ * The owner's texts go to call orchestration, once per message SID.
+ */
+function smsWebhook(
+  config: Config,
+  twilio: TwilioSetup | string,
+  redactor: Redactor,
+  store: HotlineStore,
+  orchestrator: CallOrchestrator,
+  clock: () => Date,
+): WebhookSetup {
+  if (typeof twilio === "string") return { routes: [], off: twilio };
+  const publicUrl = config.tunnel.publicUrl;
+  if (publicUrl === undefined) return { routes: [], off: "tunnel.publicUrl is not set" };
   const route = twilioSmsRoute({
-    accountSid,
-    authToken,
+    accountSid: twilio.accountSid,
+    authToken: twilio.authToken,
     publicUrl,
     ownerNumber: config.owner.phoneNumber,
-    smsNumber,
+    smsNumber: twilio.smsNumber,
     clock,
     redact: (text) => redactor.text(text),
-    onOwnerMessage: ({ messageSid, body, receivedAt }) => {
-      const reply = parseSmsReply(body);
-      store.appendAudit(
-        "sms.received",
-        { messageSid, reply: reply.type === "command" ? reply.command : reply.type },
-        receivedAt,
-      );
-      return undefined;
-    },
+    onOwnerMessage: (message) => orchestrator.ownerText(message),
     onOtherSender: (messageSid) => store.appendAudit("sms.other-sender", { messageSid }, clock()),
   });
   return { routes: [route] };
 }
 
+/** The configured SMS provider, built with the real `fetch` and the daemon's redactor, or none. */
+function smsProvider(
+  config: Config,
+  twilio: TwilioSetup | string,
+  redactor: Redactor,
+  fetch: HttpFetch,
+): SmsProvider | undefined {
+  if (typeof twilio === "string") return undefined;
+  return new TwilioSmsProvider({
+    accountSid: twilio.accountSid,
+    authToken: twilio.authToken,
+    fromNumber: twilio.smsNumber,
+    ownerNumber: config.owner.phoneNumber,
+    redact: (text) => redactor.text(text),
+    fetch,
+  });
+}
+
+/** The configured voice provider (ElevenLabs Agents), or why calling is off. */
+async function voiceProvider(
+  config: Config,
+  secrets: SecretStore,
+  redactor: Redactor,
+  fetch: HttpFetch,
+): Promise<VoiceProvider | string> {
+  if (config.voice.provider !== "elevenlabs") return "the voice provider is fake";
+  const { agentId, agentPhoneNumberId } = config.voice;
+  if (agentId === undefined || agentPhoneNumberId === undefined) {
+    return "voice.agentId or voice.agentPhoneNumberId is not set";
+  }
+  const apiKey = await secrets.get("elevenlabs.apiKey");
+  if (apiKey === undefined) return "the ElevenLabs API key is not in the secret store";
+  redactor.addSecret(apiKey);
+  return new ElevenLabsVoiceProvider({
+    apiKey,
+    agentId,
+    agentPhoneNumberId,
+    ownerNumber: config.owner.phoneNumber,
+    redact: (text) => redactor.text(text),
+    fetch,
+  });
+}
+
 /**
  * The ElevenLabs server-tool and post-call routes, when the config and secret
  * store have everything they need. Otherwise none is registered and
- * `/hooks/el/*` stays a 403. The PIN check and its limits are live; until call
- * orchestration (HL-09) and the inbound line (HL-10) take over, answers and
- * instructions are recorded in the audit log by kind only and never resolve
- * anything, and the status is not read out.
+ * `/hooks/el/*` stays a 403. Answers and post-call events go to call
+ * orchestration; until the inbound line (HL-10) takes over, instructions are
+ * recorded in the audit log by kind only and the status is not read out.
  */
 async function voiceWebhook(
   config: Config,
   secrets: SecretStore,
   redactor: Redactor,
   store: HotlineStore,
+  orchestrator: CallOrchestrator,
   clock: () => Date,
 ): Promise<WebhookSetup> {
   if (config.voice.provider !== "elevenlabs") return { routes: [], off: "the voice provider is fake" };
@@ -180,26 +246,23 @@ async function voiceWebhook(
     webhookSecret,
     agentId,
     ownerNumber: config.owner.phoneNumber,
-    // No calls are placed until call orchestration (HL-09), so every call is
-    // treated as inbound and needs the PIN.
-    placedCall: () => false,
+    // Only a call orchestration placed and still waits on is outbound; any
+    // other conversation is treated as inbound and needs the PIN.
+    placedCall: (conversationId) => orchestrator.placedCall(conversationId),
     pins,
     clock,
     redact: (text) => redactor.text(text),
     handlers: {
-      submitAnswer: ({ decision, receivedAt }) => {
-        const kind = decision === "unclear" ? "unclear" : decision.type;
-        store.appendAudit("voice.answer", { decision: kind, recorded: false }, receivedAt);
-        return "not-recorded";
-      },
+      submitAnswer: (answer) => orchestrator.submitAnswer(answer),
       getStatus: () => "Status is not available yet.",
       sendInstruction: ({ receivedAt }) => {
         store.appendAudit("voice.instruction", { queued: false }, receivedAt);
         return "unknown-session";
       },
-      postCall: (event, receivedAt) => {
+      postCall: async (event, receivedAt) => {
         const detail = event.type === "transcription" ? { status: event.status } : { reason: event.reason };
         store.appendAudit(`voice.${event.type}`, detail, receivedAt);
+        await orchestrator.postCall(event, receivedAt);
       },
     },
   });
@@ -222,6 +285,7 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
 
   let store: HotlineStore | undefined;
   let daemon: Daemon | undefined;
+  let orchestrator: CallOrchestrator | undefined;
   let shutdown: ShutdownWait | undefined;
   try {
     const secrets = openSecretStore({
@@ -234,8 +298,23 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
     const redactor = createRedactor([apiToken]);
     const log = { level: options.logLevel ?? "info", destination: options.logDestination, redactor };
     store = await openStore(paths.database, { redactor });
-    const sms = await smsWebhook(config, secrets, redactor, store, clock);
-    const voice = await voiceWebhook(config, secrets, redactor, store, clock);
+    const fetch = options.fetch ?? (globalThis.fetch as unknown as HttpFetch);
+    const twilio = await twilioSetup(config, secrets);
+    if (typeof twilio !== "string") redactor.addSecret(twilio.authToken);
+    const caller = options.providers?.voice ?? (await voiceProvider(config, secrets, redactor, fetch));
+    const texter = options.providers?.sms ?? smsProvider(config, twilio, redactor, fetch);
+    const calls = new CallOrchestrator({
+      store,
+      settings: policySettings(config),
+      clock,
+      ...(typeof caller === "string" ? {} : { voice: caller }),
+      ...(texter === undefined ? {} : { sms: texter }),
+      redact: (text) => redactor.text(text),
+      ...(options.autoTick === undefined ? {} : { autoTick: options.autoTick }),
+    });
+    orchestrator = calls;
+    const sms = smsWebhook(config, twilio, redactor, store, orchestrator, clock);
+    const voice = await voiceWebhook(config, secrets, redactor, store, orchestrator, clock);
     daemon = await startDaemon({
       apiToken,
       store,
@@ -246,9 +325,17 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
       clock,
       askTimeoutMinutes: config.policy.askTimeoutMinutes,
       nicknames: config.nicknames,
+      settle: () => calls.tick(),
     });
     if (sms.off !== undefined) daemon.log.info({ reason: sms.off }, "sms webhook off");
     if (voice.off !== undefined) daemon.log.info({ reason: voice.off }, "voice webhooks off");
+    if (typeof caller === "string") daemon.log.info({ reason: caller }, "outbound calls off");
+    if (texter === undefined) {
+      const reason = typeof twilio === "string" ? twilio : "no SMS provider was given";
+      daemon.log.info({ reason }, "outbound texts off");
+    }
+    orchestrator.attachLog(daemon.log);
+    await orchestrator.start();
     store.appendAudit(
       "daemon.started",
       { version: options.version, apiPort: daemon.apiPort, hooksPort: daemon.hooksPort },
@@ -257,9 +344,10 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
     // Listen for signals before announcing readiness, so a stop request is never missed.
     shutdown = nextShutdownSignal(options.signals);
     daemon.log.info({ apiUrl: daemon.apiUrl, hooksUrl: daemon.hooksUrl }, "hotline daemon listening");
-    options.onReady?.(daemon);
+    options.onReady?.(daemon, orchestrator);
   } catch (error) {
     shutdown?.cancel();
+    await orchestrator?.stop();
     if (daemon !== undefined) await daemon.close();
     else store?.close();
     await lock.release();
@@ -280,7 +368,14 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
   const timedOut = new Promise<true>((resolve) => {
     timer = setTimeout(() => resolve(true), timeoutMs);
   });
-  const result = await Promise.race([daemon.close().then(() => false as const), timedOut]);
+  const [orchestration, listeners] = [orchestrator, daemon];
+  const closed = (async () => {
+    // No new steps (timer, store listeners) once shutdown starts; the one in progress finishes.
+    await orchestration.stop();
+    await listeners.close();
+    return false as const;
+  })();
+  const result = await Promise.race([closed, timedOut]);
   clearTimeout(timer);
   if (result === true) {
     // The store may still be open, so keep the lock: a new daemon must not open

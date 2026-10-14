@@ -118,8 +118,18 @@ describe("smsAnswer", () => {
     expect(decision({ ask: openQuestion, body: "3" })).toEqual({ type: "text", text: "3" });
   });
 
-  it("allows a low-risk permission only on a clear yes", () => {
-    expect(decision({ ask: permission, body: "Yes" })).toEqual({ type: "allow" });
+  it("allows a low-risk permission only with its code, and denies on a clear no", () => {
+    // A bare yes names no request: replayed or meant for something else, it must not approve.
+    expect(answer({ ask: permission, body: "Yes", confirmationCode: "482913" })).toEqual({
+      outcome: "no-answer",
+      reason: "an approval by text needs the confirmation code from the text",
+    });
+    expect(answer({ ask: permission, body: "Yes" }).outcome).toBe("no-answer");
+    const result = answer({ ask: permission, body: "yes 482913", confirmationCode: "482913" });
+    expect(result.outcome === "answered" && result.answer).toMatchObject({
+      decision: { type: "allow" },
+      confirmation: "text",
+    });
     expect(decision({ ask: permission, body: "no" })).toEqual({ type: "deny" });
   });
 
@@ -145,7 +155,7 @@ describe("smsAnswer", () => {
   it("needs the confirmation code for a high-risk approval", () => {
     expect(answer({ ask: risky, body: "yes", confirmationCode: "482913" })).toEqual({
       outcome: "no-answer",
-      reason: "a high-risk approval needs the confirmation code from the text",
+      reason: "an approval by text needs the confirmation code from the text",
     });
     expect(answer({ ask: risky, body: "yes 482914", confirmationCode: "482913" }).outcome).toBe("no-answer");
     expect(answer({ ask: risky, body: "yes 4829130", confirmationCode: "482913" }).outcome).toBe("no-answer");
@@ -204,15 +214,15 @@ describe("smsAnswer", () => {
     // wrongly reads some generated text as a yes cannot also be the judge.
     const yesWords = ["yes", "y", "yeah", "yep", "yup", "approve", "approved", "allow"];
     const code = "482913";
-    const mayApprove = (body: string, risk: Ask["risk"]): boolean => {
+    const mayApprove = (body: string): boolean => {
       const words = body
         .toLowerCase()
         .replace(/\s+/g, " ")
         .trim()
         .replace(/[.!?]+$/, "")
         .trim();
-      const confirmed = yesWords.some((word) => words === `${word} ${code}`);
-      return risk === "high" ? confirmed : confirmed || yesWords.includes(words);
+      // Every approval by text needs the code, whatever the risk.
+      return yesWords.some((word) => words === `${word} ${code}`);
     };
     const pieces = [
       "yes",
@@ -241,11 +251,11 @@ describe("smsAnswer", () => {
             expect({ body, risk: target.risk, approved }).toEqual({
               body,
               risk: target.risk,
-              approved: mayApprove(body, target.risk),
+              approved: mayApprove(body),
             });
             if (!approved) continue;
             approvals++;
-            if (target.risk === "high") expect(result.answer.confirmation).toBe("text");
+            expect(result.answer.confirmation).toBe("text");
           }
         }
       }
