@@ -445,3 +445,20 @@ Template:
     SID. `docs/daemon.md` now says the Twilio webhook URL must be exactly
     `<publicUrl>/hooks/twilio/sms` (the config already refuses a `publicUrl` with
     a path).
+- Greptile fixes (three threads on #30):
+  - Webhook replies: `twilioSmsRoute` now requires a `redact` option, and a
+    reply from the owner handler is redacted and length-checked with
+    `prepareSmsText` before it reaches the TwiML, the same path outgoing texts
+    take. A reply that is empty after redaction or too long is dropped, not
+    sent. `runDaemon` passes the daemon redactor.
+  - Retries: a SID is recorded as handled only after its handler succeeds. A
+    copy that arrives while the first attempt is still running waits for it
+    and handles the message itself if that attempt fails, instead of getting a
+    200 before the work is done. A failed other-sender audit write also leaves
+    the SID unhandled.
+  - The generated "never approves" test judged results with `parseSmsReply`,
+    the parser under test. It now uses its own literal yes-word list and code
+    rule, and requires the approvals to match that list exactly.
+  - Mutation checks: the old route fails 4 of the new webhook tests; adding
+    `ok` to the parser's yes words fails the generated test, which passed
+    before.

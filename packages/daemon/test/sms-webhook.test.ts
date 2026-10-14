@@ -1,4 +1,4 @@
-import { type FormParams, twilioSignature } from "@hotline/providers";
+import { type FormParams, MAX_SMS_LENGTH, twilioSignature } from "@hotline/providers";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -28,6 +28,7 @@ let received: OwnerSms[];
 let others: string[];
 let ownerReply: string | undefined;
 let app: FastifyInstance;
+let redactor: ReturnType<typeof createRedactor>;
 let sidCounter = 0;
 
 function sid(): string {
@@ -46,6 +47,7 @@ function server(overrides: Partial<TwilioSmsRouteOptions> = {}): FastifyInstance
         ownerNumber: OWNER,
         smsNumber: SMS_NUMBER,
         clock: () => now,
+        redact: (text) => redactor.text(text),
         onOwnerMessage: (message) => {
           received.push(message);
           return ownerReply;
@@ -64,6 +66,7 @@ beforeEach(() => {
   received = [];
   others = [];
   ownerReply = undefined;
+  redactor = createRedactor([AUTH_TOKEN]);
   app = server();
 });
 
@@ -120,6 +123,11 @@ function post({
   return app.inject({ method: "POST", url, headers, payload: body ?? encode(params) });
 }
 
+/** Lets pending I/O and promise callbacks run. */
+async function ticks(count = 20) {
+  for (let i = 0; i < count; i++) await new Promise((resolve) => setImmediate(resolve));
+}
+
 const rejections = () =>
   lines
     .map((line) => JSON.parse(line) as Record<string, unknown>)
@@ -149,6 +157,39 @@ describe("POST /hooks/twilio/sms", () => {
     expect(response.body).toBe(
       '<?xml version="1.0" encoding="UTF-8"?><Response><Message>Approved &#60;&#34;Bash&#34;&#62; &#38; done</Message></Response>',
     );
+  });
+
+  it("redacts the handler's reply before it goes back to Twilio", async () => {
+    ownerReply = `Done. token=abc123def456 and ${AUTH_TOKEN} were in the output`;
+    const response = await post();
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain("<Message>");
+    expect(response.body).toContain("[REDACTED]");
+    expect(response.body).not.toContain(AUTH_TOKEN);
+    expect(response.body).not.toContain("abc123def456");
+  });
+
+  it("drops a reply that is empty after redaction or longer than one message", async () => {
+    await app.close();
+    app = server({ redact: () => "   " });
+    ownerReply = "anything";
+    const blank = await post();
+    expect([blank.statusCode, blank.body]).toEqual([
+      200,
+      '<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+    ]);
+
+    await app.close();
+    app = server();
+    ownerReply = "x".repeat(MAX_SMS_LENGTH + 1);
+    const params = message();
+    const long = await post({ params });
+    expect(long.statusCode).toBe(200);
+    expect(long.body).not.toContain("<Message>");
+    // The message itself was handled: a retry is not handled again.
+    await post({ params });
+    expect(received).toHaveLength(2);
+    expect(lines.join("")).not.toContain("xxxxxxxx");
   });
 
   it("verifies the exact public URL, including the query string", async () => {
@@ -283,6 +324,97 @@ describe("POST /hooks/twilio/sms", () => {
     fail = false;
     expect((await post({ params })).statusCode).toBe(200);
     expect(received).toHaveLength(1);
+  });
+
+  it("makes a retry wait for an attempt in progress, and handles it if that attempt fails", async () => {
+    await app.close();
+    const attempts: Array<{ resolve: (reply: string | undefined) => void; reject: (error: Error) => void }> =
+      [];
+    let started = () => {};
+    app = server({
+      onOwnerMessage: (msg) => {
+        received.push(msg);
+        started();
+        return new Promise((resolve, reject) => attempts.push({ resolve, reject }));
+      },
+    });
+    const params = message();
+    const firstStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const first = post({ params });
+    await firstStarted;
+    let retrySettled = false;
+    const retry = post({ params }).then((response) => {
+      retrySettled = true;
+      return response;
+    });
+    await ticks();
+    // The retry neither succeeds early nor runs the handler a second time.
+    expect(retrySettled).toBe(false);
+    expect(attempts).toHaveLength(1);
+
+    const retryStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    attempts[0]?.reject(new Error("orchestrator down"));
+    expect((await first).statusCode).toBe(500);
+    await retryStarted;
+    expect(attempts).toHaveLength(2);
+    attempts[1]?.resolve("Got it.");
+    const response = await retry;
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain("<Message>Got it.</Message>");
+    expect(received).toHaveLength(2);
+  });
+
+  it("answers a retry of an attempt in progress after it succeeds, without handling it again", async () => {
+    await app.close();
+    const attempts: Array<(reply: string | undefined) => void> = [];
+    let started = () => {};
+    app = server({
+      onOwnerMessage: (msg) => {
+        received.push(msg);
+        started();
+        return new Promise((resolve) => attempts.push(resolve));
+      },
+    });
+    const params = message();
+    const firstStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const first = post({ params });
+    await firstStarted;
+    const retry = post({ params });
+    await ticks();
+    attempts[0]?.("Got it.");
+    expect((await first).body).toContain("<Message>Got it.</Message>");
+    const again = await retry;
+    expect(again.statusCode).toBe(200);
+    expect(again.body).not.toContain("<Message>");
+    expect(attempts).toHaveLength(1);
+    expect(received).toHaveLength(1);
+  });
+
+  it("lets a retry through when recording another sender failed", async () => {
+    let fail = true;
+    await app.close();
+    app = server({
+      onOtherSender: (messageSid) => {
+        if (fail) throw new Error("audit write failed");
+        others.push(messageSid);
+      },
+    });
+    const params = message({ From: STRANGER });
+    expect((await post({ params })).statusCode).toBe(500);
+    fail = false;
+    const retry = await post({ params });
+    expect(retry.statusCode).toBe(200);
+    expect(retry.body).toContain(GENERIC_SMS_REPLY);
+    expect(others).toEqual([new Map(params).get("MessageSid")]);
+    // Handled now: a further copy is a duplicate.
+    expect((await post({ params })).body).not.toContain("<Message>");
+    expect(others).toHaveLength(1);
   });
 
   it("passes Twilio's opt-out type along and does not reply on top of Twilio", async () => {

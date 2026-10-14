@@ -9,11 +9,16 @@
 //   parameters, in constant time, and the account SID must be ours (`verify`);
 // - only a text from the owner's number to the Hotline number reaches
 //   `onOwnerMessage`. Anyone else gets one generic reply that reveals nothing,
-//   and a few per hour at most, so a stranger cannot run up the bill.
+//   and a few per hour at most, so a stranger cannot run up the bill;
+// - a reply to the owner is redacted before it goes back to Twilio, like every
+//   other outgoing text;
+// - a message SID counts as handled only once its handler has succeeded. A
+//   retry that arrives while the first delivery is still being handled waits
+//   for it, and handles the message itself if that first attempt failed.
 //
 // Bodies, numbers and message text are never logged; only the message SID and
 // whether the sender was the owner.
-import { type FormParams, validTwilioSignature } from "@hotline/providers";
+import { type FormParams, prepareSmsText, validTwilioSignature } from "@hotline/providers";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { WebhookRoute } from "./server.js";
 
@@ -51,7 +56,16 @@ export interface TwilioSmsRouteOptions {
   /** `config.sms.fromNumber`: the Twilio number the owner texts. */
   smsNumber: string;
   clock: () => Date;
-  /** A verified text from the owner. A returned string is sent back as the reply. */
+  /**
+   * Applied to a reply before it goes back to Twilio, such as the daemon's
+   * redactor. Required: nothing reaches Twilio unredacted.
+   */
+  redact: (text: string) => string;
+  /**
+   * A verified text from the owner. A returned string is redacted and sent back
+   * as the reply; one that is empty after redaction or longer than one message
+   * is dropped, and the owner gets no reply.
+   */
   onOwnerMessage: (message: OwnerSms) => string | undefined | Promise<string | undefined>;
   /** A verified text from any other number. It never reaches `onOwnerMessage`. */
   onOtherSender?: (messageSid: string) => void;
@@ -80,8 +94,27 @@ function formParams(request: FastifyRequest): FormParams | undefined {
 
 export function twilioSmsRoute(options: TwilioSmsRouteOptions): WebhookRoute {
   const origin = new URL(options.publicUrl).origin;
-  const seen = new Set<string>();
+  /** SIDs whose handler succeeded, oldest first. */
+  const handled = new Set<string>();
+  /** SIDs being handled now, settling when that attempt ends either way. */
+  const inFlight = new Map<string, Promise<void>>();
   let otherSenderReplies: number[] = [];
+
+  const markHandled = (messageSid: string) => {
+    handled.add(messageSid);
+    if (handled.size > SEEN_MESSAGES) handled.delete(handled.values().next().value as string);
+  };
+
+  /** The reply as it may leave the machine, or nothing. */
+  const ownerReply = (request: FastifyRequest, messageSid: string, text: string | undefined) => {
+    if (text === undefined) return undefined;
+    try {
+      return prepareSmsText(text, options.redact);
+    } catch {
+      request.log.warn({ messageSid }, "sms reply dropped: empty or too long after redaction");
+      return undefined;
+    }
+  };
 
   const mayReplyToOtherSender = (now: number): boolean => {
     otherSenderReplies = otherSenderReplies.filter((at) => now - at < HOUR_MS && at <= now);
@@ -113,38 +146,58 @@ export function twilioSmsRoute(options: TwilioSmsRouteOptions): WebhookRoute {
         request.log.warn("sms webhook without a valid message SID");
         return twiml(reply, undefined);
       }
-      if (seen.has(messageSid)) {
+      // Wait out an attempt already in progress; if it failed, this one handles the message.
+      let pending = inFlight.get(messageSid);
+      while (pending !== undefined) {
+        await pending;
+        pending = inFlight.get(messageSid);
+      }
+      if (handled.has(messageSid)) {
         request.log.info({ messageSid }, "duplicate sms ignored");
         return twiml(reply, undefined);
       }
-      seen.add(messageSid);
-      if (seen.size > SEEN_MESSAGES) seen.delete(seen.values().next().value as string);
-
-      const receivedAt = options.clock();
-      const optOutType = params.get("OptOutType") || undefined;
-      const fromOwner = params.get("From") === options.ownerNumber && params.get("To") === options.smsNumber;
-      if (!fromOwner) {
-        request.log.info({ messageSid, sender: "other" }, "sms received");
-        options.onOtherSender?.(messageSid);
-        const answer = optOutType === undefined && mayReplyToOtherSender(receivedAt.getTime());
-        return twiml(reply, answer ? GENERIC_SMS_REPLY : undefined);
-      }
-
-      request.log.info({ messageSid, sender: "owner" }, "sms received");
-      let response: string | undefined;
+      // No await between the checks above and this claim, so only one attempt runs at a time.
+      let settle = () => {};
+      inFlight.set(
+        messageSid,
+        new Promise<void>((resolve) => {
+          settle = resolve;
+        }),
+      );
       try {
-        response = await options.onOwnerMessage({
-          messageSid,
-          body: params.get("Body") ?? "",
-          receivedAt,
-          ...(optOutType === undefined ? {} : { optOutType }),
-        });
-      } catch (error) {
-        // Let a Twilio retry through: the message was not handled.
-        seen.delete(messageSid);
-        throw error;
+        const response = await handle(request, params, messageSid);
+        markHandled(messageSid);
+        return twiml(reply, response);
+      } finally {
+        inFlight.delete(messageSid);
+        settle();
       }
-      return twiml(reply, optOutType === undefined ? response : undefined);
     },
   };
+
+  /** Handles one verified message and returns the TwiML reply text, if any. Throws to leave it unhandled. */
+  async function handle(
+    request: FastifyRequest,
+    params: Map<string, string>,
+    messageSid: string,
+  ): Promise<string | undefined> {
+    const receivedAt = options.clock();
+    const optOutType = params.get("OptOutType") || undefined;
+    const fromOwner = params.get("From") === options.ownerNumber && params.get("To") === options.smsNumber;
+    if (!fromOwner) {
+      request.log.info({ messageSid, sender: "other" }, "sms received");
+      options.onOtherSender?.(messageSid);
+      const answer = optOutType === undefined && mayReplyToOtherSender(receivedAt.getTime());
+      return answer ? GENERIC_SMS_REPLY : undefined;
+    }
+
+    request.log.info({ messageSid, sender: "owner" }, "sms received");
+    const response = await options.onOwnerMessage({
+      messageSid,
+      body: params.get("Body") ?? "",
+      receivedAt,
+      ...(optOutType === undefined ? {} : { optOutType }),
+    });
+    return optOutType === undefined ? ownerReply(request, messageSid, response) : undefined;
+  }
 }

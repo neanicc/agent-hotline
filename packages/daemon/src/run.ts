@@ -122,6 +122,7 @@ async function smsWebhook(
     ownerNumber: config.owner.phoneNumber,
     smsNumber,
     clock,
+    redact: (text) => redactor.text(text),
     onOwnerMessage: ({ messageSid, body, receivedAt }) => {
       const reply = parseSmsReply(body);
       store.appendAudit(

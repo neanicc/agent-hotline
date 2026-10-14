@@ -86,10 +86,18 @@ the `twilio.accountSid` and `twilio.authToken` secrets exist. Otherwise it logs
   reaches the handler. Any other sender gets one generic reply ("Sorry, this
   number does not accept messages."), at most 5 per hour in total, and is
   recorded in the audit log by message SID only.
-- **Once per message:** the last 1000 message SIDs are remembered, so a Twilio
-  retry or a replayed request is answered with empty TwiML and not handled twice.
-  A handler failure forgets the SID so Twilio's retry can get through. Durable
-  replay protection is HL-13.
+- **Once per message:** the last 1000 successfully handled message SIDs are
+  remembered, so a Twilio retry or a replayed request is answered with empty
+  TwiML and not handled twice. A SID counts as handled only after its handler
+  succeeds: a failure (owner handler or the other-sender audit write) leaves it
+  unhandled so Twilio's retry can get through, and a copy that arrives while
+  the first is still being handled waits for that attempt, then either answers
+  with empty TwiML or, if the attempt failed, handles the message itself.
+  Durable replay protection is HL-13.
+- **Replies are redacted:** a reply the owner handler returns goes through the
+  required `redact` option (the daemon's redactor) and the SMS length check
+  before it is put in the TwiML. One that is empty after redaction or longer
+  than 1600 characters is dropped with a warning that names only the SID.
 - **Opt-out keywords:** when Twilio sends `OptOutType` (`STOP`, `START`, `HELP`)
   it has already replied, so Hotline adds no reply of its own.
 - **Logs:** the message SID and `sender: owner|other` only, never the text,
