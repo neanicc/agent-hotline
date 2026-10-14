@@ -9,9 +9,11 @@ import {
   ANTHROPIC_JUDGE_MODEL,
   ANTHROPIC_MESSAGES_URL,
   AnthropicApiJudge,
+  CLAUDE_CODE_API_BILLING_ENV,
   CLAUDE_CODE_JUDGE_MODEL,
   CLAUDE_CODE_LOGIN_ENV,
   ClaudeCodeJudge,
+  CODEX_API_BILLING_ENV,
   CODEX_LOGIN_ENV,
   CodexJudge,
   checkedVerdict,
@@ -21,9 +23,11 @@ import {
   type JudgeOutput,
   type JudgeSpawn,
   judgeChildEnv,
+  judgeCredentialSource,
   judgePrompt,
   judgeTestMode,
   judgeVoiceDecision,
+  judgeWithholds,
   nodeJudgeHost,
   parseJudgeOutput,
   type ReadAsk,
@@ -457,9 +461,127 @@ describe("the agent CLI's environment", () => {
       HOME: "/Users/owner",
       LANG: "en_CA.UTF-8",
       HTTPS_PROXY: "http://proxy.example.test:3128",
-      OPENAI_API_KEY: "sk-openai-fake-0001",
       HOTLINE_JUDGE: "1",
     });
+  });
+
+  // HL-09e: the CLIs run on the owner's plan login, never on API billing.
+  const billingEnv = {
+    ANTHROPIC_API_KEY: "sk-ant-fake-billing-0001",
+    ANTHROPIC_AUTH_TOKEN: "fake-bearer-0001",
+    ANTHROPIC_BASE_URL: "https://gateway.example.test",
+    ANTHROPIC_PROFILE: "work",
+    ANTHROPIC_FEDERATION_RULE_ID: "fake-rule",
+    ANTHROPIC_ORGANIZATION_ID: "fake-org",
+    ANTHROPIC_BEDROCK_BASE_URL: "https://bedrock.example.test",
+    CLAUDE_CODE_USE_BEDROCK: "1",
+    CLAUDE_CODE_USE_VERTEX: "1",
+    CLAUDE_CODE_USE_FOUNDRY: "1",
+    CLAUDE_CODE_SKIP_BEDROCK_AUTH: "1",
+    CLAUDE_CODE_API_KEY_HELPER_TTL_MS: "60000",
+    AWS_BEARER_TOKEN_BEDROCK: "fake-bedrock-token",
+    OPENAI_API_KEY: "sk-openai-fake-0002",
+    OPENAI_BASE_URL: "https://openai-proxy.example.test",
+    OPENAI_ORG_ID: "fake-openai-org",
+    CODEX_API_KEY: "sk-codex-fake-0001",
+    AZURE_OPENAI_API_KEY: "fake-azure-key",
+  };
+  const planEnv = {
+    PATH: "/usr/bin:/bin",
+    HOME: "/Users/owner",
+    CLAUDE_CONFIG_DIR: "/Users/owner/.claude-alt",
+    CLAUDE_CODE_OAUTH_TOKEN: "fake-subscription-token-0001",
+    CODEX_HOME: "/Users/owner/.codex-alt",
+    ...billingEnv,
+  };
+
+  it("gives claude only its plan login: no API key, token, endpoint or provider switch", async () => {
+    const host = new FakeJudgeHost({ claude: CLAUDE }, () => agreed);
+    await new ClaudeCodeJudge({ host, command: CLAUDE }).judge(["sure thing"]);
+    const [run] = host.runs;
+    expect(run?.options.inherit).toEqual(["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"]);
+    expect(judgeChildEnv(planEnv, run?.options ?? { env: {}, inherit: [] })).toEqual({
+      PATH: "/usr/bin:/bin",
+      HOME: "/Users/owner",
+      CLAUDE_CONFIG_DIR: "/Users/owner/.claude-alt",
+      CLAUDE_CODE_OAUTH_TOKEN: "fake-subscription-token-0001",
+      HOTLINE_JUDGE: "1",
+    });
+  });
+
+  it("gives codex only its ChatGPT login: no OpenAI or Codex API key or endpoint", async () => {
+    const host = new FakeJudgeHost({ codex: CODEX }, () => agreed);
+    await new CodexJudge({ host, command: CODEX }).judge(["sure thing"]);
+    const [run] = host.runs;
+    expect(run?.options.inherit).toEqual(["CODEX_HOME"]);
+    expect(judgeChildEnv(planEnv, run?.options ?? { env: {}, inherit: [] })).toEqual({
+      PATH: "/usr/bin:/bin",
+      HOME: "/Users/owner",
+      CODEX_HOME: "/Users/owner/.codex-alt",
+      HOTLINE_JUDGE: "1",
+    });
+  });
+
+  it("withholds API-billing variables even when a run asks to inherit them", () => {
+    const names = Object.keys(billingEnv);
+    const env = judgeChildEnv(planEnv, { env: {}, inherit: names });
+    expect(Object.keys(env).filter((name) => names.includes(name))).toEqual([]);
+    // Nor through the run's own explicit variables.
+    expect(judgeChildEnv({}, { env: { HOTLINE_JUDGE: "1", ...billingEnv }, inherit: [] })).toEqual({
+      HOTLINE_JUDGE: "1",
+    });
+    for (const name of names) expect(judgeWithholds(name)).toBe(true);
+    for (const name of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]) {
+      expect(CLAUDE_CODE_API_BILLING_ENV).toContain(name);
+    }
+    for (const name of ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"]) {
+      expect(CLAUDE_CODE_API_BILLING_ENV).toContain(name);
+    }
+    expect(CODEX_API_BILLING_ENV).toEqual(expect.arrayContaining(["OPENAI_API_KEY", "OPENAI_BASE_URL"]));
+    // No allowed name is ever withheld, so the lists never contradict each other.
+    for (const name of [...JUDGE_BASE_ENV, ...CLAUDE_CODE_LOGIN_ENV, ...CODEX_LOGIN_ENV]) {
+      expect(judgeWithholds(name)).toBe(false);
+    }
+  });
+
+  it("spawns claude with none of the API-billing variables set in the daemon's environment", async () => {
+    const spawned: Parameters<JudgeSpawn>[2][] = [];
+    const fakeSpawn: JudgeSpawn = (_file, _args, options) => {
+      spawned.push(options);
+      const child = fakeChild();
+      child.stdin.on("finish", () => {
+        child.stdout.end(claudeResult(JSON.stringify(agreed)).stdout);
+        child.stderr.end();
+        setImmediate(() => child.emit("close", 0, null));
+      });
+      return child as unknown as ReturnType<JudgeSpawn>;
+    };
+    for (const inherit of [CLAUDE_CODE_LOGIN_ENV, CODEX_LOGIN_ENV]) {
+      await runJudgeProcess(fakeSpawn, planEnv, CLAUDE, ["-p"], {
+        cwd: "/tmp/hotline-judge-fake",
+        env: { HOTLINE_JUDGE: "1" },
+        inherit,
+        input: "the prompt",
+        timeoutMs: 1_234,
+      });
+    }
+    expect(spawned).toHaveLength(2);
+    for (const options of spawned) {
+      for (const name of Object.keys(billingEnv)) expect(options.env).not.toHaveProperty(name);
+      expect(JSON.stringify(options.env)).not.toMatch(/sk-ant|sk-openai|sk-codex|bearer|bedrock|azure/);
+    }
+  });
+
+  it("names the credential each backend runs on, never a value", () => {
+    expect(judgeCredentialSource("claude-code", "auto")).toBe("plan login (Claude Code)");
+    expect(judgeCredentialSource("codex", "codex")).toBe("plan login (Codex)");
+    expect(judgeCredentialSource("anthropic-api", "anthropic-api")).toBe(
+      "Anthropic API key (judge.backend: anthropic-api)",
+    );
+    expect(judgeCredentialSource("anthropic-api", "auto")).toBe(
+      "Anthropic API key (judge.backend: auto, no Claude Code or Codex CLI found)",
+    );
+    expect(judgeCredentialSource("none", "off")).toBe("none");
   });
 
   it("never passes a HOTLINE_ variable through inherit, and keeps no basics that name one", () => {

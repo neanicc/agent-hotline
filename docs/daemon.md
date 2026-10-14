@@ -560,7 +560,8 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
     sit in a second one), with an allowlisted environment (`judgeChildEnv`:
     `JUDGE_BASE_ENV`, that is `PATH`, `HOME`, user, locale, XDG and proxy
     variables, plus the CLI's own login variables, `CLAUDE_CODE_LOGIN_ENV` or
-    `CODEX_LOGIN_ENV`; never a `HOTLINE_*` variable) and `HOTLINE_JUDGE=1`, the
+    `CODEX_LOGIN_ENV`; never a `HOTLINE_*` variable, and never a name in
+    `JUDGE_WITHHELD_ENV`, see below) and `HOTLINE_JUDGE=1`, the
     prompt on stdin (the owner's words never appear in a process's
     arguments) and SIGTERM after `JUDGE_TIMEOUT_MS`; a CLI that ignores it
     gets SIGKILL `JUDGE_KILL_GRACE_MS` (2 s) later, and the run settles then
@@ -584,6 +585,40 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
     contact): a second guard, after hooks and MCP servers are switched off for
     the run, so the judge's own session can never phone the owner. Each reply
     turn goes through the daemon's redactor first.
+
+    **The judge uses the owner's plan, not API billing (HL-09e).** The CLI
+    backends exist so the judge costs nothing beyond the Claude Code or Codex
+    plan, so their environment never carries a variable that would move the
+    run onto API billing, another account or another provider, even when the
+    daemon was started with one. `CLAUDE_CODE_LOGIN_ENV` is only
+    `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_OAUTH_TOKEN` (the subscription token
+    `claude setup-token` prints), and `CODEX_LOGIN_ENV` only `CODEX_HOME`. On
+    top of the allowlist, `judgeChildEnv` drops every name in
+    `JUDGE_WITHHELD_ENV` whatever a run lists: `CLAUDE_CODE_API_BILLING_ENV`
+    (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, every
+    other `ANTHROPIC_*` such as `ANTHROPIC_PROFILE` and the federation
+    variables, `CLAUDE_CODE_USE_BEDROCK`/`VERTEX`/`FOUNDRY` and any other
+    `CLAUDE_CODE_USE_*`, `CLAUDE_CODE_SKIP_*`, `CLAUDE_CODE_API_KEY_*`,
+    `AWS_BEARER_TOKEN_BEDROCK`), all of which Claude Code ranks above the
+    subscription login, and `CODEX_API_BILLING_ENV` (`OPENAI_API_KEY`,
+    `OPENAI_BASE_URL`, any `OPENAI_*`, `CODEX_API_KEY`, `AZURE_OPENAI_*`).
+    Codex's documentation says an API key bills the API instead of the plan
+    but does not say whether `codex exec` prefers a key in the environment
+    over a stored ChatGPT login, so those are withheld too. An owner who
+    wants API billing chooses `judge.backend: anthropic-api` with the stored
+    key. Residual gap: `apiKeyHelper` (and an `env` block) in the owner's own
+    Claude Code settings file is not an environment variable, so it still
+    applies to `claude -p`; leaving out user settings (`--setting-sources`)
+    is not done until a live run shows the OAuth login still works without
+    them; `hotline doctor` warns when that file (under `CLAUDE_CONFIG_DIR`
+    or `~/.claude`) sets `apiKeyHelper` or a withheld name in `env`. The run's
+    own `env` is filtered too, so not even a caller can hand a CLI a key.
+    `hotline doctor` names the credential (`judgeCredentialSource`: `plan
+    login (Claude Code)`, `plan login (Codex)`, `Anthropic API key
+    (judge.backend: anthropic-api)`), never a value, and warns when any
+    withheld variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...) is set in
+    its environment while a CLI backend is selected, saying the judge
+    ignores it.
 
     The prompt asks one narrow question ("did the speaker clearly agree, with
     no condition attached, and without taking it back?") with the reply turns
