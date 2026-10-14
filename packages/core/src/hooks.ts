@@ -64,15 +64,17 @@ export type ClaudePermissionRequestOutput = z.infer<typeof ClaudePermissionReque
 
 // Codex ---------------------------------------------------------------------
 
-/** Codex's documented permission modes. */
-export const CodexPermissionMode = z.enum(["default", "acceptEdits", "plan", "dontAsk", "bypassPermissions"]);
-
 const codexCommonInput = {
   session_id: nonEmpty,
   transcript_path: z.string().nullable(),
   cwd: nonEmpty,
   model: z.string(),
-  permission_mode: CodexPermissionMode,
+  /**
+   * Documented today as `default`, `acceptEdits`, `plan`, `dontAsk` or
+   * `bypassPermissions`. Kept open, as for Claude Code: Hotline does not act on it,
+   * and a closed list would make every payload fail to parse when Codex adds a mode.
+   */
+  permission_mode: z.string(),
   turn_id: z.string(),
 };
 

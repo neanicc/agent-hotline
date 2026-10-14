@@ -1,10 +1,15 @@
+import { scryptSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   ConfigError,
+  MAX_PIN_SCRYPT_LOG_N,
+  MAX_PIN_SCRYPT_P,
+  MAX_PIN_SCRYPT_R,
   MIN_PIN_SCRYPT_LOG_N,
   parseConfig,
   parseConfigText,
   parsePinHash,
+  pinScryptMaxmem,
 } from "../src/index.js";
 
 const PIN_HASH = `scrypt$15$8$1$${"s".repeat(22)}$${"h".repeat(43)}`;
@@ -174,5 +179,54 @@ describe("PIN hash", () => {
         expect.stringMatching(/^owner\.pinHash:/),
       ]);
     }
+  });
+
+  const withCost = (logN: number, r: number, p: number) =>
+    `scrypt$${logN}$${r}$${p}$${"s".repeat(22)}$${"h".repeat(43)}`;
+
+  it("accepts scrypt costs at both ends of the allowed range", () => {
+    expect([MIN_PIN_SCRYPT_LOG_N, MAX_PIN_SCRYPT_LOG_N, MAX_PIN_SCRYPT_R, MAX_PIN_SCRYPT_P]).toEqual([
+      15, 20, 16, 4,
+    ]);
+    for (const [logN, r, p] of [
+      [MIN_PIN_SCRYPT_LOG_N, 1, 1],
+      [MAX_PIN_SCRYPT_LOG_N, MAX_PIN_SCRYPT_R, MAX_PIN_SCRYPT_P],
+    ] as const) {
+      const pinHash = withCost(logN, r, p);
+      expect(parsePinHash(pinHash), pinHash).toMatchObject({ logN, r, p });
+      expect(parseConfig({ ...minimal, owner: { ...minimal.owner, pinHash } }).owner.pinHash).toBe(pinHash);
+    }
+  });
+
+  it("rejects scrypt costs just outside the allowed range, so a config cannot hang the PIN check", () => {
+    for (const pinHash of [
+      withCost(MIN_PIN_SCRYPT_LOG_N - 1, 8, 1),
+      withCost(MAX_PIN_SCRYPT_LOG_N + 1, 8, 1),
+      withCost(40, 99, 99),
+      withCost(15, 0, 1),
+      withCost(15, MAX_PIN_SCRYPT_R + 1, 1),
+      withCost(15, 8, 0),
+      withCost(15, 8, MAX_PIN_SCRYPT_P + 1),
+    ]) {
+      expect(parsePinHash(pinHash), pinHash).toBeUndefined();
+      expect(issuesOf({ ...minimal, owner: { ...minimal.owner, pinHash } }), pinHash).toEqual([
+        expect.stringMatching(/^owner\.pinHash: .*log2 N <= 20, 1 <= r <= 16 and 1 <= p <= 4/),
+      ]);
+    }
+  });
+
+  it("states the maxmem Node's scrypt needs for a PIN hash's cost", () => {
+    const params = { logN: MIN_PIN_SCRYPT_LOG_N, r: 8, p: 1 };
+    const maxmem = pinScryptMaxmem(params);
+    expect(maxmem).toBe(128 * 8 * (2 ** 15 + 3));
+    expect(pinScryptMaxmem({ logN: MAX_PIN_SCRYPT_LOG_N, r: MAX_PIN_SCRYPT_R, p: MAX_PIN_SCRYPT_P })).toBe(
+      128 * 16 * (2 ** 20 + 6),
+    );
+    // Exactly enough succeeds and one byte less fails, so the formula matches Node's check.
+    const options = { N: 2 ** params.logN, r: params.r, p: params.p };
+    expect(scryptSync("000000", "fake-salt-0123456", 32, { ...options, maxmem }).length).toBe(32);
+    expect(() => scryptSync("000000", "fake-salt-0123456", 32, { ...options, maxmem: maxmem - 1 })).toThrow(
+      /memory/i,
+    );
   });
 });

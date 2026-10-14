@@ -6,6 +6,14 @@ import { PhoneNumber, VoiceProviderName } from "./contracts.js";
 
 /** Minimum scrypt cost (log2 N) accepted for the PIN hash. */
 export const MIN_PIN_SCRYPT_LOG_N = 15;
+/**
+ * Upper bounds on the PIN hash's scrypt parameters. The config is owner-written,
+ * but a hostile or corrupt one must not be able to hang or crash the inbound-call
+ * PIN check, so anything above these is rejected as malformed.
+ */
+export const MAX_PIN_SCRYPT_LOG_N = 20;
+export const MAX_PIN_SCRYPT_R = 16;
+export const MAX_PIN_SCRYPT_P = 4;
 
 /**
  * `scrypt$<log2 N>$<r>$<p>$<salt>$<hash>` with base64url salt (at least 16 bytes)
@@ -21,19 +29,40 @@ export interface PinHashParams {
   hash: string;
 }
 
-/** Splits a PIN hash string into its parameters, or undefined if it is malformed. */
+/**
+ * Splits a PIN hash string into its parameters, or undefined if it is malformed or
+ * its cost is outside `MIN_PIN_SCRYPT_LOG_N..MAX_PIN_SCRYPT_LOG_N`, `1..MAX_PIN_SCRYPT_R`
+ * or `1..MAX_PIN_SCRYPT_P`. A verifier must treat undefined as a failed PIN check.
+ */
 export function parsePinHash(value: string): PinHashParams | undefined {
   const match = PIN_HASH.exec(value);
   if (!match) return undefined;
-  const [, logN, r, p, salt, hash] = match;
-  if (!logN || !r || !p || !salt || !hash) return undefined;
-  return { logN: Number(logN), r: Number(r), p: Number(p), salt, hash };
+  const [, logNText, rText, pText, salt, hash] = match;
+  if (!logNText || !rText || !pText || !salt || !hash) return undefined;
+  const logN = Number(logNText);
+  const r = Number(rText);
+  const p = Number(pText);
+  if (logN < MIN_PIN_SCRYPT_LOG_N || logN > MAX_PIN_SCRYPT_LOG_N) return undefined;
+  if (r < 1 || r > MAX_PIN_SCRYPT_R || p < 1 || p > MAX_PIN_SCRYPT_P) return undefined;
+  return { logN, r, p, salt, hash };
 }
 
-export const PinHash = z.string().refine((value) => {
-  const params = parsePinHash(value);
-  return params !== undefined && params.logN >= MIN_PIN_SCRYPT_LOG_N && params.r >= 1 && params.p >= 1;
-}, `must be "scrypt$<log2 N>$<r>$<p>$<salt>$<hash>" with log2 N >= ${MIN_PIN_SCRYPT_LOG_N}`);
+/**
+ * Bytes of memory scrypt needs for these parameters, `128 * r * (N + p + 2)`: the
+ * `maxmem` a verifier passes to Node's `crypto.scrypt`, whose 32 MiB default is
+ * already too small for the minimum accepted cost (`scrypt$15$8$1` needs 32 MiB plus
+ * 3 KiB). At the caps (log2 N 20, r 16, p 4) this is just over 2 GiB.
+ */
+export function pinScryptMaxmem({ logN, r, p }: Pick<PinHashParams, "logN" | "r" | "p">): number {
+  return 128 * r * (2 ** logN + p + 2);
+}
+
+export const PinHash = z
+  .string()
+  .refine(
+    (value) => parsePinHash(value) !== undefined,
+    `must be "scrypt$<log2 N>$<r>$<p>$<salt>$<hash>" with ${MIN_PIN_SCRYPT_LOG_N} <= log2 N <= ${MAX_PIN_SCRYPT_LOG_N}, 1 <= r <= ${MAX_PIN_SCRYPT_R} and 1 <= p <= ${MAX_PIN_SCRYPT_P}`,
+  );
 
 /** 24-hour local time, `HH:MM`. */
 export const ClockTime = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "must be HH:MM (24-hour)");

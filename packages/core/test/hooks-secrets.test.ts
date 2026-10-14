@@ -49,7 +49,11 @@ describe("hook inputs", () => {
 
   it("follows Codex's nullable fields and permission modes", () => {
     expect(CodexStopInput.parse({ ...codexStop, transcript_path: null }).transcript_path).toBeNull();
-    expect(CodexStopInput.safeParse({ ...codexStop, permission_mode: "auto" }).success).toBe(false);
+    // A mode Codex adds later still parses; a missing or non-string mode does not.
+    expect(CodexStopInput.parse({ ...codexStop, permission_mode: "auto" }).permission_mode).toBe("auto");
+    const { permission_mode: _mode, ...noMode } = codexStop;
+    expect(CodexStopInput.safeParse(noMode).success).toBe(false);
+    expect(CodexStopInput.safeParse({ ...codexStop, permission_mode: 1 }).success).toBe(false);
     const { turn_id: _, ...noTurn } = codexStop;
     expect(CodexStopInput.safeParse(noTurn).success).toBe(false);
     expect(
