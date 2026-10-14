@@ -151,9 +151,9 @@ the `twilio.accountSid` and `twilio.authToken` secrets exist. Otherwise it logs
 - **Logs:** the message SID and `sender: owner|other` only, never the text,
   numbers or signature.
 
-Until call orchestration (HL-09) answers asks by text, an owner's text is
-recorded in the audit log as `sms.received` with its SID and reply type
-(`yes`, `option`, `status`, ...), not its words, and gets no reply.
+An owner's text goes to [call orchestration](#call-orchestration), which
+records it in the audit log as `sms.received` with its SID and reply type
+(`yes`, `option`, `status`, ...), never its words, and answers asks by text.
 
 ### ElevenLabs (`/hooks/el/*`)
 
@@ -204,7 +204,7 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
 | Tool | What the route does |
 | --- | --- |
 | `verify_pin` | Checks the PIN with the `PinGate`: 2 wrong PINs per call, then `end_call: true` and no further checks on that call; 6 wrong PINs across all calls of one direction in a rolling hour, or 10 in a rolling day, lock every check on that direction, the right PIN included, until enough time has passed. A caller spoofing the owner's number therefore gets at most 10 guesses a day (0.1% of a 4-digit PIN space). Each lockout calls the PinGate's `onLockout` so the owner can be told (HL-10 texts them). Inbound and outbound calls have separate budgets, so someone guessing on inbound calls (caller ID can be spoofed) cannot block PIN approvals on calls Hotline placed to the owner. The trade-off: such guessing still locks the owner's own inbound line for up to an hour, which fails closed. Answers `{verified, attempts_left, end_call}`. A verified PIN is registered with the redactor (`addShortSecret`). The PIN is checked against `owner.pinHash` with scrypt and never logged or stored |
-| `submit_answer` | On an inbound call, `pin-required` until this call passed `verify_pin`, because caller ID can be spoofed. A call is outbound only when the injected `placedCall(conversationId)` says Hotline placed it (call orchestration knows) and it went to the owner's number from another number; everything else counts as inbound. Until HL-09, `runDaemon` passes `() => false`, so every call needs the PIN. Otherwise passes the ask number, decision (`option`, `allow`, `deny`, `text`, `done` or `unclear`), the owner's words, the direction and the call ids to the `submitAnswer` handler. `confirmation` is `pin` only when this call passed `verify_pin`; nothing in the request can set it |
+| `submit_answer` | On an inbound call, `pin-required` until this call passed `verify_pin`, because caller ID can be spoofed. A call is outbound only when the injected `placedCall(conversationId)` says Hotline placed it (call orchestration knows) and it went to the owner's number from another number; everything else counts as inbound. `runDaemon` passes call orchestration's `placedCall`, true from the moment a call is placed until its post-call event, its failure or the stuck-call limit. Otherwise passes the ask number, decision (`option`, `allow`, `deny`, `text`, `done` or `unclear`), the owner's words, the direction and the call ids to the `submitAnswer` handler. `confirmation` is `pin` only when this call passed `verify_pin`; nothing in the request can set it |
 | `get_status` | `{"result": "pin-required"}` until this call passed `verify_pin`. Then the `getStatus` handler's text, redacted and cut to 1500 characters |
 | `send_instruction` | `pin-required` until this call passed `verify_pin`. Then the `sendInstruction` handler gets the session number, instruction and the owner's words |
 
@@ -218,7 +218,7 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
   body is read. A sender that has not delivered its body within 5 seconds is
   cut off. Behind the tunnel every request comes from 127.0.0.1, so a per-IP
   limit would not help; a determined sender can still keep real webhooks out,
-  which fails closed (HL-09 must treat a missing post-call event as no answer). A slot is given
+  which fails closed (call orchestration treats a missing post-call event as no answer). A slot is given
   back when the response is sent or the sender goes away. Rate limiting at the
   tunnel is still worthwhile.
 - **Verify:** `t=<seconds>,v0=<hex HMAC-SHA256(webhookSecret, "<t>.<raw body>")>`,
@@ -230,8 +230,8 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
   remembered for 35 minutes, past the signature's age limit. A failed handler
   leaves the event unhandled, so ElevenLabs' retry gets through. The memory
   does not survive a restart, so a signed body replayed within its 30 minute
-  window after a restart is handled again: handlers must be idempotent per
-  conversation (HL-09). Live events are never evicted: with 1000 held, a new
+  window after a restart is handled again: call orchestration ignores an event
+  for a call it is no longer waiting on. Live events are never evicted: with 1000 held, a new
   one gets `503` so ElevenLabs retries it later. Durable replay protection is
   HL-13.
 - **Known limits:** on an outbound call, whoever picks up the owner's phone
@@ -252,11 +252,188 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
 - **Logs:** tool name and result, event kind. Never bodies, words, transcripts,
   PINs or numbers.
 
-Until call orchestration (HL-09) and the inbound line (HL-10) provide the
-handlers, `runDaemon` records `voice.answer` (decision kind only),
-`voice.instruction` and `voice.<event>` in the audit log, answers
-`not-recorded` and `unknown-session`, and reads out no status. The PIN check
-and its limits are live.
+`submit_answer` and the post-call webhook go to call orchestration (below).
+Until the inbound line (HL-10) provides its handlers, `runDaemon` records
+`voice.instruction` in the audit log, answers `unknown-session`, and reads out
+no status.
+
+## Call orchestration
+
+`CallOrchestrator` (`orchestrator.ts`, HL-09) connects the agent API, the
+store, the providers and the webhooks through core's pure queue
+([contracts](contracts.md#ask-queue-and-call-policy-queuets-policyts)).
+
+- **Driving the queue.** Every new ask the store takes (`onAskAdded`, whatever
+  route stored it) and every status change made outside the queue (`onAskChange`:
+  a cancel, a session end, the agent API expiring an ask) becomes a queue event.
+  Steps run one at a time with the daemon's clock. After each step the
+  orchestrator saves its state (the `QueueState`, the calls it is waiting on with
+  their held answers, and the text confirmation codes) in the `daemon_state`
+  table, carries out the actions in order, feeds back what they lead to
+  (`text-sent`, `text-failed`, `call-ended`), and sets one timer for
+  `nextWakeAt` (at least 100 ms away). On start it restores that state, drops
+  asks that closed while it was down, and queues open asks it did not know.
+  Unreadable state fails closed: open asks are queued afresh. The call and text
+  times are also saved under their own key, so the rate limits keep counting
+  what was already sent; if those are unreadable too, the hourly call and text
+  windows start out full (`orchestration.rates-reset`), so corrupt state can
+  never set off a burst. Nothing else runs until start has finished: webhooks
+  and agent requests wait for it.
+- **Crash recovery.** Each step's actions are saved with the queue state that
+  assumes them and crossed off one by one as they are carried out. On start,
+  whatever the last run left undone is finished (`orchestration.recovered`): a
+  call that may or may not have been placed counts as failed, so the queue's
+  retry rules apply. Known limit: a crash between the provider accepting a call
+  and its record being saved leaves a call Hotline no longer knows about; its
+  answers are not served, and the retry may ring the owner a second time while
+  the first call is still ringing (bounded by the call limits). A text is sent
+  again (at least once), with the confirmation code it already had; recording an answer, closing an ask and ending a call are
+  idempotent. A post-call event's call stays live until all of its answers
+  have reached the queue, so ElevenLabs' retry after a failure applies them
+  again and the queue ignores the ones already applied.
+- **Stopping.** On shutdown, `stop` refuses new steps and waits at most 5
+  seconds for the one in progress. A slower provider request (ElevenLabs
+  allows 15 seconds) is left behind, and what its step did not finish is
+  recovered on the next start.
+- **Before anything goes out** each ask is checked again, with a fresh clock
+  reading: still open in the store, its session not ended, and not past
+  `expiresAt` (an earlier slow send in the same step may have run past it). An
+  ask that is closed or whose session ended is cancelled in the queue; an
+  expired one is left to expire in the queue with its own reason. Either way it
+  is left out of the call or text (`ask.not-called`, `ask.not-texted`), so an
+  agent that gave up while the daemon was down is never called about.
+- **Reasons before reads.** When an agent reads an ask past its `expiresAt`
+  (outcome, inbox, or a new ask counting against the caps), the agent API first
+  runs the orchestrator's due work (`settle`), so the ask ends with its specific
+  reason rather than a plain `timeout` from whichever timer fired first.
+- **Calls.** `place-call` reads the remaining asks out in the queue's order:
+  ask number N on the call is the Nth. The provider gets the session nickname,
+  kind, risk, tool, options and the (already redacted) text; `callVariables`
+  redacts and cuts them again. A provider error is `call-ended: failed`. No
+  provider offers a hang-up, so on `end-call` (the queue gave up after 15
+  minutes) the daemon stops serving the call: its tool calls answer
+  `not-recorded` and its post-call event changes nothing.
+- **Voice answers are held, then confirmed.** `submit_answer` is accepted only
+  on a call Hotline placed and is still waiting on, as an outbound call, for an
+  ask still on that call. A high-risk `allow` without the PIN on this call is
+  `needs-pin`. A deny always wins: once one is held for an ask, a later
+  different decision gets `not-recorded`, and a later deny replaces anything
+  held. Two different decisions that are not a deny cancel each other
+  (`voice.answer-conflict`). Accepted answers are held (`recorded` tells the
+  voice agent they arrived) until the post-call transcript. There each held
+  answer must pass `confirmVoiceDecision` (`voice-confirm.ts`):
+  - the agent turns that read the ask are found by their key words (at least
+    half, best match, ties read nothing; the call's first agent turn, the fixed
+    greeting, never counts). The ask's windows are the person's turns right
+    after each such reading, up to the next agent turn of any kind: an agent
+    turn not recognised as reading this ask (a paraphrase, a tie, another ask,
+    small talk) always closes the window, and a re-reading opens a new one. The
+    owner's words must be found in a window with `ownerSaid`. A "yes" said
+    before the ask was read, or after anything else the agent said, never
+    confirms it;
+  - free text (a question's answer, a stop's next instruction) must itself be
+    words the owner said;
+  - an option must be named in the owner's words (its digit, ordinal, number
+    word or most of its own words), and no other offered option may be ("the
+    second one" names option 2 only); `done` needs a word for it ("done",
+    "that's it", "nothing"), though letting a stopped agent finish is also what
+    no answer does;
+  - an answer is taken back by anything the owner said about the ask after it
+    that sounds doubtful (below), such as "no", "wait", "never mind",
+    "actually";
+  - an `allow` must be unambiguous: the matched words hold a yes word (`yes`,
+    `okay`, `go`, ...), nothing the owner said in any of the ask's windows
+    sounds doubtful, and the owner's last words about the ask (in its last
+    window) are a yes or close the matched yes. "No... okay, yes" is not an
+    approval; the owner can approve by text or on another call.
+  "Sounds doubtful" (`soundsDoubtful`) means refusal, negation, hesitation,
+  delay or correction: words such as `no`, `not`, `never`, `wait`, `hold`,
+  `later`, `maybe`, `but`, `cancel`, `abort`, `negative`, `cannot`, `actually`,
+  any `n't` (apostrophe look-alikes such as `’`, `ʼ`, `` ` ``, `´` and `′` are
+  normalised first) and the same forms typed without it (`dont`, `wouldnt`,
+  `cant`, ...), hedges and conditions (`unsure`, `whether`, `if`, `probably`,
+  `think`, `hmm`, ...), refusals without a "no" (`skip`, `decline`, `pass`,
+  `block`, `veto`, `rather`, ...), the phrases "hang on", "hold on", "not yet",
+  "no way" and "never mind", and questions (a `?`, or `what`, `why`, `how`,
+  `which`, ..., since speech recognition often drops the question mark). A
+  question asked before the owner's answer ("what does it push?") does not
+  count against a later yes; one in the answer itself or after it does.
+  A `deny` needs only the owner's words in a window; nothing else can block a
+  refusal. The stored `ownerExcerpt` is the matching owner turns, verbatim, not
+  the model's `owner_words`. An unconfirmed answer is dropped
+  (`voice.answer-unconfirmed`): an unconfirmed `allow` or other answer leaves
+  the ask open (no answer from the call; call policy texts it), while an
+  unconfirmed `deny` still ends a permission request at once as no answer
+  (`unclear`), which denies it, and it is never sent out again for approval.
+  The agent then sees `no-answer` with reason `unclear`, not a recorded `deny`.
+  Confirmed answers and `unclear` reports reach the queue before the call's
+  `call-ended`.
+  Known limits: the word lists are English, so other languages never confirm
+  an approval, an option or `done` (fail closed: the ask is texted). A doubtful
+  word in a later turn about the ask also takes back a free-text answer. These
+  rules are tested on scripted transcripts only; real ElevenLabs transcripts
+  (turn splitting, interruptions, paraphrased readings) need the live check, and
+  some answers will be refused there until the persona is tuned.
+- **How a call ended.** `call_initiation_failure` `busy` or `no-answer` is
+  `no-pickup`, anything else `failed`. A transcription in which the owner never
+  spoke is `no-pickup` (voicemail, silence); one where every ask was settled is
+  `answered`; otherwise `dropped`. A call whose post-call event never arrives is
+  given up on after 15 minutes, its held answers discarded: no answer. Each
+  ended call is stored as a `CallRecord` with its duration and a rough cost
+  estimate (12 US cents a minute).
+- **Texts.** `send-text` sends one ask through the SMS provider. Every
+  permission request, low risk included, carries a random 6-digit code ("Reply
+  YES 123456 to allow, or NO to deny", with "HIGH RISK." first for a high-risk
+  one), unique among waiting codes and one the redactor leaves intact. No text
+  approves a request without its code (`smsAnswer`), so an old or replayed
+  "yes" can never approve a newer request. Codes are stored with the state, die
+  with the ask, and are spent on first use; a code that matches no waiting ask
+  burns every waiting code, so those requests can then only be approved on a
+  call. Without a usable code the text says the request can only be approved on
+  a call. Codes and held voice answers (with the model's
+  `owner_words`) live in `daemon_state`, inside the `0600` database the store
+  already requires; same-user processes can read it (see
+  [contracts](contracts.md#secrets-secretsts)).
+- **Text replies** (`owner-texts.ts` plans, the orchestrator applies). Each
+  owner text is handled once per message SID, also across restarts
+  (`inbound_messages`). The SID is recorded before the text has any effect, so a
+  redelivery after a crash part way through can never apply the same words
+  again, say to a different waiting ask. A failure after that loses the text
+  (no answer), and the owner is told: a step that fails replies "your text was
+  not recorded, please send it again", and texts a crash interrupted (claimed
+  but never finished) get one text on the next start saying a text may not
+  have been recorded. `call me` becomes the queue's `call-me`
+  event and gets "calling you now" or the queue's reason for not calling.
+  `status` waits for HL-10; `stop` and Twilio's keywords get no reply of
+  Hotline's own. Any other text answers only an ask Hotline texted that is
+  still open, and only one: a `YES <code>` reply names the ask with that code;
+  otherwise there must be exactly one such ask, texted at least 10 seconds
+  before the message was first seen (the time its SID was claimed; an ask with
+  no recorded send time never qualifies). A reply that predates the text, or
+  came too quickly to answer it (a stray reply meant for something earlier),
+  is not used, and the owner is asked to read the text and reply again. So a
+  free-text answer or a "no" can never land on a question or request texted
+  after it was written. With several waiting the reply
+  answers nothing and the owner is told to text `call me`. `smsAnswer` then
+  turns the text into an answer, which goes through the queue and
+  `recordAnswer`.
+- **Resolving.** An `answered` outcome is stored with `recordAnswer`, which
+  checks `answerProblem` again; nothing else marks an ask answered. If the
+  store refuses it, the ask is closed at once as no answer (`failed`), and the
+  owner's text reply says it was not recorded. A no-answer
+  closes the ask (`expired` or `cancelled`) with its specific reason
+  (`no-pickup`, `dropped`, `failed`, `unclear`, `timeout`, `cancelled`), which
+  the outcome route reports. A delivered notification is closed as `expired`
+  with the reason `delivered` (its outcome still reads `no-answer`).
+- **No grace period at expiry.** An ask expires at `expiresAt` even in the
+  middle of a call; a voice answer still held then (its post-call event not in
+  yet) does not count. The agent's wait stays bounded.
+- **Providers.** `runDaemon` builds `TwilioSmsProvider` (with `sms.fromNumber`
+  and both Twilio secrets) and `ElevenLabsVoiceProvider` (with `voice.agentId`,
+  `voice.agentPhoneNumberId` and the `elevenlabs.apiKey` secret) with
+  `globalThis.fetch` and the daemon's redactor, and logs `outbound calls off` or
+  `outbound texts off` with the reason when one is missing. Then every call or
+  text fails and the queue falls back or ends the ask as no answer.
 
 ## Store
 
@@ -265,7 +442,15 @@ mode `0600` in a `0700` directory. A new file is created `0600` before SQLite
 opens it, so it never exists with umask permissions. A symlinked database, or one in a directory
 other users can reach, is refused. Tables: `sessions`, `asks`, `answers`, `calls`
 and `audit`. Each table keeps the record as JSON validated by the HL-02 schemas,
-on write and on read, next to the columns the daemon queries by.
+on write and on read, next to the columns the daemon queries by. Migration 3
+(HL-09) adds `asks.end_reason` (why an ask ended without an answer, set by
+`closeAsk`), `daemon_state` (call orchestration's saved state, as JSON) and
+`inbound_messages` (the owner's texts claimed, by message SID, and whether each
+was finished). Twilio signatures carry no timestamp, so a captured reply can be
+replayed at any time: finished SIDs are kept for 400 days and unfinished ones
+until they finish. Rows are tiny.
+`onAskAdded` tells listeners about each new ask, as `onAskChange` does about
+status changes.
 
 - Migrations are an append-only list (`MIGRATIONS`). `PRAGMA user_version` counts
   how many have run. Each runs in its own transaction, so a failure leaves the

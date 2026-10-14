@@ -924,6 +924,290 @@ Template:
     caller, which passes both; the HL-05 test keeps its three-argument call).
   - `CI=true scripts/ci/run.sh test`: 755 tests in 37 files.
 
+## 2026-10-14 — HL-09 Call orchestration (#36)
+
+- Decision / change: `packages/daemon/src/orchestrator.ts` (`CallOrchestrator`)
+  drives core's pure queue with the injected clock and one real timer at
+  `nextWakeAt`, one step at a time. It saves its state (the `QueueState`, the
+  calls it is waiting on with their held voice answers, and the text
+  confirmation codes) in a new `daemon_state` table after every step, carries
+  out the actions through the providers, and resolves asks through the store
+  (`recordAnswer`, which re-checks `answerProblem`), so the agent API long poll
+  and the MCP server get the outcome. `runDaemon` builds `TwilioSmsProvider`
+  and `ElevenLabsVoiceProvider` from the config and secrets with
+  `globalThis.fetch` and the redactor, and wires `placedCall`, `submit_answer`,
+  the post-call webhook and owner texts to the orchestrator. Store migration 3
+  adds `asks.end_reason`, `daemon_state` and `inbound_messages`, plus
+  `onAskAdded` and `closeAsk`. The fake voice agent now reads each ask aloud as
+  its own transcript turn, and scripts gained a `say` step and `spoken` on
+  answers. No contract changed. Documented in `docs/daemon.md` (new "Call
+  orchestration" section) and `docs/contracts.md`.
+- Acceptance criteria from the comments on #10, each with a test in
+  `packages/daemon/test/orchestration.test.ts` (through the real routes) unless
+  noted:
+  - HL-02: only the resolution path produces `answered`, after `answerProblem`;
+    a high-risk allow without the PIN gets `needs-pin` and nothing is stored.
+  - HL-03: `submit_answer` is delivered before `call-ended`; `text-sent` and
+    `text-failed` are reported; asks resolved mid-call answer `not-recorded`;
+    text replies map to ask ids. `end-call` cannot hang up (no provider has a
+    hang-up API), so the daemon stops serving that call instead.
+  - HL-07: a text answers only an ask Hotline texted that is still open; one
+    reply binds to exactly one ask (a `YES <code>` names it, otherwise exactly
+    one may be waiting) and several waiting fail closed; codes are random per
+    ask, die with it, are spent on use, and a wrong one burns all waiting codes;
+    texts say "Reply YES or NO" (with the code for high risk).
+  - HL-03b: `call me` reaches the queue only from the owner's number on a
+    verified webhook, once per MessageSid, also across a restart.
+  - HL-05: urgent asks call in quiet hours only with `allowUrgentCalls`, and
+    within the rate limits; each ask is checked open and its session live before
+    a call or text; specific no-answer reasons are stored and reported.
+  - HL-08: `placedCall` is supplied; voice decisions are confirmed with
+    `ownerSaid` under the turn-ordering rule (owner turns after the agent turn
+    that read the ask, before the next ask was read), so an early "yes" and a
+    "yes" after a different ask approve nothing (also unit tests in
+    `voice-confirm.test.ts`); a missing post-call event is no answer; a replayed
+    post-call event after a restart changes nothing; a high-risk allow without
+    the PIN is refused.
+- Decisions (no human available):
+  - No grace period at expiry: an ask expires at `expiresAt` even mid-call, and
+    a voice answer still held then does not count. Keeps the agent's wait
+    bounded and fails closed.
+  - Voice answers are held until the post-call transcript and the
+    `submit_answer` reply is `recorded` on arrival. The ask stays open until
+    the transcript confirms it; if it never does, the queue texts the ask after
+    the call.
+  - Finding the reading of an ask: the agent turn with the best share of the
+    ask's key words (text, nickname, tool; at least half; ties read nothing).
+    The call's first agent turn (the fixed greeting) never counts, so ask text
+    written to look like the greeting cannot open its window early. If a
+    paraphrase defeats the match, the answer is not confirmed (fails closed).
+  - Defense in depth beyond the issue: free-text decisions (questions, stop
+    instructions) must themselves be the owner's words, and an `allow` must
+    contain a yes word and no word of refusal or hesitation. Two different
+    decisions for one ask on one call count as neither.
+  - The stored `ownerExcerpt` for a voice decision is the matching owner turns
+    from the transcript, not the model's `owner_words`.
+  - A transcription where the owner never spoke is `no-pickup` (retried); a
+    call that left asks open is `dropped` (texted at once).
+  - Several texted asks with a reply that names none: nothing is recorded and
+    the owner is told to text `call me`. Per-ask reply labels for low-risk asks
+    are a follow-up.
+  - A delivered notification is stored as `expired` with reason `delivered`
+    (`AskStatus` has no `delivered`); its outcome still reads `no-answer`.
+  - Inbound calls answer no asks (`not-recorded`) until HL-10.
+  - Call cost estimate: 12 US cents a minute, a rough constant for `hotline
+    doctor`.
+- Evidence (automated, worktree, Node 24.11.0 locally; CI covers Node 22):
+  `scripts/ci/run.sh build` (Biome, `tsc -b`, test typecheck, CLI smoke) and
+  `scripts/ci/run.sh test` pass: 783 tests in 38 files, 5 full runs in a row
+  green. New: 33 end-to-end tests through the real daemon, 18 unit tests for
+  the confirmation rule, 3 store tests, 1 fake-voice test. Mutation checks, each
+  reverted, against the daemon suite: trusting `owner_words` without the
+  transcript (3 tests fail), `placedCall` always false (12), taking the first of
+  several texted asks (1), keeping codes after a wrong code (1), no durable
+  message dedupe (1), calling asks of an ended session (1), last conflicting
+  answer wins (1), holding a high-risk allow without the PIN (1), no yes-word
+  check (5), greeting can read an ask (1), window not ending at another ask (3).
+  Not spending a matched code survives: it is redundant with the resolve path,
+  which deletes the code too. Scenario suite: not built yet (HL-12). No real
+  agent run (no MCP or hook change) and no live call; no real Twilio or
+  ElevenLabs request was made.
+- Open issues or follow-ups:
+  - HL-14 (persona): tell the agent to read each ask on its own turn, with its
+    words, and to submit free-text answers as the owner's exact words; the
+    reading match and the text check fail closed otherwise. The live check
+    should confirm both on a real call.
+  - Per-ask reply labels so several texted low-risk asks can be answered by
+    text (today: `call me`).
+  - A provider hang-up for `end-call`.
+  - HL-10: inbound answers, `status` by text, the instruction queue, texting the
+    owner about PIN lockouts. HL-13: persist PIN and webhook replay memories.
+- Coordinator security review of 3798cf1 (`voice-confirm.ts`, three fail-open
+  flaws), fixed here:
+  - Window: an agent turn not recognised as any reading (a paraphrase below
+    the threshold, or a tie, which agent-written ask text can engineer) did not
+    end an ask's window, so the owner's "yes" to the next ask confirmed the
+    previous one. Now an ask's windows are only the person's turns right after
+    an agent turn recognised as reading it, and any other agent turn closes the
+    window; a re-reading opens a new one. Tests: a paraphrased reading of B then
+    "yes" confirms neither A nor B; a tie then "yes" confirms no ask.
+  - Retraction: the shortest matching run was used, so "yes" then "no, wait,
+    don't" in the same window confirmed an allow. Now, for every decision but a
+    deny, a later doubtful turn about the ask takes the answer back; for an
+    allow, nothing the owner said in any of the ask's windows may sound
+    doubtful, and the owner's last words about it must be a yes (or close the
+    matched yes). Decision: "no... okay, yes" is not an approval (strict, fail
+    closed); the owner can approve by text or on another call. Tests: yes then
+    no, yes then wait, yes then a re-read and "no, don't", the change of mind,
+    silence after a re-read, and free text taken back with "never mind",
+    "actually ..." and "no, cancel that".
+  - Contractions: tokens split "wouldn't" into `wouldn` + `t`, so "Okay, I
+    wouldn't do that" was a clear yes. `soundsDoubtful` now normalises
+    apostrophe look-alikes (`’ ‘ ʼ ` ´ ′`), treats any `n't`, a bare `t` token,
+    `cannot` and the apostrophe-less forms (`wouldnt`, `cant`, `wont`, ...) as
+    doubt, and adds "dont do", "hang on", "hold on", "not yet", "later",
+    "negative", "abort" and "no way". Tests cover each contraction, the curly
+    forms and the dropped-apostrophe forms.
+  - Deny: a deny is safe and needs only the owner's words in a window. It now
+    wins over any other decision held for the ask on the same call (a later
+    allow gets `not-recorded`; a later deny replaces an allow). An unconfirmed
+    deny records nothing as the owner's words but ends the permission request
+    at once as no answer (`unclear`, so a deny), and it is never texted for
+    approval. An unconfirmed allow is no answer from the call (the ask stays
+    open and is texted), never a deny turned into an allow. Tests included.
+  - Evidence: `scripts/ci/run.sh build` and `test` pass (829 tests, 3 runs in a
+    row). Mutation checks, each reverted: the window running past unrecognised
+    agent turns, which is the reported flaw (4 tests fail); no retraction check
+    (3); allow ignoring doubt before the match (1); allow ignoring the last
+    words (1); no apostrophe normalisation (1); deny no longer winning a
+    conflict (1); unconfirmed deny left open (2); trusting `owner_words` (5);
+    greeting reading an ask (1); no yes-word check (1). The `n't` check alone
+    survives because the bare-`t` token check catches the same input;
+    removing both fails 17 tests.
+- Bot staff review (approve with nits, score 90) and Greptile on #36. Greptile
+  reviewed the first head; its window and retraction findings were already
+  fixed above. Fixed here:
+  - Greptile P0, hedges: "I'm unsure whether to approve this" passed as a yes.
+    Hedges and conditions (`unsure`, `whether`, `if`, `probably`, `think`,
+    `hmm`, ...) now count as doubt; "I cannot approve this" was already caught.
+  - Greptile P0, replayed text: the message SID was recorded only after every
+    effect, so a crash while texting another ask left it unrecorded and the
+    redelivered "yes" could answer that other ask. The SID is now recorded
+    before the text has any effect. Trade-off: a failure after that loses the
+    text (no answer); the owner can resend.
+  - Greptile P1, option and done: a submitted option must be named in the
+    owner's words (digit, ordinal, number word or most of its text) and no
+    other offered option may be; `done` needs a word for it. ("one" alone
+    never names option 1 against another, since "the second one" is common.)
+  - Greptile P1, crash consistency: each step's actions are now saved with the
+    queue state and crossed off as they finish. On start, undone actions are
+    finished: a call that may not have been placed counts as `failed` (the
+    retry rules apply), a text is sent again (at least once), the rest is
+    idempotent. A post-call event's call stays live until all its answers
+    reached the queue. Nothing else runs until start has recovered.
+  - Greptile P2, reason race: the agent API now runs the orchestrator's due
+    work (`settle`) before reading an ask past its `expiresAt`, so the specific
+    reason wins over a plain `timeout`.
+  - Greptile P2, sends past expiry: each ask is checked against a fresh clock
+    before a call or text; an expired one is left to expire in the queue.
+  - Greptile P2, shutdown: `stop` waits at most 5 seconds for the step in
+    progress (ElevenLabs allows 15); the rest is recovered on the next start.
+  - Staff P2, size: the text planning and rendering moved to `owner-texts.ts`
+    (pure: reply binding, codes, reply texts), leaving the orchestrator to
+    carry plans out.
+  - Staff P3s, documented in `docs/daemon.md`: English-only word lists (fail
+    closed), the agent sees `unclear` after an unconfirmed deny, and codes and
+    held answers live in the `0600` database.
+  - Evidence: `scripts/ci/run.sh build` and `test` pass (881 tests, 3 runs in a
+    row). New orchestrator unit tests (recovering an unsent text, a call that
+    may never have been placed, the SID claimed before a crash, a send past
+    expiry), an end-to-end test for the reason race, and unit tests for the
+    hedges, options and done. Mutation checks, each reverted: recording the SID
+    after handling (1 test fails), no pending actions saved (3), no expiry
+    check before sending (1), no `settle` before reads (1), no hedge words (5),
+    options not checked (6), done not checked (1).
+- Bot staff review on 1aa5dd7 (approve with nits, score 90, two P2s, two P3s):
+  - P2, fixed: a claimed text that failed or was cut off by a crash was lost
+    silently. `inbound_messages` now records whether a claimed text finished
+    (migration 3, unreleased, gains a `finished` column). A failed step replies
+    "your text was not recorded, please send it again"; on start, texts a crash
+    interrupted get one text telling the owner a text may not have been
+    recorded. Tests in `orchestrator.test.ts`; mutants dropping either message
+    fail 1 test each.
+  - P2, addressed: more tests for the reading heuristic (a paraphrase that
+    keeps most key words is recognised; a vague one is not and confirms
+    nothing; one turn reading two different asks equally reads neither). The
+    thresholds stay, since misses fail closed. Real-call evidence belongs in the
+    live check (HL-16): count unconfirmed answers (`voice.answer-unconfirmed`)
+    on real calls before tuning.
+  - P3, fixed: `outbound texts off` logs a plain reason string.
+  - P3, not changed: splitting voice holding out of the orchestrator. The SMS
+    half already moved to `owner-texts.ts`; a further split is a follow-up.
+  - Evidence: `scripts/ci/run.sh build` and `test` pass (see the PR's Validation
+    for the count at this head).
+- Bot staff review on 3483ea2 (approve with nits, score 89, one P2, two P3s):
+  - P2, fixed: unreadable main state started a fresh queue, which also reset
+    the rate-limit windows. The call and text times are now saved under their
+    own key and restored; if those are unreadable too, the hourly windows start
+    out full. Tests; mutants dropping either fail 2 and 1 tests.
+  - P3, documented: a crash between the provider accepting a call and the call
+    being saved can ring the owner twice (bounded by the call limits).
+  - P3, fixed: a bare reply arriving within 10 seconds of the only waiting text
+    is not bound to it (a stray "yes" meant for something earlier); the owner
+    is asked to reply again. Decision: 10 seconds, since nobody reads a request
+    and answers faster, and coded replies are unaffected. The test harness
+    lets the scripted owner take 15 seconds to read. Test; the mutant fails 1.
+- Bot staff review on c675995 (approve with nits, score 89): both P2s ask for
+  follow-ups, not code. Track the false "no answer" rate of voice confirmation
+  in the live check (HL-16). Split the orchestrator (voice holding and
+  post-call; durable state and recovery) before HL-10 adds inbound handling.
+  P3: the test seams on `RunDaemonOptions` now carry a comment that they must
+  never be wired to config or the environment.
+- Bot staff review on fbefef4 (approve with nits, score 88):
+  - P2, fixed: when the store refused an answer the queue had accepted, the
+    ask stayed open until it expired. It is now closed at once as no answer
+    (`failed`), and the owner's text reply reports what the store actually
+    recorded. Test; the mutant fails 1.
+  - P2, follow-up (same as before): split the orchestrator before HL-10.
+  - P3, fixed: a text sent again on recovery keeps its confirmation code, so
+    the owner's `YES <code>` still matches. Test; the mutant fails 1.
+  - P3, fixed: finished inbound message SIDs are dropped after a week. Test;
+    the mutant fails 1. (Superseded by the next entry: a week was too short.)
+- Coordinator security review of b762cf7 (replay regression), fixed here:
+  - The one-week SID retention reopened replays: Twilio signatures carry no
+    timestamp, so a captured, signed owner reply replayed after the prune
+    would be handled again and bind to whatever texted ask was open. Fixed
+    both ways.
+  - SID memory: finished SIDs are now kept for 400 days, unfinished ones until
+    they finish (`INBOUND_MESSAGE_RETENTION_MS`).
+  - Replays made useless even if a SID were forgotten:
+    - Core contract change (`smsAnswer`, `docs/contracts.md`): approving any
+      permission request by text, low risk included, needs `yes <code>` with
+      that ask's single-use random code. A bare `yes` is no answer. The daemon
+      now puts a code in every permission text ("Reply YES 123456 to allow, or
+      NO to deny").
+    - A reply without a code binds only to an ask whose text went out at least
+      10 seconds before the message's SID was first seen (its claim time). An
+      ask with no recorded send time never qualifies, so a stale free-text
+      answer or "no" cannot land on a newer question.
+  - Tests:
+    - a replay of a signed reply eight days later is ignored and does not
+      answer a new question;
+    - a bare "yes" does not approve a low-risk request, and `yes <code>` does;
+    - a free-text reply first seen before (or right after) the question was
+      texted is not bound (`owner-texts.test.ts`);
+    - core: a low-risk "yes" without its code is no answer, and the generated
+      reply test now requires the code for every approval;
+    - store: SIDs survive a year and only finished ones older than 400 days go.
+    - Existing tests that approved low-risk requests with a bare "yes" now
+      reply with the code.
+  - Mutation checks, each reverted:
+
+    | Mutant | Tests that fail |
+    | --- | --- |
+    | Bare yes approves low risk again | 5 |
+    | One-week retention | 1 |
+    | Reply timed by arrival instead of first sighting | 1 |
+    | Unknown send time binds | 1 |
+    | Codes only for high-risk texts | 6 |
+- Bot staff review on 289e223 (approve with nits, score 88):
+  - P2, fixed: the approval vocabulary missed refusals without a "no" and
+    questions, so "fine, skip it" or "okay, what does it do" (speech
+    recognition drops the "?") could confirm a low-risk allow. Refusal words
+    (`skip`, `decline`, `pass`, `block`, `veto`, `rather`, ...) now count as
+    doubt everywhere. Questions (a `?` or a question word) count as doubt in the
+    matched words and anything after them. Decision: a question before the
+    answer ("what does it push?" and then "yes, push it") does not block the
+    yes, since asking is not refusing.
+  - Tests: eight more phrasings never approve; a question before a yes stands;
+    a question after it takes the yes back. Mutation checks, each reverted:
+    questions not doubt (4 tests fail), no refusal words (3), earlier questions
+    blocking a later yes (2).
+  - P3, fixed: after a wrong code, the reply now says the codes in earlier
+    texts no longer work.
+  - P2 (split the orchestrator before HL-10) and P3 (measure false "no answer"
+    in the live check) stay follow-ups.
+
 ## 2026-10-14 — HL-06 Hook adapters (#7)
 
 - Decision / change: `hotline hook <claude|codex> <permission|stop>` reads the
@@ -1045,8 +1329,8 @@ Template:
   fixtures README.
 - Evidence (worktree, Node 24.11.0):
   - `scripts/ci/run.sh setup`, `build` and `test` pass: 682 tests in 34 files
-    at ce62b97, 766 at f85b69b, 824 at baa90d5, and 1070 (41 files, after
-    catching up with main) after the third review.
+    at ce62b97, 766 at f85b69b, 824 at baa90d5, 1070 (41 files) after the
+    third review, and 1222 (45 files) after catching up with HL-09.
   - The security fixes have a bypass test for each case the review listed,
     plus unknown-project, shortened-preview and reassuring-description tests.
     Earlier expectations only moved from low to high. Mutations: treating

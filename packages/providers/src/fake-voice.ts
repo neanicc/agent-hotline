@@ -23,7 +23,12 @@ import {
 export type HumanStep =
   /** Says (or keys) a PIN: the agent calls `verify_pin`. */
   | { kind: "pin"; digits: string }
-  /** Answers ask `ask` (1-based) in `words`: the agent calls `submit_answer`. */
+  /**
+   * Answers ask `ask` (1-based) in `words`: the agent calls `submit_answer` with
+   * `words` as `owner_words`. The human says `spoken` (default `words`); `null`
+   * means they say nothing new and the voice model submits on its own, which is
+   * how tests play a confused or prompt-injected model.
+   */
   | {
       kind: "answer";
       ask: number;
@@ -31,7 +36,10 @@ export type HumanStep =
       option?: number;
       text?: string;
       words: string;
+      spoken?: string | null;
     }
+  /** Says something that is not an answer ("yes, I can hear you"); no tool call. */
+  | { kind: "say"; words: string }
   /** Stays unclear after the agent asked twice: `submit_answer` with `unclear`. */
   | { kind: "unclear"; ask: number; words: string }
   /** Asks what the agents are doing: `get_status`. */
@@ -217,7 +225,16 @@ export class FakeVoiceProvider implements VoiceProvider {
   async playPending(): Promise<PlayedCall[]> {
     const results: PlayedCall[] = [];
     for (let next = this.#unplayed.shift(); next !== undefined; next = this.#unplayed.shift()) {
-      results.push(await this.#play("outbound", next.conversationId, next.callSid, this.#nextScript()));
+      results.push(
+        await this.#play(
+          "outbound",
+          next.conversationId,
+          next.callSid,
+          this.#nextScript(),
+          this.#owner,
+          next,
+        ),
+      );
     }
     return results;
   }
@@ -238,6 +255,7 @@ export class FakeVoiceProvider implements VoiceProvider {
     callSid: string,
     script: HumanScript,
     from = this.#owner,
+    placed?: FakePlacedCall,
   ): Promise<PlayedCall> {
     const played: PlayedCall = { conversationId, direction, tools: [], endedEarly: false };
     this.played.push(played);
@@ -262,7 +280,21 @@ export class FakeVoiceProvider implements VoiceProvider {
     /** One transcript turn, timed by the clock as ElevenLabs would. */
     const say = (role: "user" | "agent", message: string) =>
       transcript.push({ role, message, time_in_call_secs: (this.#clock().getTime() - start) / 1000 });
-    say("agent", "Hey, it's your hotline.");
+    // The first message, then each ask read out as its own agent turn, as the
+    // prompt tells the real agent to: the daemon matches answers to these turns.
+    say(
+      "agent",
+      placed === undefined
+        ? "Hey, it's your hotline."
+        : `Hey, it's your hotline. ${placed.variables.opening}`,
+    );
+    const readOut = (placed?.variables.asks.split("\n") ?? []).map((line) =>
+      line.replace(/<\/?agent_text>/g, ""),
+    );
+    let asksRead = 0;
+    const readUpTo = (ask: number) => {
+      for (; asksRead < Math.min(ask, readOut.length); asksRead++) say("agent", readOut[asksRead] ?? "");
+    };
     const tool = async (name: ToolName, body: Record<string, unknown>) => {
       const response = await this.#client.tool(name, { ...binding, ...body });
       played.tools.push({ tool: name, body: { ...binding, ...body }, response });
@@ -274,12 +306,18 @@ export class FakeVoiceProvider implements VoiceProvider {
         break;
       }
       if (step.kind === "silence") continue;
+      if (step.kind === "say") {
+        say("user", step.words);
+        continue;
+      }
       let response: Record<string, unknown>;
       if (step.kind === "pin") {
         say("user", step.digits);
         response = await tool("verify_pin", { pin: step.digits });
       } else if (step.kind === "answer" || step.kind === "unclear") {
-        say("user", step.words);
+        readUpTo(step.ask);
+        const spoken = step.kind === "answer" && step.spoken !== undefined ? step.spoken : step.words;
+        if (spoken !== null) say("user", spoken);
         response = await tool("submit_answer", {
           ask_number: step.ask,
           decision: step.kind === "unclear" ? "unclear" : step.decision,
@@ -299,6 +337,7 @@ export class FakeVoiceProvider implements VoiceProvider {
           owner_words: words,
         });
       }
+      if (step.kind === "answer") say("agent", "Got it.");
       // A well-behaved agent ends the call when a tool says so.
       if (response.end_call === true) {
         played.endedEarly = true;

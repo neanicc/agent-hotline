@@ -65,6 +65,13 @@ export interface AgentRoutesOptions {
   nicknames?: Readonly<Record<string, string>>;
   /** For tests; defaults to random UUIDs. */
   newId?: () => string;
+  /**
+   * Runs call orchestration's due work (`CallOrchestrator.tick`). Called before
+   * an ask past its `expiresAt` is read, so the queue ends it with its specific
+   * reason (`no-pickup`, `dropped`, ...) before these routes would mark it
+   * expired as a plain `timeout`.
+   */
+  settle?: () => Promise<void>;
 }
 
 const RegisterSessionBody = z.strictObject({
@@ -183,6 +190,16 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
     if (closing.signal.aborted) void reply.header("connection", "close");
   });
 
+  /** Lets call orchestration end any of `asks` that are open and past their time first. */
+  const settleDue = async (asks: readonly Ask[]) => {
+    const now = clock().getTime();
+    const due = asks.some(
+      (ask) => (ask.status === "pending" || ask.status === "in-flight") && now >= Date.parse(ask.expiresAt),
+    );
+    // If orchestration cannot (it is stopping), the plain expiry below still applies.
+    if (due) await options.settle?.().catch(() => {});
+  };
+
   /** Marks `ask` expired, with an audit entry, if it is still open and its time is up. */
   const expireIfDue = (ask: Ask): boolean => {
     if (
@@ -210,8 +227,12 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
         if (answer === undefined) throw new Error("answered ask without a stored answer");
         return { ask: current, outcome: { outcome: "answered", answer } };
       }
-      case "expired":
-        return { ask: current, outcome: { outcome: "no-answer", askId: current.id, reason: "timeout" } };
+      case "expired": {
+        // The specific reason call orchestration recorded (no pickup, dropped, unclear, ...).
+        const ended = store.askEndReason(current.id);
+        const reason = ended === undefined || ended === "delivered" ? "timeout" : ended;
+        return { ask: current, outcome: { outcome: "no-answer", askId: current.id, reason } };
+      }
       case "cancelled":
         return { ask: current, outcome: { outcome: "no-answer", askId: current.id, reason: "cancelled" } };
       default:
@@ -306,6 +327,7 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
     const { kind, urgent = false } = body.data;
     // Expired asks must not keep counting against the caps below, even if nobody
     // has polled them since (a killed agent, an undelivered notification).
+    await settleDue(store.listAsks(["pending", "in-flight"]));
     for (const open of store.listAsks(["pending", "in-flight"])) expireIfDue(open);
     if (kind === "stop") {
       // A session ends one turn at a time, so an older open stop is stale (its hook
@@ -382,11 +404,14 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
     const found = store.getAsk(params.data.askId);
     if (found === undefined) return reply.code(404).send({ error: "unknown ask" });
 
-    let state = outcomeOf(found);
+    await settleDue([found]);
+    let state = outcomeOf(store.getAsk(found.id) ?? found);
     if (state.outcome === undefined) {
       const remaining = Date.parse(state.ask.expiresAt) - clock().getTime();
       await changeOrTimeout(state.ask.id, Math.min(query.data.waitSeconds * 1000, remaining), reply);
-      state = outcomeOf(store.getAsk(state.ask.id) ?? state.ask);
+      const current = store.getAsk(state.ask.id) ?? state.ask;
+      await settleDue([current]);
+      state = outcomeOf(store.getAsk(current.id) ?? current);
     }
     // Also covers a change written by another process, which no listener heard.
     if (state.outcome !== undefined) refreshSessionState(state.ask.sessionId);
@@ -442,6 +467,7 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
     if (!params.success) return invalid(reply, params.error);
     const session = store.getSession(params.data.sessionId);
     if (session === undefined) return reply.code(404).send({ error: "unknown session" });
+    await settleDue(store.listSessionAsks(session.id, INBOX_ASK_LIMIT));
     const asks = store.listSessionAsks(session.id, INBOX_ASK_LIMIT).map(outcomeOf);
     const seen = { ...(store.getSession(session.id) ?? session), lastSeenAt: clock().toISOString() };
     store.putSession(seen);

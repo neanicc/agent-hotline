@@ -220,13 +220,16 @@ SID as `sourceId`), or `{outcome: "no-answer", reason}`:
 | Ask kind | Answered by |
 | --- | --- |
 | `question` | an offered option number, or any other non-command text verbatim (a number is text when no options were offered) |
-| `permission` | `no` denies. `yes` allows a low-risk request. A high-risk one needs `yes <code>` with the one-time code the daemon put in the text it sent, which sets `confirmation: "text"`. A wrong code, or a code when none was sent, is no answer |
+| `permission` | `no` denies. Approval needs `yes <code>` with the one-time code the daemon put in the text it sent, for every request, low risk included; it sets `confirmation: "text"`. A bare `yes`, a wrong code, or a code when none was sent, is no answer |
 | `stop` | `done` or `no` lets the agent stop; other text is the next instruction; `yes` is no answer |
 | `notify` | nothing |
 
 Commands, carrier keywords, empty or over-long texts and anything
 `answerProblem` rejects are no answer. Free text never approves: only an exact
-yes word does. Call `smsAnswer` only for a text from the owner's number on a
+yes word with the request's code does. The code is required for every
+approval because Twilio signatures carry no timestamp: a captured, signed
+"yes", or one meant for something else, must never approve a newer request.
+Call `smsAnswer` only for a text from the owner's number on a
 verified webhook, since `confirmation: "text"` rests on that check. The owner's
 PIN is never accepted by text, so it never passes through Twilio.
 
@@ -281,8 +284,15 @@ decision it submits or what `owner_words` it sends.
 - `FakeVoiceProvider`: records each placed call and its variables, and plays
   scripted humans (`scriptedHuman.noPickup()`, `busy()`, `silent()`, `drops()`,
   `allows()`, `denies()`, `unclear()`, `wrongPin()`, or `says(...steps)` with
-  `pin`, `answer`, `unclear`, `status`, `instruct`, `silence` and `hang-up`
-  steps) through a `VoiceToolClient`. `httpVoiceToolClient` sends those tool
+  `pin`, `answer`, `unclear`, `say`, `status`, `instruct`, `silence` and `hang-up`
+  steps) through a `VoiceToolClient`. On an outbound call the fake agent speaks
+  the first message, then reads each ask (its `asks` line, unfenced) as its own
+  agent turn just before the first step that answers it, and says "Got it." after
+  each answer, so the transcript has the order the daemon checks. `say` is owner
+  speech with no tool call ("yes, I can hear you"). An `answer` step's `spoken`
+  sets what the owner actually says (default: its `words`); `null` means the
+  voice model submits `words` the owner never said there, for tests of a
+  confused or prompt-injected model. `httpVoiceToolClient` sends those tool
   calls to the daemon's real routes with the tool secret and signs the post-call
   webhooks, so the scenario suite exercises authentication too.
   `playPending()` plays placed calls in order (a call without a script is not
@@ -328,7 +338,9 @@ nickname again before fencing it.
 `owner_words` is written by the voice model. `ownerSaid(excerpt, transcript)`
 checks it against the owner's turns of the post-call transcript (case and
 punctuation ignored, whole words, never agent or caller turns). Call
-orchestration should confirm a voice decision with it before trusting it.
+orchestration confirms every voice decision with it, only within the owner
+turns between the reading of that ask and the reading of the next one
+([daemon.md](daemon.md#call-orchestration)).
 `parsePostCallEvent(body, {ownerNumber, pinVerifiedAt})` labels the person's
 turns `owner` only on an outbound call to the owner's number, or for turns
 spoken after the PIN was verified on an inbound call from it (the call's

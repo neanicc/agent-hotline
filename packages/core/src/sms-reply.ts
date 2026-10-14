@@ -42,7 +42,7 @@ const COMMANDS = new Map<string, SmsCommand>([
 /** Twilio's reserved opt-in and help keywords: Twilio sends its own reply. */
 const CARRIER_KEYWORDS = new Set(["start", "unstop", "help", "info"]);
 
-/** A one-time code the daemon puts in a high-risk approval text: 4 to 10 digits. */
+/** A one-time code the daemon puts in every permission request it texts: 4 to 10 digits. */
 const CODE = /^\d{4,10}$/;
 
 /** Lower case, single spaces, plain apostrophes, no trailing punctuation. */
@@ -94,8 +94,9 @@ export interface SmsAnswerInput {
   receivedAt: Date;
   /**
    * The one-time code the daemon put in the text this message replies to. A
-   * reply of "yes <code>" with this code is a confirming text, which a high-risk
-   * approval needs. Leave unset when no code was sent.
+   * reply of "yes <code>" with this code is a confirming text, which every
+   * approval of a permission request by text needs, whatever its risk. Leave
+   * unset when no code was sent; then no text can approve the request.
    */
   confirmationCode?: string;
 }
@@ -124,11 +125,10 @@ function decide(
     case "permission":
       if (reply.type === "no") return { decision: { type: "deny" }, confirmed: false };
       if (reply.type !== "yes") return "only a clear yes or no answers a permission request";
-      if (reply.code === undefined) {
-        return ask.risk === "high"
-          ? "a high-risk approval needs the confirmation code from the text"
-          : { decision: { type: "allow" }, confirmed: false };
-      }
+      // Every approval by text names its ask with that ask's single-use code, low
+      // risk included: Twilio signatures carry no timestamp, so a bare "yes"
+      // (replayed, or meant for something else) must never approve a new request.
+      if (reply.code === undefined) return "an approval by text needs the confirmation code from the text";
       if (confirmationCode === undefined || !codesMatch(reply.code, confirmationCode)) {
         return "the confirmation code does not match";
       }
