@@ -937,3 +937,45 @@ Template:
   - A provider hang-up for `end-call`.
   - HL-10: inbound answers, `status` by text, the instruction queue, texting the
     owner about PIN lockouts. HL-13: persist PIN and webhook replay memories.
+- Coordinator security review of 3798cf1 (`voice-confirm.ts`, three fail-open
+  flaws), fixed here:
+  - Window: an agent turn not recognised as any reading (a paraphrase below
+    the threshold, or a tie, which agent-written ask text can engineer) did not
+    end an ask's window, so the owner's "yes" to the next ask confirmed the
+    previous one. Now an ask's windows are only the person's turns right after
+    an agent turn recognised as reading it, and any other agent turn closes the
+    window; a re-reading opens a new one. Tests: a paraphrased reading of B then
+    "yes" confirms neither A nor B; a tie then "yes" confirms no ask.
+  - Retraction: the shortest matching run was used, so "yes" then "no, wait,
+    don't" in the same window confirmed an allow. Now, for every decision but a
+    deny, a later doubtful turn about the ask takes the answer back; for an
+    allow, nothing the owner said in any of the ask's windows may sound
+    doubtful, and the owner's last words about it must be a yes (or close the
+    matched yes). Decision: "no... okay, yes" is not an approval (strict, fail
+    closed); the owner can approve by text or on another call. Tests: yes then
+    no, yes then wait, yes then a re-read and "no, don't", the change of mind,
+    silence after a re-read, and free text taken back with "never mind",
+    "actually ..." and "no, cancel that".
+  - Contractions: tokens split "wouldn't" into `wouldn` + `t`, so "Okay, I
+    wouldn't do that" was a clear yes. `soundsDoubtful` now normalises
+    apostrophe look-alikes (`’ ‘ ʼ ` ´ ′`), treats any `n't`, a bare `t` token,
+    `cannot` and the apostrophe-less forms (`wouldnt`, `cant`, `wont`, ...) as
+    doubt, and adds "dont do", "hang on", "hold on", "not yet", "later",
+    "negative", "abort" and "no way". Tests cover each contraction, the curly
+    forms and the dropped-apostrophe forms.
+  - Deny: a deny is safe and needs only the owner's words in a window. It now
+    wins over any other decision held for the ask on the same call (a later
+    allow gets `not-recorded`; a later deny replaces an allow). An unconfirmed
+    deny records nothing as the owner's words but ends the permission request
+    at once as no answer (`unclear`, so a deny), and it is never texted for
+    approval. An unconfirmed allow is no answer from the call (the ask stays
+    open and is texted), never a deny turned into an allow. Tests included.
+  - Evidence: `scripts/ci/run.sh build` and `test` pass (829 tests, 3 runs in a
+    row). Mutation checks, each reverted: the window running past unrecognised
+    agent turns, which is the reported flaw (4 tests fail); no retraction check
+    (3); allow ignoring doubt before the match (1); allow ignoring the last
+    words (1); no apostrophe normalisation (1); deny no longer winning a
+    conflict (1); unconfirmed deny left open (2); trusting `owner_words` (5);
+    greeting reading an ask (1); no yes-word check (1). The `n't` check alone
+    survives because the bare-`t` token check catches the same input;
+    removing both fails 17 tests.

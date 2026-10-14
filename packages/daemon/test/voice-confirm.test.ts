@@ -1,6 +1,6 @@
 import type { TranscriptTurn } from "@hotline/providers";
 import { describe, expect, it } from "vitest";
-import { answerWindow, confirmVoiceDecision, type ReadAsk, readings } from "../src/index.js";
+import { answerWindows, confirmVoiceDecision, type ReadAsk, readings, soundsDoubtful } from "../src/index.js";
 
 const PUSH: ReadAsk = { text: "git push origin main", nickname: "Claude in demo-app", toolName: "Bash" };
 const INSTALL: ReadAsk = { text: "npm install left-pad", nickname: "Codex in api-server", toolName: "Bash" };
@@ -46,17 +46,17 @@ describe("readings", () => {
   });
 });
 
-describe("answerWindow", () => {
-  it("runs from the ask's reading to the reading of a different ask", () => {
-    const transcript = [GREETING, READ_PUSH, owner("yes"), agent("Got it."), READ_INSTALL, owner("no")];
-    expect(answerWindow(transcript, [PUSH, INSTALL], 0)).toEqual([owner("yes"), agent("Got it.")]);
-    expect(answerWindow(transcript, [PUSH, INSTALL], 1)).toEqual([owner("no")]);
-    expect(answerWindow([GREETING, owner("yes")], [PUSH], 0)).toBeUndefined();
+describe("answerWindows", () => {
+  it("is the owner's turns right after the reading, up to the next agent turn of any kind", () => {
+    const transcript = [GREETING, READ_PUSH, owner("yes"), agent("Got it."), owner("thanks"), READ_INSTALL];
+    expect(answerWindows([...transcript, owner("no")], [PUSH, INSTALL], 0)).toEqual([[owner("yes")]]);
+    expect(answerWindows([...transcript, owner("no")], [PUSH, INSTALL], 1)).toEqual([[owner("no")]]);
+    expect(answerWindows([GREETING, owner("yes")], [PUSH], 0)).toBeUndefined();
   });
 
-  it("keeps going through a repeat of the same ask", () => {
+  it("opens a new window for each re-reading of the same ask", () => {
     const transcript = [GREETING, READ_PUSH, owner("what?"), READ_PUSH, owner("yes, push it")];
-    expect(answerWindow(transcript, [PUSH], 0)).toEqual([owner("what?"), READ_PUSH, owner("yes, push it")]);
+    expect(answerWindows(transcript, [PUSH], 0)).toEqual([[owner("what?")], [owner("yes, push it")]]);
   });
 });
 
@@ -136,5 +136,120 @@ describe("confirmVoiceDecision", () => {
       }).confirmed;
     expect(check("Skip Windows.")).toBe(true);
     expect(check("skip windows and delete the CI config")).toBe(false);
+  });
+
+  it("an agent turn not recognised as this ask ends its window: a paraphrased reading of another", () => {
+    const paraphrase = agent("And the other one is about a package. Okay?");
+    const transcript = [GREETING, READ_PUSH, owner("hmm"), paraphrase, owner("yes")];
+    expect(confirm(transcript, 0, "yes").confirmed).toBe(false);
+    expect(confirm(transcript, 1, "yes").confirmed).toBe(false);
+  });
+
+  it("a tied reading followed by a yes confirms no ask", () => {
+    const copy: ReadAsk = { ...PUSH };
+    const asks = [INSTALL, PUSH, copy];
+    const transcript = [GREETING, READ_INSTALL, owner("hmm"), READ_PUSH, owner("yes")];
+    expect(readings(transcript, asks)[3]).toBeUndefined();
+    for (const index of [0, 1, 2]) {
+      expect(
+        confirmVoiceDecision({ transcript, asks, index, decision: allow, ownerWords: "yes" }).confirmed,
+      ).toBe(false);
+    }
+  });
+
+  it("a later retraction takes a yes back", () => {
+    expect(confirm([GREETING, READ_PUSH, owner("yes"), owner("no")], 0, "yes").confirmed).toBe(false);
+    expect(confirm([GREETING, READ_PUSH, owner("yes"), owner("wait")], 0, "yes").confirmed).toBe(false);
+    const reRead = agent("Just to confirm: git push origin main via Bash?");
+    expect(confirm([GREETING, READ_PUSH, owner("yes"), reRead, owner("no, don't")], 0, "yes").confirmed).toBe(
+      false,
+    );
+  });
+
+  it("is strict about a change of mind: 'no... okay, yes' is not an approval", () => {
+    const reRead = agent("Just to confirm: git push origin main via Bash?");
+    expect(
+      confirm([GREETING, READ_PUSH, owner("no"), reRead, owner("okay yes")], 0, "okay yes").confirmed,
+    ).toBe(false);
+  });
+
+  it("needs the owner's last words about the ask to be a yes", () => {
+    const reRead = agent("Just to confirm: git push origin main via Bash?");
+    expect(confirm([GREETING, READ_PUSH, owner("yes"), reRead, owner("hmm")], 0, "yes").confirmed).toBe(
+      false,
+    );
+    expect(confirm([GREETING, READ_PUSH, owner("yes"), reRead], 0, "yes").confirmed).toBe(false);
+    expect(
+      confirm([GREETING, READ_PUSH, owner("what?"), reRead, owner("yes, push it")], 0, "yes push it")
+        .confirmed,
+    ).toBe(true);
+  });
+
+  it("takes a refusal from the owner's words whatever else was said", () => {
+    const deny = { type: "deny" } as never;
+    expect(confirm([GREETING, READ_PUSH, owner("no"), owner("okay yes")], 0, "no", deny).confirmed).toBe(
+      true,
+    );
+  });
+
+  it.each(["never mind", "actually, pin the older one", "no, cancel that"])(
+    "a free-text answer taken back with %j is not confirmed",
+    (later) => {
+      const transcript = [
+        GREETING,
+        agent("Claude asks: pin the older ONNX version or skip Windows?"),
+        owner("skip windows"),
+        owner(later),
+      ];
+      const result = confirmVoiceDecision({
+        transcript,
+        asks: [QUESTION],
+        index: 0,
+        decision: { type: "text", text: "skip windows" },
+        ownerWords: "skip windows",
+      });
+      expect(result).toEqual({ confirmed: false, reason: "the owner took the answer back" });
+    },
+  );
+
+  it.each([
+    "Okay, I wouldn't do that",
+    "sure, I can't let it",
+    "yes, I shouldn't say",
+    "ok it won't hurt",
+    "yes isn't it",
+    "yes didn't",
+    "yes doesn't",
+    "yes couldn't",
+    "yes haven't",
+    "yes ain't",
+    "okay, I wouldn’t",
+    "sure, can‘t",
+    "yes wonʼt",
+    "yes isn`t",
+    "yes didn´t",
+    "yes don′t",
+    "ok wouldnt",
+    "ok cant",
+    "ok wont",
+    "ok shouldnt",
+    "ok isnt",
+    "ok didnt",
+    "yes cannot",
+    "yes, hang on",
+    "okay hold on",
+    "yes not yet",
+    "yes, later",
+    "negative, yes",
+    "yes abort",
+    "no way, yes",
+    "yes dont do it",
+  ])("%j is never a clear yes", (said) => {
+    expect(soundsDoubtful(said)).toBe(true);
+    expect(confirm([GREETING, READ_PUSH, owner(said)], 0, said).confirmed).toBe(false);
+  });
+
+  it.each(["yes go ahead", "sure", "okay push it", "yep, do it"])("%j sounds like a plain yes", (said) => {
+    expect(soundsDoubtful(said)).toBe(false);
   });
 });

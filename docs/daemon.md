@@ -280,24 +280,47 @@ store, the providers and the webhooks through core's pure queue
 - **Voice answers are held, then confirmed.** `submit_answer` is accepted only
   on a call Hotline placed and is still waiting on, as an outbound call, for an
   ask still on that call. A high-risk `allow` without the PIN on this call is
-  `needs-pin`. A second, different decision for the same ask on one call cancels
-  both (`voice.answer-conflict`). Accepted answers are held (`recorded` tells the
+  `needs-pin`. A deny always wins: once one is held for an ask, a later
+  different decision gets `not-recorded`, and a later deny replaces anything
+  held. Two different decisions that are not a deny cancel each other
+  (`voice.answer-conflict`). Accepted answers are held (`recorded` tells the
   voice agent they arrived) until the post-call transcript. There each held
   answer must pass `confirmVoiceDecision` (`voice-confirm.ts`):
-  - the agent turn that read the ask is found by its key words (at least half,
-    best match, ties read nothing; the call's first agent turn, the fixed
-    greeting, never counts), and the owner's words must come from owner turns
-    after it and before the agent read a different ask, matched with
-    `ownerSaid`. A "yes" said before the ask was read, or after another one,
-    never confirms it;
+  - the agent turns that read the ask are found by their key words (at least
+    half, best match, ties read nothing; the call's first agent turn, the fixed
+    greeting, never counts). The ask's windows are the person's turns right
+    after each such reading, up to the next agent turn of any kind: an agent
+    turn not recognised as reading this ask (a paraphrase, a tie, another ask,
+    small talk) always closes the window, and a re-reading opens a new one. The
+    owner's words must be found in a window with `ownerSaid`. A "yes" said
+    before the ask was read, or after anything else the agent said, never
+    confirms it;
   - free text (a question's answer, a stop's next instruction) must itself be
     words the owner said;
-  - an `allow` must contain a yes word (`yes`, `okay`, `go`, ...) and no word of
-    refusal or hesitation (`no`, `not`, `don't`, `wait`, `maybe`, `but`, ...).
-  The stored `ownerExcerpt` is the matching owner turns, verbatim, not the
-  model's `owner_words`. Anything unconfirmed is dropped
-  (`voice.answer-unconfirmed`) and the ask stays open. Confirmed answers and
-  `unclear` reports reach the queue before the call's `call-ended`.
+  - an answer is taken back by anything the owner said about the ask after it
+    that sounds doubtful (below), such as "no", "wait", "never mind",
+    "actually";
+  - an `allow` must be unambiguous: the matched words hold a yes word (`yes`,
+    `okay`, `go`, ...), nothing the owner said in any of the ask's windows
+    sounds doubtful, and the owner's last words about the ask (in its last
+    window) are a yes or close the matched yes. "No... okay, yes" is not an
+    approval; the owner can approve by text or on another call.
+  "Sounds doubtful" (`soundsDoubtful`) means refusal, negation, hesitation,
+  delay or correction: words such as `no`, `not`, `never`, `wait`, `hold`,
+  `later`, `maybe`, `but`, `cancel`, `abort`, `negative`, `cannot`, `actually`,
+  any `n't` (apostrophe look-alikes such as `’`, `ʼ`, `` ` ``, `´` and `′` are
+  normalised first) and the same forms typed without it (`dont`, `wouldnt`,
+  `cant`, ...), and the phrases "hang on", "hold on", "not yet", "no way" and
+  "never mind".
+  A `deny` needs only the owner's words in a window; nothing else can block a
+  refusal. The stored `ownerExcerpt` is the matching owner turns, verbatim, not
+  the model's `owner_words`. An unconfirmed answer is dropped
+  (`voice.answer-unconfirmed`): an unconfirmed `allow` or other answer leaves
+  the ask open (no answer from the call; call policy texts it), while an
+  unconfirmed `deny` still ends a permission request at once as no answer
+  (`unclear`), which denies it, and it is never sent out again for approval.
+  Confirmed answers and `unclear` reports reach the queue before the call's
+  `call-ended`.
 - **How a call ended.** `call_initiation_failure` `busy` or `no-answer` is
   `no-pickup`, anything else `failed`. A transcription in which the owner never
   spoke is `no-pickup` (voicemail, silence); one where every ask was settled is

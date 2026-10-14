@@ -333,6 +333,16 @@ export class CallOrchestrator {
     }
     const earlier = call.answers[askId];
     if (earlier !== undefined) {
+      const isDeny = (d: PendingVoiceAnswer["decision"]) => d !== "unclear" && d.type === "deny";
+      // A refusal always wins: once the owner may have said no, nothing on this
+      // call turns it into an approval.
+      if (isDeny(earlier.decision))
+        return sameDecision(earlier.decision, pending.decision) ? "recorded" : "not-recorded";
+      if (isDeny(pending.decision)) {
+        call.answers[askId] = pending;
+        this.#save();
+        return "recorded";
+      }
       // A repeat of the same decision is fine; a different one means nobody can
       // tell what the owner chose, so neither counts.
       if (!earlier.conflict && sameDecision(earlier.decision, pending.decision)) return "recorded";
@@ -391,6 +401,13 @@ export class CallOrchestrator {
               askId,
               callId: call.callId,
             });
+            if (held.decision.type === "deny") {
+              // A refusal takes effect even unconfirmed: nothing is recorded as the
+              // owner's words, but the request ends now as no answer (a deny), and is
+              // never sent out again for approval.
+              events.push({ type: "unclear", askId });
+              settled += 1;
+            }
             return;
           }
           events.push({
