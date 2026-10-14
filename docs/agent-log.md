@@ -131,3 +131,56 @@ Template:
   checks need. Putting the provider calls behind a separately signed helper with
   its own Keychain access list would close the gap. That is Tier 2 work, not a
   Tier 1 ticket.
+
+## 2026-10-13 — HL-03 Ask queue and call policy
+
+- Decision / change: `packages/core` gains `policy.ts` (settings, priority, quiet
+  hours, rolling rate limits) and `queue.ts`, a pure state machine:
+  `step(state, event, now, settings)` returns a new JSON-serializable state and
+  actions (`place-call`, `send-text`, `resolve`, `delivered`, `ignored`) for the
+  daemon to execute, and `nextWakeAt` says when to tick. No contract changed.
+  Documented in `docs/contracts.md`. Choices the plan leaves open, taken without
+  asking: priority is urgent, then permission > question > stop > notify, then
+  oldest. A new ask waits the batch window, then one call covers every callable
+  waiting ask (at most 4 per call, one call at a time). Duplicates (same session,
+  kind, text, options, tool and risk while the first is open) share its answer,
+  each re-checked with `answerProblem`. Quiet hours text everything except urgent
+  asks when `allowUrgentCalls` is set, and only those urgent asks join a
+  quiet-hours call. Equal start and end means no quiet time. Rate limits are rolling
+  1 h and 24 h windows. Over the call limit an ask is texted; over the text limit
+  too, it waits for a slot or expires. No pickup or a failed call retries once
+  after 2 minutes, then texts (the HL-03 wording; HL-09's row says "no pickup to
+  text to retry", and the eval scenario only needs the text). A dropped call, or
+  one that ended with the ask open, texts at once. An unclear answer ends the ask
+  as `no-answer` (`unclear`) at once, matching `unclear-answer-denies`.
+  Notifications are text-only and end with `delivered`, not an outcome. A call
+  never reported as ended counts as dropped after 15 minutes. Retry count and
+  delay, asks per call and the stuck-call timeout are constants, not config, so
+  the config contract is unchanged. No plan section 12 question bears on the
+  queue.
+- Safety (issue #10 carry-over): an `answered` outcome comes only from an
+  `answer` event that parses, targets an open ask, arrives on a channel the ask
+  went out on, and passes `answerProblem(ask, answer, receivedAt)`. A high-risk
+  allow without PIN or text confirmation is ignored and the ask stays open, so
+  silence after it still ends as a deny. `permissionVerdict(ask, outcome)` gives
+  HL-06 one function that denies everything except a confirmed owner approval,
+  and it re-parses the outcome so a missing `confirmation` cannot slip through.
+- Dependency: fast-check 4.10.2 (released 2026-09-19; its one dependency
+  pure-rand 8.4.2 is from 2026-07-10) as a core dev dependency for property tests.
+- Evidence (automated, worktree, Node 24.11.0 locally; CI covers Node 22):
+  `pnpm --filter @hotline/core test` passes 97 tests in 8 files. Three
+  properties of 400/400/100 runs each cover about 32,000 steps, 970 calls, 1,400
+  texts and 530 answered outcomes per run of the suite. Every answered outcome is
+  re-checked against `answerProblem` and the channel. The silent property asserts
+  only `no-answer` outcomes and `deny` verdicts. Both check one call at a time,
+  rate limits over every rolling window, quiet hours, and exactly one end per ask
+  by its expiry. A mutation check run by hand broke the queue six ways: skipping
+  `answerProblem`, ignoring the call limit, ignoring quiet hours, skipping the
+  channel check, turning an unclear answer into an allow, and dropping expiry.
+  Each made the property tests fail. No scenario suite exists yet (HL-12); no real
+  agent or live call evidence applies.
+- Open issues or follow-ups: HL-09 drives `step` and `nextWakeAt`, maps text
+  replies to ask ids, and picks a stored status for a delivered notification
+  (`AskStatus` has no `delivered`). A `call me` text reply has no queue event yet.
+  An ask held only by the text limit during quiet hours is not woken when quiet
+  hours end; it waits for a text slot or its expiry.
