@@ -81,26 +81,49 @@ const Turn = z.object({
 });
 const PhoneCall = z.object({
   direction: z.string().nullish(),
+  /** The owner's number on every call Hotline serves: called on an outbound call, caller on an inbound one. */
   external_number: z.string().nullish(),
+  /** The Hotline number ElevenLabs answered or dialled from. */
+  agent_number: z.string().nullish(),
+  /** ElevenLabs' id of that number (`config.voice.agentPhoneNumberId`). */
+  phone_number_id: z.string().nullish(),
   call_sid: z.string().nullish(),
 });
+
+/**
+ * One conversation as ElevenLabs holds it: the `data` of a post-call
+ * transcription webhook, and the body of GET /v1/convai/conversations/{id}
+ * (https://elevenlabs.io/docs/api-reference/conversations/get), which share
+ * these fields. Unknown fields are dropped.
+ */
+const ConversationData = z.object({
+  agent_id: z.string().min(1),
+  conversation_id: z.string().min(1).max(128),
+  /** `initiated`, `in-progress`, `processing`, `done` or `failed`. */
+  status: z.string(),
+  transcript: z.array(Turn).default([]),
+  metadata: z
+    .object({
+      start_time_unix_secs: z.number().nullish(),
+      call_duration_secs: z.number().nullish(),
+      phone_call: PhoneCall.nullish(),
+    })
+    .nullish(),
+});
+
+/** A conversation pulled from ElevenLabs (HL-13a), reduced to the fields Hotline checks. */
+export type ConversationRecord = z.infer<typeof ConversationData>;
+
+/** A conversation record from ElevenLabs' API, or undefined when the body is not one. */
+export function parseConversation(body: unknown): ConversationRecord | undefined {
+  const parsed = ConversationData.safeParse(body);
+  return parsed.success ? parsed.data : undefined;
+}
 
 const Transcription = z.object({
   type: z.literal("post_call_transcription"),
   event_timestamp: z.number(),
-  data: z.object({
-    agent_id: z.string().min(1),
-    conversation_id: z.string().min(1).max(128),
-    status: z.string(),
-    transcript: z.array(Turn).default([]),
-    metadata: z
-      .object({
-        start_time_unix_secs: z.number().nullish(),
-        call_duration_secs: z.number().nullish(),
-        phone_call: PhoneCall.nullish(),
-      })
-      .nullish(),
-  }),
+  data: ConversationData,
 });
 
 const InitiationFailure = z.object({
@@ -188,40 +211,7 @@ export function parsePostCallEvent(body: unknown, owner?: OwnerContext): PostCal
   const type = (body as { type?: unknown } | null)?.type;
   if (type === "post_call_transcription") {
     const parsed = Transcription.safeParse(body);
-    if (!parsed.success) return undefined;
-    const { data } = parsed.data;
-    const phone = data.metadata?.phone_call;
-    const direction =
-      phone?.direction === "inbound" || phone?.direction === "outbound" ? phone.direction : undefined;
-    const from = ownerFrom(owner, data.conversation_id, direction, phone?.external_number);
-    const start = data.metadata?.start_time_unix_secs;
-    /** A turn is the owner's only when it is known to come after `from`; an unknown time is not. */
-    const person = (turn: z.infer<typeof Turn>): "owner" | "caller" => {
-      if (from === undefined) return "caller";
-      if (from === Number.NEGATIVE_INFINITY) return "owner";
-      const at =
-        typeof start === "number" && typeof turn.time_in_call_secs === "number"
-          ? start + turn.time_in_call_secs
-          : undefined;
-      return at !== undefined && at > from ? "owner" : "caller";
-    };
-    return {
-      type: "transcription",
-      agentId: data.agent_id,
-      conversationId: data.conversation_id,
-      status: data.status,
-      ...(direction === undefined ? {} : { direction }),
-      ...(phone?.external_number ? { externalNumber: phone.external_number } : {}),
-      ...(phone?.call_sid ? { callSid: phone.call_sid } : {}),
-      ...(typeof data.metadata?.call_duration_secs === "number"
-        ? { durationSeconds: data.metadata.call_duration_secs }
-        : {}),
-      transcript: data.transcript.flatMap((turn): TranscriptTurn[] =>
-        (turn.role === "user" || turn.role === "agent") && typeof turn.message === "string"
-          ? [{ role: turn.role === "agent" ? "agent" : person(turn), message: turn.message }]
-          : [],
-      ),
-    };
+    return parsed.success ? conversationEvent(parsed.data.data, owner) : undefined;
   }
   if (type === "call_initiation_failure") {
     const parsed = InitiationFailure.safeParse(body);
@@ -237,6 +227,49 @@ export function parsePostCallEvent(body: unknown, owner?: OwnerContext): PostCal
     };
   }
   return typeof type === "string" ? { type: "other" } : undefined;
+}
+
+/**
+ * A conversation record (a webhook's `data`, or one pulled from ElevenLabs'
+ * API) as a transcription event, with the person's turns labelled as in
+ * `parsePostCallEvent`.
+ */
+export function conversationEvent(
+  data: ConversationRecord,
+  owner?: OwnerContext,
+): Extract<PostCallEvent, { type: "transcription" }> {
+  const phone = data.metadata?.phone_call;
+  const direction =
+    phone?.direction === "inbound" || phone?.direction === "outbound" ? phone.direction : undefined;
+  const from = ownerFrom(owner, data.conversation_id, direction, phone?.external_number);
+  const start = data.metadata?.start_time_unix_secs;
+  /** A turn is the owner's only when it is known to come after `from`; an unknown time is not. */
+  const person = (turn: z.infer<typeof Turn>): "owner" | "caller" => {
+    if (from === undefined) return "caller";
+    if (from === Number.NEGATIVE_INFINITY) return "owner";
+    const at =
+      typeof start === "number" && typeof turn.time_in_call_secs === "number"
+        ? start + turn.time_in_call_secs
+        : undefined;
+    return at !== undefined && at > from ? "owner" : "caller";
+  };
+  return {
+    type: "transcription",
+    agentId: data.agent_id,
+    conversationId: data.conversation_id,
+    status: data.status,
+    ...(direction === undefined ? {} : { direction }),
+    ...(phone?.external_number ? { externalNumber: phone.external_number } : {}),
+    ...(phone?.call_sid ? { callSid: phone.call_sid } : {}),
+    ...(typeof data.metadata?.call_duration_secs === "number"
+      ? { durationSeconds: data.metadata.call_duration_secs }
+      : {}),
+    transcript: data.transcript.flatMap((turn): TranscriptTurn[] =>
+      (turn.role === "user" || turn.role === "agent") && typeof turn.message === "string"
+        ? [{ role: turn.role === "agent" ? "agent" : person(turn), message: turn.message }]
+        : [],
+    ),
+  };
 }
 
 /** Apostrophe look-alikes a transcript may use, as in "don’t". */

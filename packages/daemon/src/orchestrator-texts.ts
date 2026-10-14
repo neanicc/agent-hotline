@@ -5,19 +5,21 @@
 //
 // A text answer is accepted only for the one ask Hotline texted that is still
 // open, and every permission request needs `YES <code>` with a random,
-// single-use code that dies with the ask. Texts reach this file only from the
+// single-use code that dies with the ask. The store keeps only each code's
+// salted hash (HL-13a). Texts reach this file only from the
 // owner's number on a verified webhook, once per message SID (remembered in
 // the store across restarts).
 import { randomInt } from "node:crypto";
 import type { Ask, QueueAction, QueueEvent } from "@hotline/core";
 import type { SmsProvider } from "@hotline/providers";
+import { hashCode, matchingHashes } from "./code-hash.js";
 import {
   dropEvent,
   notReachable,
   type OrchestratorLog,
   type OrchestratorState,
 } from "./orchestrator-state.js";
-import { planTextReply, replyHint, replyKind, TEXT_REPLIES, textFor } from "./owner-texts.js";
+import { planTextReply, presentedCode, replyHint, replyKind, TEXT_REPLIES, textFor } from "./owner-texts.js";
 import type { OwnerSms } from "./sms-webhook.js";
 import type { HotlineStore } from "./store.js";
 
@@ -61,14 +63,19 @@ export class OwnerTexts {
     const sms = this.#options.sms;
     const state = this.#state.data;
     // Every permission request carries a code: no text approves one without it.
-    // A text sent again (say, on recovery) keeps the code the owner may already have.
-    const code = ask.kind === "permission" ? (state.codes[askId] ?? this.#newCode()) : undefined;
+    // Only its salted hash is kept (HL-13a), so a text sent again (say, on
+    // recovery) cannot repeat the code: it carries a fresh one, which replaces
+    // the old. The earlier text's code, if it ever went out, then no longer works.
     if (sms === undefined) {
       this.#store.appendAudit("text.failed", { reason: "no SMS provider" }, now, { askId });
       return [{ type: "text-failed", askId }];
     }
+    const code = ask.kind === "permission" ? await this.#newCode(askId) : undefined;
     if (code !== undefined) {
-      state.codes[askId] = code;
+      state.codes[askId] = await hashCode(code);
+      this.#state.save();
+    } else if (state.codes[askId] !== undefined) {
+      delete state.codes[askId];
       this.#state.save();
     }
     const nickname = this.#store.getSession(ask.sessionId)?.nickname ?? "An agent";
@@ -102,12 +109,15 @@ export class OwnerTexts {
   }
 
   /** A random 6-digit code the redactor leaves alone and no other waiting ask has. */
-  #newCode(): string | undefined {
-    const outstanding = new Set(Object.values(this.#state.data.codes));
+  async #newCode(askId: string): Promise<string | undefined> {
+    const outstanding = Object.entries(this.#state.data.codes).flatMap(([id, hash]) =>
+      id === askId ? [] : [hash],
+    );
     for (let tries = 0; tries < 20; tries++) {
       const code = this.#options.newCode?.() ?? String(randomInt(0, 1_000_000)).padStart(6, "0");
-      if (/^\d{4,10}$/.test(code) && !outstanding.has(code) && this.#options.redact(code) === code)
-        return code;
+      if (!/^\d{4,10}$/.test(code) || this.#options.redact(code) !== code) continue;
+      // Hashed off the event loop: the daemon keeps serving while the codes are compared.
+      if ((await matchingHashes(code, outstanding)).size === 0) return code;
     }
     // No usable code: the request goes out without one and cannot be approved by text.
     return undefined;
@@ -148,27 +158,51 @@ export class OwnerTexts {
     }
   }
 
-  async #handle({ messageSid, body, receivedAt, optOutType }: OwnerSms): Promise<string | undefined> {
+  async #handle({
+    messageSid,
+    body,
+    receivedAt,
+    writtenAt,
+    optOutType,
+  }: OwnerSms): Promise<string | undefined> {
     this.#store.appendAudit("sms.received", { messageSid, reply: replyKind(body) }, receivedAt);
     const state = this.#state.data;
+    // Recorded by `ownerText` just before; a fresh claim reads `receivedAt`.
+    const claimedAt = this.#store.inboundMessageFirstSeen(messageSid) ?? receivedAt;
+    const waiting = state.queue.open
+      .filter((q) => q.texted && q.duplicateOf === undefined)
+      .map((q) => {
+        const codeHash = state.codes[q.ask.id];
+        const sent = state.textedAt[q.ask.id];
+        return {
+          ask: q.ask,
+          ...(codeHash === undefined ? {} : { codeHash }),
+          ...(sent === undefined ? {} : { sentAt: new Date(sent) }),
+        };
+      });
+    // A presented code is compared with every waiting hash off the event loop.
+    // Text handling is serialized with the rest of call orchestration, so the
+    // waiting asks cannot change meanwhile.
+    const code = optOutType === undefined ? presentedCode(body) : undefined;
+    const matchingCodeHashes =
+      code === undefined
+        ? new Set<string>()
+        : await matchingHashes(
+            code,
+            waiting.flatMap((w) => (w.codeHash === undefined ? [] : [w.codeHash])),
+          );
     const plan = planTextReply({
       body,
       messageSid,
       receivedAt,
-      // Recorded by `ownerText` just before; a fresh claim reads `receivedAt`.
-      firstSeenAt: this.#store.inboundMessageFirstSeen(messageSid) ?? receivedAt,
+      // The earlier of the daemon's first sight and Twilio's own time: a text
+      // written before a request went out can never answer it, even if its
+      // webhook only arrives (or is replayed) later.
+      firstSeenAt:
+        writtenAt !== undefined && writtenAt.getTime() < claimedAt.getTime() ? writtenAt : claimedAt,
       optedOut: optOutType !== undefined,
-      waiting: state.queue.open
-        .filter((q) => q.texted && q.duplicateOf === undefined)
-        .map((q) => {
-          const code = state.codes[q.ask.id];
-          const sent = state.textedAt[q.ask.id];
-          return {
-            ask: q.ask,
-            ...(code === undefined ? {} : { code }),
-            ...(sent === undefined ? {} : { sentAt: new Date(sent) }),
-          };
-        }),
+      waiting,
+      matchingCodeHashes,
     });
     switch (plan.type) {
       case "ignore":

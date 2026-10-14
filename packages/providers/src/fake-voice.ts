@@ -5,9 +5,16 @@
 // would make, sent through a `VoiceToolClient` (normally the daemon's real
 // `/hooks/el/*` routes over HTTP, with the tool secret and a signed post-call
 // webhook), followed by the post-call webhook.
+//
+// It also plays ElevenLabs' conversation API (HL-13a): every call it placed or
+// played can be fetched back with `fetchConversation`, live while the call is
+// going on and finished once its post-call webhook went out, with the
+// transcript the fake actually played. A conversation it never played has no
+// record, like a forged one.
 import type { ToolName } from "./elevenlabs-agent.js";
 import { POST_CALL_PATH, toolPath } from "./elevenlabs-agent.js";
-import { postCallSignatureHeader } from "./elevenlabs-webhook.js";
+import { type ConversationRecord, parseConversation, postCallSignatureHeader } from "./elevenlabs-webhook.js";
+import { PullError } from "./pull.js";
 import { requirePhoneNumber } from "./sms.js";
 import type { HttpFetch } from "./twilio-sms.js";
 import {
@@ -198,6 +205,8 @@ export interface FakeVoiceOptions {
   agentNumber?: string;
   /** The agent id the post-call webhooks carry (`config.voice.agentId`). */
   agentId?: string;
+  /** ElevenLabs' id of the Hotline number (`config.voice.agentPhoneNumberId`); default `phnum_fake`. */
+  phoneNumberId?: string;
   redact?: (text: string) => string;
   client: VoiceToolClient;
   /** Times the transcript turns (normally the scenario's fake clock). */
@@ -221,12 +230,17 @@ export class FakeVoiceProvider implements VoiceProvider {
   readonly #scripts: HumanScript[] = [];
   readonly #failures: Error[] = [];
   readonly #unplayed: FakePlacedCall[] = [];
+  readonly #fetchFailures: Error[] = [];
+  /** ElevenLabs' side of every conversation played, by id, as its API would return it. */
+  readonly #conversations = new Map<string, Record<string, unknown>>();
+  readonly #phoneNumberId: string;
   #count = 0;
 
   constructor(options: FakeVoiceOptions) {
     this.#owner = requirePhoneNumber(options.ownerNumber, "The owner's number");
     this.#agentNumber = requirePhoneNumber(options.agentNumber ?? "+15555550101", "The agent's number");
     this.#agentId = options.agentId ?? "agent_fake";
+    this.#phoneNumberId = options.phoneNumberId ?? "phnum_fake";
     this.#redact = options.redact ?? ((text) => text);
     this.#client = options.client;
     this.#clock = options.clock ?? (() => new Date());
@@ -240,6 +254,24 @@ export class FakeVoiceProvider implements VoiceProvider {
   /** Makes the next `callOwner` reject, as if ElevenLabs refused the call. */
   failNext(error: Error = new VoiceCallError("ElevenLabs refused the call (HTTP 422)", 422)): void {
     this.#failures.push(error);
+  }
+
+  /** Makes the next `fetchConversation` reject with `error` (default: ElevenLabs cannot be reached). */
+  failNextFetch(
+    error: Error = new PullError("Could not reach ElevenLabs (ECONNREFUSED)", "unreachable"),
+  ): void {
+    this.#fetchFailures.push(error);
+  }
+
+  /** ElevenLabs' record of a conversation this fake played; `not-found` for any other id. */
+  async fetchConversation(conversationId: string): Promise<ConversationRecord> {
+    const failure = this.#fetchFailures.shift();
+    if (failure !== undefined) throw failure;
+    const raw = this.#conversations.get(conversationId);
+    if (raw === undefined) throw new PullError("ElevenLabs has no such record (HTTP 404)", "not-found", 404);
+    const record = parseConversation(structuredClone(raw));
+    if (record === undefined) throw new PullError("ElevenLabs answered without a record", "malformed");
+    return record;
   }
 
   async callOwner(call: OutboundCall): Promise<PlacedCall> {
@@ -297,7 +329,28 @@ export class FakeVoiceProvider implements VoiceProvider {
   ): Promise<PlayedCall> {
     const played: PlayedCall = { conversationId, direction, tools: [], endedEarly: false };
     this.played.push(played);
+    const external = direction === "outbound" ? this.#owner : from;
+    const phoneCall = {
+      direction,
+      external_number: external,
+      agent_number: this.#agentNumber,
+      phone_number_id: this.#phoneNumberId,
+      call_sid: callSid,
+      type: "twilio",
+    };
     if (script.kind !== "conversation") {
+      // ElevenLabs keeps a failed conversation with nothing said.
+      this.#conversations.set(conversationId, {
+        agent_id: this.#agentId,
+        conversation_id: conversationId,
+        status: "failed",
+        transcript: [],
+        metadata: {
+          start_time_unix_secs: Math.floor(this.#clock().getTime() / 1000),
+          call_duration_secs: 0,
+          phone_call: phoneCall,
+        },
+      });
       const failure_reason = { "no-pickup": "no-answer", busy: "busy", fail: "unknown" }[script.kind];
       await this.#client.postCall({
         type: "call_initiation_failure",
@@ -306,7 +359,6 @@ export class FakeVoiceProvider implements VoiceProvider {
       });
       return played;
     }
-    const external = direction === "outbound" ? this.#owner : from;
     const binding = {
       conversation_id: conversationId,
       call_sid: callSid,
@@ -315,6 +367,21 @@ export class FakeVoiceProvider implements VoiceProvider {
     };
     const start = this.#clock().getTime();
     const transcript: { role: "user" | "agent"; message: string; time_in_call_secs: number }[] = [];
+    // ElevenLabs' record of the call, live while it lasts: the server tools can
+    // pull it, and its transcript is the one being played.
+    const metadata: Record<string, unknown> = {
+      start_time_unix_secs: Math.floor(start / 1000),
+      call_duration_secs: 0,
+      phone_call: phoneCall,
+    };
+    const record = {
+      agent_id: this.#agentId,
+      conversation_id: conversationId,
+      status: "in-progress",
+      transcript,
+      metadata,
+    };
+    this.#conversations.set(conversationId, record);
     /** One transcript turn, timed by the clock as ElevenLabs would. */
     const say = (role: "user" | "agent", message: string) =>
       transcript.push({ role, message, time_in_call_secs: (this.#clock().getTime() - start) / 1000 });
@@ -433,20 +500,14 @@ export class FakeVoiceProvider implements VoiceProvider {
         break;
       }
     }
+    // The call is over: ElevenLabs' record is final before its webhook goes out.
+    record.status = "done";
+    metadata.call_duration_secs = Math.ceil((this.#clock().getTime() - start) / 1000);
+    // A copy, so a test that tampers with the webhook body never changes the record.
     await this.#client.postCall({
       type: "post_call_transcription",
       event_timestamp: 0,
-      data: {
-        agent_id: this.#agentId,
-        conversation_id: conversationId,
-        status: "done",
-        transcript,
-        metadata: {
-          start_time_unix_secs: Math.floor(start / 1000),
-          call_duration_secs: Math.ceil((this.#clock().getTime() - start) / 1000),
-          phone_call: { direction, external_number: external, call_sid: callSid, type: "twilio" },
-        },
-      },
+      data: structuredClone(record),
     });
     return played;
   }

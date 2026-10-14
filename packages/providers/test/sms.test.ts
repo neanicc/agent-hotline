@@ -18,13 +18,13 @@ const MESSAGE_SID = `SM${"a1".repeat(16)}`;
 
 interface Captured {
   url: string;
-  init: Parameters<HttpFetch>[1];
+  init: Parameters<HttpFetch>[1] & { body: string };
 }
 
 /** A fake HTTP layer: records each request and answers with `status` and `body`. */
 function fakeFetch(status: number, body: unknown, calls: Captured[] = []): HttpFetch {
   return async (url, init) => {
-    calls.push({ url, init });
+    calls.push({ url, init: { ...init, body: init.body ?? "" } });
     return {
       status,
       json: async () => {
@@ -106,8 +106,10 @@ describe("TwilioSmsProvider", () => {
   it("has no way to text anyone but the owner", () => {
     const provider: SmsProvider = twilio();
     expect(provider.sendToOwner.length).toBe(1);
+    // `fetchMessage` only reads one message back (HL-13a); it never sends.
     expect(Object.getOwnPropertyNames(TwilioSmsProvider.prototype).sort()).toEqual([
       "constructor",
+      "fetchMessage",
       "sendToOwner",
     ]);
   });
@@ -209,5 +211,122 @@ describe("FakeSmsProvider", () => {
 
   it("refuses a malformed owner number", () => {
     expect(() => new FakeSmsProvider({ ownerNumber: "owner" })).toThrow(TypeError);
+  });
+
+  it("keeps Twilio's message log: what it sent and received can be fetched back, nothing else", async () => {
+    const at = new Date("2026-10-13T22:00:00.000Z");
+    const fake = new FakeSmsProvider({ ownerNumber: OWNER, hotlineNumber: TWILIO_NUMBER, clock: () => at });
+    const { messageId } = await fake.sendToOwner("Reply YES 482913");
+    const reply = fake.receive("yes 482913");
+    expect(reply).toEqual({
+      messageSid: expect.stringMatching(/^SM[0-9a-f]{32}$/),
+      from: OWNER,
+      to: TWILIO_NUMBER,
+      body: "yes 482913",
+      receivedAt: at,
+    });
+    expect(reply.messageSid).not.toBe(messageId);
+    await expect(fake.fetchMessage(reply.messageSid)).resolves.toEqual({
+      sid: reply.messageSid,
+      direction: "inbound",
+      from: OWNER,
+      to: TWILIO_NUMBER,
+      body: "yes 482913",
+      status: "received",
+      dateCreated: at,
+    });
+    await expect(fake.fetchMessage(messageId)).resolves.toMatchObject({
+      direction: "outbound-api",
+      from: TWILIO_NUMBER,
+      to: OWNER,
+    });
+    // A SID it never saw, as in a forged webhook.
+    await expect(fake.fetchMessage(`SM${"e".repeat(32)}`)).rejects.toMatchObject({
+      name: "PullError",
+      reason: "not-found",
+    });
+    // Receiving a known SID again (a retry) keeps Twilio's first record.
+    expect(fake.receive("no", { messageSid: reply.messageSid })).toBe(reply);
+    expect((await fake.fetchMessage(reply.messageSid)).body).toBe("yes 482913");
+    fake.failNextFetch();
+    await expect(fake.fetchMessage(reply.messageSid)).rejects.toMatchObject({ reason: "unreachable" });
+  });
+});
+
+describe("TwilioSmsProvider.fetchMessage", () => {
+  const SID = `SM${"ab".repeat(16)}`;
+  const record = {
+    account_sid: ACCOUNT_SID,
+    api_version: "2010-04-01",
+    body: "yes 482913",
+    date_created: "Tue, 13 Oct 2026 22:00:00 +0000",
+    direction: "inbound",
+    from: OWNER,
+    sid: SID,
+    status: "received",
+    to: TWILIO_NUMBER,
+  };
+
+  it("GETs the message by SID with the account's credentials", async () => {
+    const calls: Captured[] = [];
+    const provider = twilio({ fetch: fakeFetch(200, record, calls) });
+    await expect(provider.fetchMessage(SID)).resolves.toEqual({
+      sid: SID,
+      direction: "inbound",
+      from: OWNER,
+      to: TWILIO_NUMBER,
+      body: "yes 482913",
+      status: "received",
+      dateCreated: new Date("2026-10-13T22:00:00.000Z"),
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe(
+      `https://api.twilio.com/2010-04-01/Accounts/${ACCOUNT_SID}/Messages/${SID}.json`,
+    );
+    expect(calls[0]?.init.method).toBe("GET");
+    expect(calls[0]?.init.body).toBe("");
+    expect(calls[0]?.init.headers.authorization).toBe(
+      `Basic ${Buffer.from(`${ACCOUNT_SID}:${AUTH_TOKEN}`).toString("base64")}`,
+    );
+  });
+
+  it.each([
+    [
+      "a 404",
+      fakeFetch(404, { code: 20404, message: `The requested resource ${OWNER} was not found` }),
+      "not-found",
+    ],
+    ["a 401", fakeFetch(401, { code: 20003 }), "refused"],
+    ["another message", fakeFetch(200, { ...record, sid: `SM${"cd".repeat(16)}` }), "malformed"],
+    [
+      "another account's message",
+      fakeFetch(200, { ...record, account_sid: `AC${"f".repeat(32)}` }),
+      "malformed",
+    ],
+    ["a body that is no message", fakeFetch(200, null), "malformed"],
+    ["no JSON", fakeFetch(200, new Error("bad json")), "malformed"],
+    [
+      "a network failure",
+      (async () => {
+        throw Object.assign(new Error(`fetch failed for ${ACCOUNT_SID}`), {
+          cause: { code: "ECONNREFUSED" },
+        });
+      }) as HttpFetch,
+      "unreachable",
+    ],
+  ])("rejects with a PullError on %s, quoting nothing from the answer", async (_name, fetch, reason) => {
+    const error = await twilio({ fetch })
+      .fetchMessage(SID)
+      .catch((e: unknown) => e as Error);
+    expect(error).toMatchObject({ name: "PullError", reason });
+    expect(String((error as Error).message)).not.toContain(OWNER);
+    expect(String((error as Error).message)).not.toContain(ACCOUNT_SID);
+  });
+
+  it("never requests a malformed SID", async () => {
+    const calls: Captured[] = [];
+    const provider = twilio({ fetch: fakeFetch(200, record, calls) });
+    await expect(provider.fetchMessage("SM../../Calls")).rejects.toMatchObject({ reason: "malformed" });
+    expect(calls).toEqual([]);
   });
 });

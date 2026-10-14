@@ -233,7 +233,9 @@ async function build(
     quietHours: { timeZone: "America/Toronto" },
     secrets: { store: "file" },
     sms: { fromNumber: HOTLINE_NUMBER },
-    voice: { agentId: "agent_fake" },
+    // The fake voice provider's own ElevenLabs number id: the daemon serves
+    // the voice routes only for a configured number (HL-13a).
+    voice: { agentId: "agent_fake", agentPhoneNumberId: "phnum_fake" },
     tunnel: { publicUrl: PUBLIC_URL },
     ...options.config,
   };
@@ -275,7 +277,12 @@ async function build(
     client: elevenLabs,
     clock: () => clock.now,
   });
-  const sms = new FakeSmsProvider({ ownerNumber: OWNER });
+  // Twilio's side as well: the owner's texts are in its message log, timed by the fake clock.
+  const sms = new FakeSmsProvider({
+    ownerNumber: OWNER,
+    hotlineNumber: HOTLINE_NUMBER,
+    clock: () => clock.now,
+  });
   const signals = new EventEmitter();
   let ready!: (value: { daemon: Daemon; orchestrator: CallOrchestrator }) => void;
   const listening = new Promise<{ daemon: Daemon; orchestrator: CallOrchestrator }>((resolve) => {
@@ -496,13 +503,13 @@ async function build(
       });
       return (session as { id: string }).id;
     },
-    async text(body, { from = OWNER, messageSid: sid, instantly = false } = {}) {
+    async text(body, { from = OWNER, messageSid: sid = messageSid(), instantly = false } = {}) {
       await orchestrator.idle();
       if (!instantly) clock.now = new Date(clock.now.getTime() + READING_MS);
-      const { form, signature } = smsRequest(body, {
-        from,
-        ...(sid === undefined ? {} : { messageSid: sid }),
-      });
+      // Twilio records the message before it calls the webhook; the daemon pulls
+      // that record (HL-13a) before the text counts.
+      sms.receive(body, { from, messageSid: sid });
+      const { form, signature } = smsRequest(body, { from, messageSid: sid });
       const response = await hooks(
         "/hooks/twilio/sms",
         { "content-type": "application/x-www-form-urlencoded", "x-twilio-signature": signature },
