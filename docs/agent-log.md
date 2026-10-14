@@ -1732,4 +1732,8 @@ Template:
   (killed by the result check), and a delay 1 ms short (survives the property
   suite, killed by three unit tests). The queue property file passed 60 runs in a
   row with random seeds (900 cases each, 54,000 in all).
+- Review fixes (bot staff review on abc221a, approve with nits, two P3s): the
+  call-end check now asserts that the end exists and names its result on failure,
+  and the seed replay notes that its path holds only while the arbitraries stay
+  the same (the fixed counterexample test does not depend on them).
 - Open issues or follow-ups: none.

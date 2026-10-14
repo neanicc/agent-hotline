@@ -295,7 +295,8 @@ function checkInvariants({ h, asks }: Run): void {
         // Only a call that went unanswered (no pickup, failed) is retried by call, and not
         // before `retryDelayMs` has passed since it ended.
         const end = lastCallEnd.get(askId);
-        expect(end?.result === "no-pickup" || end?.result === "failed").toBe(true);
+        expect(end).toBeDefined();
+        expect(["no-pickup", "failed"]).toContain(end?.result);
         if (end !== undefined) expect(entry.at).toBeGreaterThanOrEqual(end.at + settings.retryDelayMs);
         // `before` is the state ahead of this step's event. When that event ended the ask's
         // last call, the queue set the retry's `readyAt` during this step, so the earlier
@@ -429,7 +430,8 @@ describe("ask queue properties", () => {
   // Issue #50: hosted CI failed once on this seed. A question joined a call inside its batch
   // window, the call went unanswered and, with a zero retry delay, the retry went out in the
   // same step. The queue was right; the invariant read the ask's `readyAt` from before the
-  // `call-ended` event that reset it.
+  // `call-ended` event that reset it. The seed and path replay that case only while the
+  // arbitraries above stay as they are; the fixed counterexample below does not depend on them.
   it("replays seed -763136370 from issue #50", () => {
     fc.assert(silentProperty, {
       seed: -763136370,
