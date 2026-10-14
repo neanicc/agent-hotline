@@ -3,7 +3,8 @@
 // - POST /hooks/el/tools/{submit_answer,verify_pin,get_status,send_instruction}:
 //   the voice agent's server tools. Each carries the shared tool secret in
 //   `x-hotline-tool-secret`, compared in constant time; a missing header or a
-//   non-JSON body is refused before the body is read.
+//   non-JSON body is refused before the body is read. Each tool reads or
+//   handles at most `MAX_TOOL_CALLS_IN_FLIGHT` calls at once, with a body deadline.
 // - POST /hooks/el/post-call: ElevenLabs' post-call webhook, verified with the
 //   `ElevenLabs-Signature` HMAC over the raw body, with a timestamp tolerance and
 //   a memory of recent signatures against replays.
@@ -40,7 +41,7 @@
 // (call orchestration, HL-09; the inbound line, HL-10), like the SMS route.
 //
 // Logs carry the tool name and result only: never bodies, PINs, words or numbers.
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { Confirmation, Decision } from "@hotline/core";
 import {
   type ConversationRecord,
@@ -75,6 +76,7 @@ import {
   type Unverified,
 } from "./provider-pull.js";
 import type { WebhookRoute } from "./server.js";
+import type { HotlineStore } from "./store.js";
 
 /** Longest status text handed to the voice agent, after redaction. */
 export const MAX_STATUS_LENGTH = 1500;
@@ -91,6 +93,13 @@ const ONCE_TOOLS: ReadonlySet<ToolName> = new Set(["submit_answer", "verify_pin"
  * sent again and run again once it is allowed.
  */
 const REMEMBERED_RESULTS: ReadonlySet<string> = new Set(["recorded", "queued"]);
+/**
+ * Calls of one server tool being read or handled at once. Only a sender with
+ * the tool secret gets this far; the voice agent calls tools one at a time.
+ */
+export const MAX_TOOL_CALLS_IN_FLIGHT = 8;
+/** How long a server-tool sender may take to deliver its body; a real tool call needs far less. */
+export const TOOL_BODY_TIMEOUT_MS = 5_000;
 /**
  * Post-call bodies being read or handled at once. The HMAC covers the body, so
  * it can only be checked after up to `POST_CALL_BODY_LIMIT` bytes are read; this
@@ -134,6 +143,12 @@ export interface VoiceInstruction extends ToolCall {
   sessionNumber: number;
   instruction: string;
   ownerWords: string;
+  /**
+   * When this call passed the PIN (the PinGate's time). Saved with the held
+   * instruction so that after a restart the post-call transcript can still
+   * tell the owner's turns from the caller's (`savedPinVerification`).
+   */
+  pinVerifiedAt?: Date;
 }
 
 export type SubmitAnswerResult = "recorded" | "needs-pin" | "not-recorded";
@@ -160,6 +175,8 @@ export interface ElevenLabsRoutesOptions {
   webhookSecret: string;
   /** How long a post-call sender may take to deliver its body (default 5 s); tests shorten it. */
   postCallBodyTimeoutMs?: number;
+  /** How long a server-tool sender may take to deliver its body (default 5 s); tests shorten it. */
+  toolBodyTimeoutMs?: number;
   /** `config.voice.agentId`: post-call webhooks for any other agent are ignored. */
   agentId: string;
   /** `config.owner.phoneNumber`: a tool call is served only when the owner is on one end of the call. */
@@ -185,6 +202,64 @@ export interface ElevenLabsRoutesOptions {
   agentPhoneNumberId: string;
   /** A tool call or post-call event that ElevenLabs' record does not confirm. */
   onUnverified?: (what: ToolName | "post-call", failure: Unverified) => void | Promise<void>;
+  /**
+   * Where state-changing tool deliveries are remembered. The daemon passes
+   * `storedToolDeliveries(store)` so a replay after a restart still gets the
+   * first response instead of running again (HL-13b). Defaults to memory.
+   */
+  deliveries?: ToolDeliveryMemory;
+  /**
+   * When a previous run's PinGate verified this conversation, and on which
+   * call SID, as the inbound line saved it with the call's held instructions
+   * (HL-13b). Used only to tell the owner's turns from the caller's in that
+   * call's finished transcript, and only when the pulled record is the same
+   * call (same SID) and the time falls within it; never to serve a tool, so
+   * after a restart the live tools still need the PIN again.
+   */
+  savedPinVerification?: (conversationId: string) => { verifiedAt: Date; callSid: string } | undefined;
+}
+
+/**
+ * State-changing server-tool deliveries, by a hash of tool name and exact
+ * body, with the response each got. Times are epoch milliseconds.
+ */
+export interface ToolDeliveryMemory {
+  /** The response a delivery got, while it has not expired. */
+  get(key: string, now: number): Record<string, unknown> | undefined;
+  put(key: string, expires: number, response: Record<string, unknown>): void;
+  /** How many have not expired. */
+  size(now: number): number;
+  /** Forgets those that expired at or before `now`; never one still in its window. */
+  prune(now: number): void;
+}
+
+/** Tool deliveries remembered in memory, lost on a restart. For tests. */
+export function memoryToolDeliveries(): ToolDeliveryMemory {
+  const kept = new Map<string, { expires: number; response: Record<string, unknown> }>();
+  const live = (now: number) => [...kept.values()].filter((seen) => seen.expires > now);
+  return {
+    get(key, now) {
+      const seen = kept.get(key);
+      return seen !== undefined && seen.expires > now ? seen.response : undefined;
+    },
+    put(key, expires, response) {
+      kept.set(key, { expires, response });
+    },
+    size: (now) => live(now).length,
+    prune(now) {
+      for (const [key, seen] of kept) if (seen.expires <= now) kept.delete(key);
+    },
+  };
+}
+
+/** Tool deliveries remembered in the daemon's SQLite store, so they outlive a restart (HL-13b). */
+export function storedToolDeliveries(store: HotlineStore): ToolDeliveryMemory {
+  return {
+    get: (key, now) => store.toolDelivery(key, now),
+    put: (key, expires, response) => store.putToolDelivery(key, expires, response),
+    size: (now) => store.countToolDeliveries(now),
+    prune: (now) => store.pruneToolDeliveries(now),
+  };
 }
 
 type TranscriptionEvent = Extract<PostCallEvent, { type: "transcription" }>;
@@ -255,29 +330,43 @@ function toDecision(body: {
 
 export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute[] {
   const { pins, handlers } = options;
+  /** When this run's routes were built: a PIN time saved before it is from before a restart. */
+  const startedAt = options.clock();
   /**
-   * State-changing tool deliveries by a hash of tool name and exact body, with
-   * their response and when they may be forgotten, oldest first. A repeat (an
-   * ElevenLabs retry or a replay) gets the first response without running the
-   * handler again. A failed delivery is forgotten so a retry can get through.
+   * State-changing tool deliveries by a hash of tool name and exact body: those
+   * running now (`running`) and those that changed state (`remembered`, with
+   * their response, until `TOOL_REPLAY_MS` has passed). A repeat (an ElevenLabs
+   * retry or a replay) gets the first response without running the handler
+   * again. A delivery that failed or changed nothing is forgotten so a retry can
+   * get through.
    */
-  const deliveries = new Map<string, { response: Promise<Record<string, unknown>>; expires: number }>();
+  const running = new Map<string, Promise<Record<string, unknown>>>();
+  const remembered = options.deliveries ?? memoryToolDeliveries();
+  /** Deliveries `remembered` could not take (the store failed), kept for this run. */
+  const fallback = memoryToolDeliveries();
 
   const toolRoute = <N extends ToolName>(
     name: N,
     serve: (body: ToolBodies[N], call: ToolCall) => Promise<Record<string, unknown>>,
   ): WebhookRoute => {
-    const handleTool = async (raw: string): Promise<Record<string, unknown>> => {
+    /**
+     * Checks a delivery before anything else, a repeat included: a valid body,
+     * the owner on the call, and ElevenLabs' own record showing this agent's
+     * live call with the owner, with the numbers and call SID the body
+     * carries. A forged tool call, or a replay once the call is over, gets the
+     * refusal and never a remembered response.
+     */
+    const checkTool = async (
+      raw: string,
+    ): Promise<{ refusal: Record<string, unknown> } | { body: ToolBodies[N]; call: ToolCall }> => {
       const parsed = TOOL_BODIES[name].safeParse(parseJson(raw));
-      if (!parsed.success) return { result: "invalid" };
+      if (!parsed.success) return { refusal: { result: "invalid" } };
       // Someone else's call: nothing about Hotline, the owner or the agents.
-      if (!ownerOnCall(parsed.data)) return refused;
-      // Before any effect, ElevenLabs' own record must show this live call with
-      // the owner: a forged tool call can hold, deny or hear nothing.
+      if (!ownerOnCall(parsed.data)) return { refusal: refused };
       const live = await liveCall(parsed.data);
       if ("failure" in live) {
         await report(name, live.failure);
-        return refused;
+        return { refusal: refused };
       }
       const { conversation_id, call_sid } = parsed.data;
       const call: ToolCall = {
@@ -286,27 +375,51 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
         direction: liveCallDirection(live.record, expectations),
         receivedAt: options.clock(),
       };
-      return serve(parsed.data as ToolBodies[N], call);
+      return { body: parsed.data as ToolBodies[N], call };
     };
 
-    /** Runs the tool once per distinct delivery; see `deliveries`. */
-    const once = (raw: string) => {
+    /**
+     * Runs a checked delivery once per distinct body; see `running` and
+     * `remembered`. Only the state-changing tools come here (`get_status`
+     * never does, so a status is never remembered or replayed), and a repeat
+     * gets the first response, which is only a result or a PIN verdict.
+     */
+    const once = (raw: string, call: ToolCall, run: () => Promise<Record<string, unknown>>) => {
+      const busy = { response: Promise.resolve<Record<string, unknown>>({ result: "busy" }), repeat: false };
       const now = options.clock().getTime();
-      // Only expired deliveries are forgotten; one still in its window is never evicted.
-      for (const [key, seen] of deliveries) {
-        if (seen.expires > now) break;
-        deliveries.delete(key);
+      // Keyed with the tool secret (Keychain or the 0600 file, never the
+      // database): a `verify_pin` body holds the PIN, and a plain hash of it
+      // in `tool_deliveries` could be reversed by trying every PIN.
+      const key = createHmac("sha256", options.toolSecret)
+        .update(`${name}\0${raw}`, "utf8")
+        .digest("base64url");
+      const current = running.get(key);
+      if (current !== undefined) return { response: current, repeat: true };
+      let full: boolean;
+      try {
+        // Only expired deliveries are forgotten; one still in its window is never evicted.
+        fallback.prune(now);
+        remembered.prune(now);
+        const seen = fallback.get(key, now) ?? remembered.get(key, now);
+        // A right PIN remembered from before a restart, on a call this run's
+        // PinGate has not verified: the owner said the same PIN again on the
+        // same call (the body, and so the HMAC key, is identical), so it is
+        // checked again (a right PIN spends no budget). Any other remembered
+        // response, a wrong guess included, is answered from memory.
+        const recheck =
+          seen?.verified === true && name === "verify_pin" && !pins.isVerified(call.conversationId);
+        if (seen !== undefined && !recheck) return { response: Promise.resolve(seen), repeat: true };
+        full = running.size + fallback.size(now) + remembered.size(now) >= MAX_TOOL_DELIVERIES;
+      } catch {
+        // The memory cannot be read: refuse rather than risk running a delivery twice.
+        return busy;
       }
-      const key = createHash("sha256").update(`${name}\0${raw}`, "utf8").digest("base64url");
-      const seen = deliveries.get(key);
-      if (seen !== undefined) return { response: seen.response, repeat: true };
       // Full of live deliveries (only possible with the tool secret): fail closed
       // rather than forget one and let it run twice.
-      if (deliveries.size >= MAX_TOOL_DELIVERIES)
-        return { response: Promise.resolve<Record<string, unknown>>({ result: "busy" }), repeat: false };
+      if (full) return busy;
       // No await between the lookup and this claim, so one delivery runs the handler.
-      const response = handleTool(raw);
-      deliveries.set(key, { response, expires: now + TOOL_REPLAY_MS });
+      const response = run();
+      running.set(key, response);
       // Keep only a delivery that changed state (a PIN attempt counts); forget the
       // rest, so the same call can succeed once it is allowed.
       response.then(
@@ -314,9 +427,16 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
           const changed =
             typeof result.verified === "boolean" ||
             (typeof result.result === "string" && REMEMBERED_RESULTS.has(result.result));
-          if (!changed) deliveries.delete(key);
+          try {
+            if (changed) remembered.put(key, now + TOOL_REPLAY_MS, result);
+          } catch {
+            // The store failed: remember it for this run at least.
+            fallback.put(key, now + TOOL_REPLAY_MS, result);
+          } finally {
+            running.delete(key);
+          }
         },
-        () => deliveries.delete(key),
+        () => running.delete(key),
       );
       return { response, repeat: false };
     };
@@ -324,16 +444,26 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
     return {
       method: "POST",
       url: toolPath(name),
+      maxInFlight: MAX_TOOL_CALLS_IN_FLIGHT,
+      bodyTimeoutMs: options.toolBodyTimeoutMs ?? TOOL_BODY_TIMEOUT_MS,
       // The secret needs no body, so a wrong one is refused before the body is read.
       precheck: (request) =>
         sameSecret(header(request, TOOL_SECRET_HEADER), options.toolSecret) && jsonRequest(request),
       verify: (request) => sameSecret(header(request, TOOL_SECRET_HEADER), options.toolSecret),
       handler: async (request: FastifyRequest, reply: FastifyReply) => {
         const raw = rawBody(request) ?? "";
-        const { response, repeat } = ONCE_TOOLS.has(name)
-          ? once(raw)
-          : { response: handleTool(raw), repeat: false };
-        const result = await response;
+        const checked = await checkTool(raw);
+        let result: Record<string, unknown>;
+        let repeat = false;
+        if ("refusal" in checked) {
+          result = checked.refusal;
+        } else if (ONCE_TOOLS.has(name)) {
+          const delivery = once(raw, checked.call, () => serve(checked.body, checked.call));
+          result = await delivery.response;
+          repeat = delivery.repeat;
+        } else {
+          result = await serve(checked.body, checked.call);
+        }
         request.log.info({ tool: name, result: result.result ?? result.verified, repeat }, "voice tool");
         return reply.code(200).send(result);
       },
@@ -357,6 +487,50 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
     ownerNumber: options.ownerNumber,
     pinVerifiedAt: (conversationId) => pins.verifiedAt(conversationId),
     placedCall: options.placedCall,
+  };
+
+  /**
+   * A PIN time a previous run saved for this record's conversation, only when
+   * it is bound to this very call: the same call SID as the pulled record,
+   * and a time within the call (from its start to its end as the record has
+   * them). Anything else is not used.
+   */
+  const savedPinFor = (record: ConversationRecord): Date | undefined => {
+    const saved = options.savedPinVerification?.(record.conversation_id);
+    if (saved === undefined || Number.isNaN(saved.verifiedAt.getTime())) return undefined;
+    const sid = record.metadata?.phone_call?.call_sid;
+    if (typeof sid !== "string" || sid === "" || sid !== saved.callSid) return undefined;
+    const start = record.metadata?.start_time_unix_secs;
+    const duration = record.metadata?.call_duration_secs;
+    if (typeof start !== "number" || typeof duration !== "number") return undefined;
+    const at = saved.verifiedAt.getTime() / 1000;
+    return at >= start && at <= start + duration ? saved.verifiedAt : undefined;
+  };
+
+  /**
+   * The owner context for one pulled, finished call. With a saved PIN time
+   * bound to it (`savedPinFor`), the owner's turns start at the earlier of
+   * that and this run's PIN, but the saved time covers the call only up to
+   * this run's start: turns after the restart count again only once the PIN
+   * is given again in this run (`pinLapse`).
+   */
+  const ownerContextFor = (record: ConversationRecord): OwnerContext => {
+    const saved = savedPinFor(record);
+    if (saved === undefined || saved.getTime() >= startedAt.getTime()) return ownerContext;
+    const id = record.conversation_id;
+    return {
+      ...ownerContext,
+      pinVerifiedAt: (conversationId) => {
+        if (conversationId !== id) return pins.verifiedAt(conversationId);
+        const again = pins.verifiedAt(conversationId);
+        return again === undefined || saved.getTime() < again.getTime() ? saved : again;
+      },
+      pinLapse: (conversationId) => {
+        if (conversationId !== id) return undefined;
+        const again = pins.verifiedAt(conversationId);
+        return again === undefined ? { from: startedAt } : { from: startedAt, until: again };
+      },
+    };
   };
   const report = async (what: ToolName | "post-call", failure: Unverified) => {
     try {
@@ -427,7 +601,7 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
       await report("post-call", { forgery: true, reason: check.reason });
       return failedCall;
     }
-    const pulledEvent = conversationEvent(record, ownerContext);
+    const pulledEvent = conversationEvent(record, ownerContextFor(record));
     if (!sameCall(event, pulledEvent)) {
       await report("post-call", { forgery: true, reason: "the webhook differs from the provider's record" });
     }
@@ -486,17 +660,28 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
     }),
     toolRoute("send_instruction", async (body, call) => {
       if (!pins.isVerified(call.conversationId)) return pinRequired;
+      const verifiedAt = pins.verifiedAt(call.conversationId);
       const result = await handlers.sendInstruction({
         ...call,
         sessionNumber: body.session_number,
         instruction: body.instruction,
         ownerWords: body.owner_words,
+        ...(verifiedAt === undefined ? {} : { pinVerifiedAt: verifiedAt }),
       });
       return { result };
     }),
   ];
 
-  /** Events whose handler succeeded, with when they may be forgotten, oldest first. */
+  /**
+   * Events whose handler succeeded, with when they may be forgotten, oldest
+   * first. In memory on purpose (HL-13b): a replay after a restart is handled
+   * again but changes nothing, because what it could act on is in SQLite. Call
+   * orchestration's saved state knows the call is over (`voice.post-call-ignored`),
+   * the inbound line deleted the call's held instructions when it handled the
+   * event (and `addInstruction` is idempotent by id), and the inbound call
+   * record is an upsert by conversation. A replay also needs a signature still
+   * inside `POST_CALL_MAX_AGE_SECONDS`.
+   */
   const handled = new Map<string, number>();
   const inFlight = new Map<string, Promise<void>>();
 

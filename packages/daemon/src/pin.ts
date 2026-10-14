@@ -3,6 +3,7 @@
 // hash is in the config.
 import { randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 import { parsePinHash, pinScryptMaxmem } from "@hotline/core";
+import type { HotlineStore } from "./store.js";
 
 /** A PIN is 4 to 8 digits. */
 export const PIN_PATTERN = /^\d{4,8}$/;
@@ -91,6 +92,59 @@ export interface PinGateOptions {
    * daily budget is spent), so the owner can be told (HL-10 texts them).
    */
   onLockout?: (direction: PinCallDirection) => void;
+  /**
+   * Where wrong PINs are counted. The daemon passes `storedPinFailures(store)`
+   * so a restart never hands a guesser a fresh hourly or daily budget. Defaults
+   * to memory (tests).
+   */
+  failures?: PinFailureLog;
+}
+
+/**
+ * The wrong-PIN attempts counted against each direction's budget. Times are
+ * epoch milliseconds from the gate's clock.
+ */
+export interface PinFailureLog {
+  /** Counts one attempt; returns a handle to take it back with. */
+  add(direction: PinCallDirection, at: number): number;
+  /** Takes back an attempt that was counted before its PIN turned out right. */
+  remove(handle: number): void;
+  /** When each attempt still kept on `direction` was made. */
+  times(direction: PinCallDirection): number[];
+  /** Forgets attempts made at or before `before`. */
+  prune(before: number): void;
+}
+
+/** Wrong PINs kept in memory, lost on a restart. For tests. */
+export function memoryPinFailures(): PinFailureLog {
+  const kept = new Map<number, { direction: PinCallDirection; at: number }>();
+  let next = 0;
+  return {
+    add(direction, at) {
+      next += 1;
+      kept.set(next, { direction, at });
+      return next;
+    },
+    remove(handle) {
+      kept.delete(handle);
+    },
+    times(direction) {
+      return [...kept.values()].filter((f) => f.direction === direction).map((f) => f.at);
+    },
+    prune(before) {
+      for (const [handle, failure] of kept) if (failure.at <= before) kept.delete(handle);
+    },
+  };
+}
+
+/** Wrong PINs kept in the daemon's SQLite store, so the budgets outlive a restart (HL-13b). */
+export function storedPinFailures(store: HotlineStore): PinFailureLog {
+  return {
+    add: (direction, at) => store.addPinFailure(direction, at),
+    remove: (handle) => store.removePinFailure(handle),
+    times: (direction) => store.pinFailureTimes(direction),
+    prune: (before) => store.prunePinFailures(before),
+  };
 }
 
 interface CallPinState {
@@ -117,14 +171,22 @@ export type PinCallDirection = "inbound" | "outbound";
  * `PIN_FAILURES_PER_DAY` in a day across all calls of one direction, after which
  * every check on that direction fails until enough time has passed. Only this
  * gate, never the voice model, says a call is verified.
+ *
+ * The budgets live in `options.failures` (SQLite in the daemon), so they hold
+ * across a restart. Which calls proved the PIN, and each call's own attempts,
+ * stay in memory: after a restart a call is asked for the PIN again (fails
+ * closed), and a call that was mid-guess gets its two attempts back, still
+ * inside the hourly and daily budgets. If the failure log cannot be read or
+ * written, the attempt is refused.
  */
 export class PinGate {
   readonly #options: PinGateOptions;
   readonly #calls = new Map<string, CallPinState>();
-  #failures: Record<PinCallDirection, number[]> = { inbound: [], outbound: [] };
+  readonly #failures: PinFailureLog;
 
   constructor(options: PinGateOptions) {
     this.#options = options;
+    this.#failures = options.failures ?? memoryPinFailures();
   }
 
   /** When `conversationId` gave the right PIN, if it did and is still remembered. */
@@ -144,35 +206,48 @@ export class PinGate {
 
   async attempt(conversationId: string, spoken: string, direction: PinCallDirection): Promise<PinAttempt> {
     const now = this.#options.clock().getTime();
-    this.#prune(now);
-    let state = this.#calls.get(conversationId);
-    if (state === undefined) {
-      state = { failures: 0, verified: false, since: now, direction };
-      this.#calls.set(conversationId, state);
+    const exhausted = () => ({ verified: false, attemptsLeft: 0, endCall: true });
+    let state: CallPinState | undefined;
+    let handle: number;
+    try {
+      this.#prune(now);
+      state = this.#calls.get(conversationId);
+      if (state === undefined) {
+        state = { failures: 0, verified: false, since: now, direction };
+        this.#calls.set(conversationId, state);
+      }
+      if (state.verified)
+        return { verified: true, attemptsLeft: PIN_ATTEMPTS_PER_CALL - state.failures, endCall: false };
+      if (state.failures >= PIN_ATTEMPTS_PER_CALL || this.#locked(state.direction, now)) return exhausted();
+      // Count the attempt before the slow check, so concurrent guesses cannot exceed the limit.
+      handle = this.#failures.add(state.direction, now);
+      state.failures += 1;
+    } catch {
+      // The budgets cannot be read or written: no PIN is checked.
+      return exhausted();
     }
     const budget = state.direction;
-    if (state.verified)
-      return { verified: true, attemptsLeft: PIN_ATTEMPTS_PER_CALL - state.failures, endCall: false };
-    const exhausted = () => ({ verified: false, attemptsLeft: 0, endCall: true });
-    if (state.failures >= PIN_ATTEMPTS_PER_CALL || this.#locked(budget, now)) return exhausted();
-    // Count the attempt before the slow check, so concurrent guesses cannot exceed the limit.
-    state.failures += 1;
-    this.#failures[budget].push(now);
     const pin = spoken.replace(/[\s-]/g, "");
     const ok = await this.#options.check(pin).catch(() => false);
     if (ok) {
       state.failures -= 1;
-      // Re-read the list: a prune during the check may have replaced it.
-      const failures = this.#failures[budget];
-      const index = failures.indexOf(now);
-      if (index >= 0) failures.splice(index, 1);
+      try {
+        this.#failures.remove(handle);
+      } catch {
+        // A right PIN left counted only makes the budget stricter.
+      }
       state.verified = true;
       state.verifiedAt = this.#options.clock().getTime();
       this.#options.onVerified?.(pin);
       return { verified: true, attemptsLeft: PIN_ATTEMPTS_PER_CALL - state.failures, endCall: false };
     }
     const attemptsLeft = Math.max(0, PIN_ATTEMPTS_PER_CALL - state.failures);
-    const locked = this.#locked(budget, now);
+    let locked: boolean;
+    try {
+      locked = this.#locked(budget, now);
+    } catch {
+      locked = true;
+    }
     if (locked) this.#options.onLockout?.(budget);
     return {
       verified: false,
@@ -181,18 +256,16 @@ export class PinGate {
     };
   }
 
-  /** Whether one direction's hourly or daily budget of wrong PINs is spent. */
+  /** Whether one direction's hourly or daily budget of wrong PINs is spent. Throws when the log cannot be read. */
   #locked(budget: PinCallDirection, now: number): boolean {
-    const failures = this.#failures[budget];
     // A failure stamped after `now` (the clock moved back) counts in both windows.
+    const failures = this.#failures.times(budget).filter((at) => now - at < DAY_MS);
     const lastHour = failures.filter((at) => now - at < HOUR_MS).length;
     return lastHour >= PIN_FAILURES_PER_HOUR || failures.length >= PIN_FAILURES_PER_DAY;
   }
 
   #prune(now: number): void {
-    for (const key of ["inbound", "outbound"] as const) {
-      this.#failures[key] = this.#failures[key].filter((at) => now - at < DAY_MS);
-    }
+    this.#failures.prune(now - DAY_MS);
     for (const [id, state] of this.#calls) {
       if (now - state.since >= CALL_STATE_MS || this.#calls.size > MAX_TRACKED_CALLS) this.#calls.delete(id);
     }

@@ -108,21 +108,27 @@ kept in `hotline.db`.
 | Twilio signature (`validTwilioSignature`), exact public URL, own `AccountSid` | none | Twilio signs no timestamp, so freshness rests on the SID records and the reply rules below |
 | SMS `MessageSid` dedupe in the route (last 1000) | memory | Retries wait for an attempt in flight; only a successful handling counts |
 | Owner texts claimed by SID before any effect (`inbound_messages`, kept 400 days) | SQLite | A replay after a restart is ignored (`orchestration.test.ts` "remembers handled messages across a restart") |
-| Verify by pull (HL-13a): an owner text counts only if Twilio's own record of that SID is inbound, from the owner, with the same body and at most 15 minutes old; every ElevenLabs tool call and post-call event is checked against the pulled conversation | none (pulled per request) | A forged or replayed body confirms nothing; the forgery alarm texts the owner at most once an hour (memory) |
+| Verify by pull (HL-13a): an owner text counts only if Twilio's own record of that SID is inbound, from the owner, with the same body and at most 15 minutes old; every ElevenLabs tool call and post-call event is checked against the pulled conversation | none (pulled per request) | A forged or replayed body confirms nothing; the forgery alarm texts the owner at most once an hour (its last send time in SQLite since HL-13b) |
 | Text reply binding: a reply must be first seen 10 s or more after the text; a bare reply needs exactly one waiting ask; approvals need that ask's single-use code; one wrong code burns every waiting code | SQLite | A replayed old "YES 123456" cannot approve a newer request |
 | Generic replies to strangers, 5 an hour | memory | Global, not per sender |
 | ElevenLabs tool shared secret (`sameSecret`), checked before the body is read | none | Static: no timestamp or nonce |
-| Tool-call dedupe (`submit_answer`, `verify_pin`, `send_instruction`; 2 h, 1000 live, refuses rather than evicts) | memory | Keyed on the exact body |
+| Tool-call dedupe (`submit_answer`, `verify_pin`, `send_instruction`; 2 h, 1000 live, refuses rather than evicts) | SQLite (`tool_deliveries`, HL-13b); deliveries still running in memory | Keyed on an HMAC-SHA256 of tool name and body under the tool secret, which never enters the database (a `verify_pin` body holds the PIN). Every delivery is pulled and checked as a live call first, so a replay after the call ended gets the refusal; a remembered `verified: true` is checked again by this run's PinGate. An unreadable store answers `busy` |
 | Post-call HMAC with timestamp: at most 30 min old, 5 min ahead | none | Freshness checked before the body is read |
-| Post-call replay memory (type plus conversation id, 35 min, 1000, `503` when full) | memory | Backed by the persisted call state: a replay after a restart changes nothing (`orchestration.test.ts` "a replayed post-call event after a restart changes nothing") |
-| PIN: 2 tries a call, 6 failures an hour, 10 a day, per direction | memory | See follow-ups |
-| PIN lockout texts, one an hour per direction | memory | Every lockout is audited |
-| Webhook body before verification: 64 KiB by default (HL-13, was 256 KiB); post-call 1 MiB with 4 in flight and a 5 s body deadline | none | `server.test.ts` "read at most 64 KiB before verifying..." |
+| Post-call replay memory (type plus conversation id, 35 min, 1000, `503` when full) | memory, by design (HL-13b) | A replay after a restart is pulled and handled again and changes nothing: the saved call state ignores it, the held instructions were deleted when the event was handled and `addInstruction` is idempotent by id (`orchestration.test.ts` "a replayed post-call event after a restart changes nothing", `inbound-line.test.ts` "keeps held instructions across a restart") |
+| PIN: 2 tries a call, 6 failures an hour, 10 a day, per direction | budgets in SQLite (`pin_failures`, HL-13b); a call's own 2 tries and which calls proved the PIN in memory | A restart gives a guesser no fresh budget and makes every call give the PIN again; a failure log that cannot be read or written refuses the attempt without checking the PIN (`restart-limits.test.ts`, `persisted-limits.test.ts`) |
+| PIN lockout texts, one an hour per direction | SQLite (`daemon_state`, HL-13b) | Every lockout is audited |
+| Webhook body before verification: 64 KiB by default (HL-13, was 256 KiB); post-call 1 MiB with 4 in flight and a 5 s body deadline; server tools 8 in flight and a 5 s body deadline (HL-13b) | none | `server.test.ts` "read at most 64 KiB before verifying...". The Twilio SMS route has no in-flight cap or body deadline by design: a sender with no valid signature could fill a cap and shut out the owner's texts ([daemon.md](daemon.md#twilio-sms-post-hookstwiliosms)) |
 | Call and text rate limits (rolling hour and day) | SQLite (orchestrator state) | If both saved rows are unreadable the hourly windows count as full |
 | Open asks per session and in total, live sessions | SQLite | `429` past the cap |
 
 HL-13 confirmed these by reading the code and their tests, and added the body
-cap. Gaps it found, all failing safe (none approves anything), are listed under
+cap. HL-13b ([#83](https://github.com/neanicc/agent-hotline/pull/83)) then
+moved the PIN budgets, the tool-call memory, held instructions and the alarm
+and lockout text limits into SQLite. What still resets on a restart is the
+route's own SID set (owner texts are claimed in SQLite anyway), the post-call
+replay memory (harmless, see above), the stranger-reply throttle, which calls
+proved the PIN and each call's own two tries; all of these fail safe. Other
+gaps, also failing safe (none approves anything), are listed under
 [follow-ups](#follow-ups).
 
 ## Fuzz and property tests (HL-13)
@@ -223,14 +229,28 @@ by a probe or the fuzzer and none a current leak:
 - **Instructions are delivered at most once.** A queued instruction is handed
   to the session's next ask or Stop hook, which acknowledges it before passing it
   on; a hook killed between the acknowledgement and its output loses that
-  instruction rather than delivering it twice ([hooks.md](hooks.md#stop-stop)). Held instructions (said
-  on a call, waiting for the post-call transcript) are dropped on a daemon
-  restart and the owner is texted that they did not go through.
-- **Some counters live in memory.** The PIN failure budgets, tool-call and
-  post-call replay memories, the route's SID set, stranger-reply and lockout-text
-  throttles reset on a restart. Approvals stay safe across a restart (SID claims,
-  single-use codes and call state are in SQLite), but a restart gives a PIN
-  guesser a fresh hourly and daily budget. See follow-ups.
+  instruction rather than delivering it twice ([hooks.md](hooks.md#stop-stop)).
+  Held instructions (said on a call, waiting for the post-call transcript) are
+  saved redacted since HL-13b and survive a restart; one whose words held a
+  secret then fails to confirm against the redacted copy, and the owner is
+  texted that it did not go through.
+- **A saved PIN time labels a restarted call's transcript.** So that a held
+  instruction can still be confirmed after a restart, the time a call passed
+  the PIN is saved with the instruction (HL-13b). It counts only for the
+  post-call transcript of that call: the pulled record must carry the same
+  call SID and the time must fall within the call. It covers the turns before
+  the restart (and while the daemon was down); turns after it count as the
+  owner's only once the PIN is given again in the new run (`pinLapse`). It
+  never serves a live tool, which needs the PIN again after a restart.
+- **A few counters live in memory.** The route's SID set, the post-call replay
+  memory, the stranger-reply throttle, which calls proved the PIN and each
+  call's own two tries reset on a restart. None of this approves anything: SID
+  claims, code hashes, call state, PIN budgets and tool deliveries are in
+  SQLite, and a restarted call must give the PIN again.
+- **The Twilio SMS route is not capped.** It has no in-flight cap or body
+  deadline, unlike the ElevenLabs routes, because its signature can only be
+  checked over the body and a cap would let an unauthenticated sender shut out
+  the owner's texts. The 64 KiB body limit still applies.
 - **A PIN covers the whole call**, not one ask: after the PIN, a high-risk ask
   later on the same call needs only the read-back and a yes.
 - **On an outbound call, whoever answers the owner's phone is the owner**, up to
@@ -243,14 +263,17 @@ by a probe or the fuzzer and none a current leak:
 
 Tracked on GitHub; each fails safe today.
 
-- Persist ([#78](https://github.com/neanicc/agent-hotline/issues/78)) the PIN failure budgets, the forgery-alarm hourly text limit (HL-13a)
-  and held inbound instructions in SQLite, and the tool-call and post-call replay
-  memories, so a restart resets none of them. These touch HL-13a's files, which
-  #69 changed while this pass was in review, so they are a separate ticket.
-  #78 also carries two related items: a `maxInFlight` and a body deadline on
-  the Twilio SMS and ElevenLabs tool routes, as the post-call route has, and
-  counting texts sent outside the queue (TwiML replies, inbound-line notices,
-  lockout texts, crash reports) against the text rate limit.
+- Done: [#78](https://github.com/neanicc/agent-hotline/issues/78) (HL-13b,
+  [#83](https://github.com/neanicc/agent-hotline/pull/83)) persisted the PIN
+  failure budgets, the forgery-alarm and lockout text limits, held inbound
+  instructions and the tool-call memory, and capped the ElevenLabs tool routes.
+  It decided the post-call replay memory need not be persisted (see the
+  replay table).
+- Bound the Twilio SMS route with capacity reserved for genuine Twilio
+  requests (left open by HL-13b).
+- Count texts sent outside the queue (TwiML replies, inbound-line notices,
+  lockout texts, crash reports) against the text rate limit (left open by
+  HL-13b).
 - Keep a genuine answer that verify by pull could not confirm (a post-call
   record still processing, a reply Twilio stored with different whitespace):
   [#80](https://github.com/neanicc/agent-hotline/issues/80). Both refuse today.

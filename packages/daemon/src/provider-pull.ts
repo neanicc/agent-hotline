@@ -290,16 +290,35 @@ export interface ForgeryAlarmOptions {
   sms?: SmsProvider;
 }
 
+/** `daemon_state` key of when the owner was last texted about a possible forgery (epoch ms). */
+export const FORGERY_TEXTED_KEY = "security.forgery-texted-at";
+
 /**
  * Audits webhooks the provider could not confirm, and texts the owner about
- * possible forgeries at most once an hour. Never throws.
+ * possible forgeries at most once an hour. When the last text went out is kept
+ * in the store, so a restart does not allow another one early (HL-13b). Never
+ * throws.
  */
 export class ForgeryAlarm {
   readonly #options: ForgeryAlarmOptions;
+  /** This run's own record, in case the store cannot be read or written. */
   #textedAt: number | undefined;
 
   constructor(options: ForgeryAlarmOptions) {
     this.#options = options;
+  }
+
+  /** The latest forgery text this run or a saved earlier one knows of. */
+  #lastText(): number | undefined {
+    let saved: unknown;
+    try {
+      saved = this.#options.store.getState(FORGERY_TEXTED_KEY);
+    } catch {
+      saved = undefined;
+    }
+    const stored = typeof saved === "number" && Number.isFinite(saved) ? saved : undefined;
+    if (stored === undefined) return this.#textedAt;
+    return this.#textedAt === undefined ? stored : Math.max(stored, this.#textedAt);
   }
 
   /** One webhook that could not be confirmed with the provider. */
@@ -316,9 +335,14 @@ export class ForgeryAlarm {
       // The audit log is best effort here: the webhook is refused either way.
     }
     if (!failure.forgery) return;
-    const last = this.#textedAt;
+    const last = this.#lastText();
     if (last !== undefined && now.getTime() - last < FORGERY_TEXT_MS && now.getTime() >= last) return;
     this.#textedAt = now.getTime();
+    try {
+      store.putState(FORGERY_TEXTED_KEY, now.getTime());
+    } catch {
+      // This run still remembers it.
+    }
     const sms = this.#options.sms;
     try {
       if (sms === undefined) throw new Error("no SMS provider");

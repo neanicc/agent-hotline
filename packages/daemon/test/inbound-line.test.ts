@@ -10,6 +10,7 @@ import { FakeSmsProvider, type PostCallEvent } from "@hotline/providers";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   createRedactor,
+  HELD_STATE_KEY,
   type HotlineStore,
   InboundLine,
   MAX_INSTRUCTIONS_PER_CALL,
@@ -329,29 +330,166 @@ describe("send_instruction", () => {
     expect(store.listInstructions()).toEqual([]);
   });
 
-  it("tells the owner after a restart about instructions the previous run still held", async () => {
+  /** Stops this run and starts the next on the same database file, as a daemon restart does. */
+  async function restart(): Promise<InboundLine> {
+    store.close();
+    const redactor = createRedactor();
+    store = await openStore(join(dir, "hotline.db"), { redactor });
+    line = new InboundLine({ store, clock: () => now, redact: (text) => redactor.text(text), sms });
+    await line.recover();
+    return line;
+  }
+
+  it("keeps held instructions across a restart, for the post-call event to confirm as usual", async () => {
+    session("s-1", "Claude in demo-app");
+    session("s-2", "Codex in api");
+    line.getStatus(call());
+    expect(instruct(2, "rebase on main")).toBe("queued");
+    // The daemon stops before the post-call event; the next run starts on the same file.
+    const next = await restart();
+    expect(sms.sent).toEqual([]);
+    expect(store.listAudit().filter((e) => e.event === "voice.instruction-unconfirmed")).toEqual([]);
+    await next.postCall(transcript("conv-1", "session 2, rebase on main"), now, false);
+    expect(store.listInstructions().map((i) => [i.id, i.sessionId, i.text, i.status])).toEqual([
+      ["instruction-1", "s-2", "rebase on main", "queued"],
+    ]);
+    expect(sms.sent.map((s) => s.text)).toEqual([expect.stringContaining("your instruction is queued")]);
+    // Handled to the end: a later restart has nothing left to confirm or report.
+    const after = await restart();
+    await after.postCall(transcript("conv-1", "session 2, rebase on main"), now, false);
+    expect(store.listInstructions()).toHaveLength(1);
+    expect(sms.sent).toHaveLength(1);
+  });
+
+  it("keeps the session numbers of a call holding an instruction across a restart", async () => {
+    session("s-1", "Claude in demo-app");
+    session("s-2", "Codex in api");
+    line.getStatus(call());
+    expect(instruct(1, "run the tests")).toBe("queued");
+    const next = await restart();
+    // No new status on this call: the numbers it already heard still hold.
+    expect(instruct(2, "rebase on main")).toBe("queued");
+    expect(instruct(3, "rebase on main")).toBe("unknown-session");
+    await next.postCall(
+      transcript("conv-1", "session 1, run the tests", "session 2, rebase on main"),
+      now,
+      false,
+    );
+    expect(
+      store
+        .listInstructions()
+        .map((i) => i.sessionId)
+        .sort(),
+    ).toEqual(["s-1", "s-2"]);
+  });
+
+  it("saves nothing for a call that only heard the status; after a restart it hears it again", async () => {
+    session("s-1", "Claude in demo-app");
+    line.getStatus(call());
+    expect(store.listInboundCalls()).toEqual([]);
+    await restart();
+    expect(instruct(1)).toBe("unknown-session");
+    line.getStatus(call());
+    expect(instruct(1)).toBe("queued");
+  });
+
+  it("still holds the caps for instructions held before a restart", async () => {
+    session("s-1", "Claude in demo-app");
+    line.getStatus(call());
+    for (let i = 0; i < MAX_INSTRUCTIONS_PER_SESSION; i++) expect(instruct(1, `step ${i}`)).toBe("queued");
+    await restart();
+    expect(instruct(1, "one more")).toBe("too-many");
+  });
+
+  it("saves held instructions redacted, and only until they are handled", async () => {
+    session("s-1", "Claude in demo-app");
+    line.getStatus(call());
+    line.sendInstruction({
+      ...call(),
+      sessionNumber: 1,
+      instruction: `use the key ${SECRET}`,
+      ownerWords: `session 1, use the key ${SECRET}`,
+    });
+    const saved = JSON.stringify(store.listInboundCalls());
+    expect(saved).toContain("instruction-1");
+    expect(saved).not.toContain(SECRET);
+    await line.postCall(transcript("conv-1", `session 1, use the key ${SECRET}`), now, false);
+    expect(store.listInboundCalls()).toEqual([]);
+  });
+
+  it("fails closed on an instruction redaction changed, when a restart came before its post-call event", async () => {
+    session("s-1", "Claude in demo-app");
+    line.getStatus(call());
+    expect(
+      line.sendInstruction({
+        ...call(),
+        sessionNumber: 1,
+        instruction: `use the key ${SECRET}`,
+        ownerWords: `session 1, use the key ${SECRET}`,
+      }),
+    ).toBe("queued");
+    const next = await restart();
+    // The saved copy is redacted, so the owner's words in the transcript no
+    // longer match it: nothing is queued, the owner is told, and no secret is stored.
+    await next.postCall(transcript("conv-1", `session 1, use the key ${SECRET}`), now, false);
+    expect(store.listInstructions()).toEqual([]);
+    expect(sms.sent.map((s) => s.text)).toEqual([expect.stringContaining("was not passed on")]);
+    expect(store.listAudit().find((e) => e.event === "voice.instruction-unconfirmed")).toBeDefined();
+  });
+
+  it("tells the owner once about held instructions whose post-call event never came across a restart", async () => {
     session("s-1", "Claude in demo-app");
     line.getStatus(call());
     expect(instruct(1)).toBe("queued");
-    // The daemon stops before the post-call event; a new run starts on the same store.
-    const next = new InboundLine({ store, clock: () => now, redact: (text) => text, sms });
-    await next.recover();
+    now = new Date(now.getTime() + 61 * 60_000);
+    await restart();
+    expect(sms.sent.map((s) => s.text)).toEqual([expect.stringContaining("was not passed on")]);
+    expect(store.listAudit().find((e) => e.event === "voice.instruction-unconfirmed")?.detail).toEqual({
+      reason: "no post-call event",
+    });
+    expect(store.listInboundCalls()).toEqual([]);
+    // Told once, and a late post-call event queues nothing.
+    const again = await restart();
+    await again.postCall(transcript("conv-1", "session 1, run the tests"), now, false);
+    expect(store.listInstructions()).toEqual([]);
+    expect(sms.sent).toHaveLength(1);
+  });
+
+  it("starts even when the saved calls cannot be read, and tells the owner they may be lost", async () => {
+    store.close();
+    // A store that cannot be read must not keep the daemon from starting.
+    expect(() => new InboundLine({ store, clock: () => now, redact: (text) => text, sms })).not.toThrow();
+    store = await openStore(join(dir, "hotline.db"));
+    const broken = Object.create(store) as HotlineStore;
+    broken.listInboundCalls = () => {
+      throw new Error("database disk image is malformed");
+    };
+    await new InboundLine({ store: broken, clock: () => now, redact: (text) => text, sms }).recover();
+    expect(sms.sent.map((s) => s.text)).toEqual([expect.stringContaining("was not passed on")]);
+  });
+
+  it("tells the owner about a saved call that does not read back, and forgets it", async () => {
+    store.putInboundCall("conv-bad", now.getTime() + 60_000, { held: [{ id: "x" }, { id: "y" }] });
+    await restart();
+    expect(sms.sent.map((s) => s.text)).toEqual([expect.stringContaining("2 instructions from your call")]);
+    expect(store.listAudit().find((e) => e.event === "voice.instruction-unconfirmed")?.detail).toEqual({
+      reason: "unreadable",
+      count: 2,
+    });
+    expect(store.listInboundCalls()).toEqual([]);
+  });
+
+  it("tells the owner once about instructions a run before HL-13b held when it stopped", async () => {
+    // Such a run saved only how many each call held, never the instructions.
+    store.putState(HELD_STATE_KEY, { "conv-old": 1 });
+    await restart();
     expect(sms.sent.map((s) => s.text)).toEqual([expect.stringContaining("was not passed on")]);
     expect(store.listAudit().find((e) => e.event === "voice.instruction-unconfirmed")?.detail).toEqual({
       reason: "restarted",
       count: 1,
     });
-    // Told once.
-    await next.recover();
+    await restart();
     expect(sms.sent).toHaveLength(1);
-    // A call handled to the end leaves nothing to report.
-    await line.postCall(transcript("conv-1", "session 1, run the tests"), now, false);
-    await new InboundLine({ store, clock: () => now, redact: (text) => text, sms }).recover();
-    // (The call itself texts that its instruction is queued; the restart adds nothing.)
-    expect(sms.sent.map((s) => s.text.slice(0, 30))).toEqual([
-      "Hotline: an instruction from y",
-      "Hotline: your instruction is q",
-    ]);
   });
 
   it("stores the owner's own words, never the model's text", async () => {

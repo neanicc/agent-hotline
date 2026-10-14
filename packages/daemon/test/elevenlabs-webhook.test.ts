@@ -1,4 +1,9 @@
+import { createHash, createHmac } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
 import { request } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import {
   type ConversationRecord,
   FakeVoiceProvider,
@@ -16,13 +21,19 @@ import {
   createRedactor,
   type ElevenLabsRoutesOptions,
   elevenLabsRoutes,
+  type HotlineStore,
+  InboundLine,
   type LogOptions,
   MAX_POST_CALLS_IN_FLIGHT,
   MAX_STATUS_LENGTH,
+  MAX_TOOL_CALLS_IN_FLIGHT,
   MAX_TOOL_DELIVERIES,
+  openStore,
   PinGate,
   POST_CALL_BODY_LIMIT,
   type SubmitAnswerResult,
+  storedPinFailures,
+  storedToolDeliveries,
   type ToolCall,
   type VoiceAnswer,
   type VoiceHandlers,
@@ -413,6 +424,114 @@ describe("repeated tool calls", () => {
     expect((await answer({ owner_words: "one too many" })).json()).toEqual({ result: "recorded" });
   });
 
+  it("answer a replay from the store after a restart, without running the tool again", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "hotline-hl13b-tools-"));
+    const path = join(dir, "hotline.db");
+    let store = await openStore(path);
+    try {
+      const restart = async () => {
+        await app.close();
+        store.close();
+        store = await openStore(path);
+        // A new run: a fresh PinGate, with the stored budgets.
+        pins = new PinGate({
+          check: async (pin) => pin === PIN,
+          clock: () => now,
+          failures: storedPinFailures(store),
+        });
+        app = server({ deliveries: storedToolDeliveries(store) });
+      };
+      await restart();
+      await tool("verify_pin", {
+        ...binding("conv_in"),
+        caller_id: OWNER,
+        called_number: AGENT_NUMBER,
+        pin: PIN,
+      });
+      const instruction = () =>
+        tool("send_instruction", {
+          ...binding("conv_in"),
+          caller_id: OWNER,
+          called_number: AGENT_NUMBER,
+          session_number: 1,
+          instruction: "run the tests",
+          owner_words: "session 1, run the tests",
+        });
+      const guess = () => tool("verify_pin", { ...binding(), pin: "1111" });
+      expect((await instruction()).json()).toEqual({ result: "queued" });
+      expect((await guess()).json()).toMatchObject({ verified: false, attempts_left: 1 });
+      expect(instructions).toHaveLength(1);
+      await restart();
+      // The replays get the first responses: no second instruction, no second guess counted.
+      expect((await instruction()).json()).toEqual({ result: "queued" });
+      expect((await guess()).json()).toMatchObject({ verified: false, attempts_left: 1 });
+      expect(instructions).toHaveLength(1);
+      expect(store.pinFailureTimes("outbound")).toHaveLength(1);
+      // Past the memory window the replayed instruction runs again, and now needs the PIN.
+      now = new Date(now.getTime() + 2 * 60 * 60 * 1000 + 1);
+      expect((await instruction()).json()).toMatchObject({ result: "pin-required" });
+      expect(instructions).toHaveLength(1);
+    } finally {
+      store.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuse a delivery, rather than risk running it twice, when the memory cannot be read", async () => {
+    await app.close();
+    app = server({
+      deliveries: {
+        get: () => {
+          throw new Error("database is locked");
+        },
+        put: () => {},
+        size: () => 0,
+        prune: () => {},
+      },
+    });
+    expect((await answer()).json()).toEqual({ result: "busy" });
+    expect(answers).toEqual([]);
+  });
+
+  it("still remember a delivery for this run when the store cannot keep it", async () => {
+    await app.close();
+    app = server({
+      deliveries: {
+        get: () => undefined,
+        put: () => {
+          throw new Error("disk full");
+        },
+        size: () => 0,
+        prune: () => {},
+      },
+    });
+    await answer();
+    await answer();
+    expect(answers).toHaveLength(1);
+  });
+
+  it("answer PIN repeats from this run's memory when the store cannot keep them, spending nothing", async () => {
+    await app.close();
+    app = server({
+      deliveries: {
+        get: () => undefined,
+        put: () => {
+          throw new Error("disk full");
+        },
+        size: () => 0,
+        prune: () => {},
+      },
+    });
+    const guess = () => tool("verify_pin", { ...binding(), pin: "1111" });
+    expect((await guess()).json()).toMatchObject({ verified: false, attempts_left: 1 });
+    expect((await guess()).json()).toMatchObject({ verified: false, attempts_left: 1 });
+    // A right PIN is remembered too, and this run's gate has the call verified, so no recheck runs.
+    const right = () => tool("verify_pin", { ...binding(), pin: PIN });
+    expect((await right()).json()).toMatchObject({ verified: true, attempts_left: 1 });
+    expect((await right()).json()).toMatchObject({ verified: true, attempts_left: 1 });
+    expect(pins.isVerified("conv_1")).toBe(true);
+  });
+
   it("keep reading the status on every request", async () => {
     await tool("verify_pin", { ...binding(), pin: PIN });
     await tool("get_status", binding());
@@ -476,6 +595,8 @@ describe("get_status and send_instruction", () => {
         sessionNumber: 2,
         instruction: "now write the tests",
         ownerWords: "tell Codex to now write the tests",
+        // When this call passed the PIN, saved with the held instruction (HL-13b).
+        pinVerifiedAt: now,
       },
     ]);
   });
@@ -852,6 +973,74 @@ describe("post-call webhook under load", () => {
     });
     expect(accepted.status).toBe(200);
     expect(closed).toHaveLength(MAX_POST_CALLS_IN_FLIGHT);
+    for (const req of stalled) req.destroy();
+  });
+});
+
+describe("server tools under load", () => {
+  let listening: FastifyInstance | undefined;
+
+  afterEach(async () => {
+    await listening?.close();
+  });
+
+  /** Senders with the tool secret that start a `verify_pin` body and never finish it. */
+  function stall(port: number, closed: boolean[] = []) {
+    return Array.from({ length: MAX_TOOL_CALLS_IN_FLIGHT }, () => {
+      const req = request({
+        host: "127.0.0.1",
+        port,
+        path: "/hooks/el/tools/verify_pin",
+        method: "POST",
+        agent: false,
+        headers: {
+          "content-type": "application/json",
+          "x-hotline-tool-secret": TOOL_SECRET,
+          "content-length": "1000",
+        },
+      });
+      req.on("error", () => closed.push(true));
+      req.write("{");
+      return req;
+    });
+  }
+
+  async function verify(port: number) {
+    const body = { ...binding(), pin: PIN };
+    conversations.set(body.conversation_id, liveRecord(body));
+    return send({
+      port,
+      method: "POST",
+      path: "/hooks/el/tools/verify_pin",
+      headers: { "content-type": "application/json", "x-hotline-tool-secret": TOOL_SECRET },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it(`reads at most ${MAX_TOOL_CALLS_IN_FLIGHT} calls of one tool at once`, async () => {
+    listening = server();
+    await listening.listen({ host: "127.0.0.1", port: 0 });
+    const port = listening.addresses()[0]?.port ?? 0;
+    const stalled = stall(port);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const refused = await verify(port);
+    expect([refused.status, refused.body]).toEqual([403, ""]);
+    expect(pins.isVerified("conv_1")).toBe(false);
+    for (const req of stalled) req.destroy();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect((await verify(port)).status).toBe(200);
+    expect(pins.isVerified("conv_1")).toBe(true);
+  });
+
+  it("cuts off tool senders that do not finish their body in time, freeing their slots", async () => {
+    listening = server({ toolBodyTimeoutMs: 200 });
+    await listening.listen({ host: "127.0.0.1", port: 0 });
+    const port = listening.addresses()[0]?.port ?? 0;
+    const closed: boolean[] = [];
+    const stalled = stall(port, closed);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect((await verify(port)).status).toBe(200);
+    expect(closed).toHaveLength(MAX_TOOL_CALLS_IN_FLIGHT);
     for (const req of stalled) req.destroy();
   });
 });
@@ -1435,5 +1624,275 @@ describe("every server tool is checked against ElevenLabs' record (HL-13a)", () 
       });
     }
     nothingHappened();
+  });
+});
+
+describe("a daemon restart in the middle of things (HL-13b)", () => {
+  let dir: string;
+  let path: string;
+  let store: HotlineStore;
+  let line: InboundLine;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "hotline-hl13b-routes-"));
+    path = join(dir, "hotline.db");
+    await start();
+  });
+
+  afterEach(async () => {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  /** One run: the store on `path`, a fresh PinGate and inbound line, and the routes wired as `runDaemon` wires them. */
+  async function start() {
+    await app.close();
+    store = await openStore(path);
+    pins = new PinGate({
+      check: async (pin) => pin === PIN,
+      clock: () => now,
+      failures: storedPinFailures(store),
+    });
+    line = new InboundLine({ store, clock: () => now, redact: (text) => text });
+    await line.recover();
+    app = server({
+      deliveries: storedToolDeliveries(store),
+      savedPinVerification: (conversationId) => line.savedPin(conversationId),
+      handlers: {
+        submitAnswer: (answer) => {
+          answers.push(answer);
+          return "recorded";
+        },
+        getStatus: (call) => line.getStatus(call),
+        sendInstruction: (instruction) => line.sendInstruction(instruction),
+        postCall: (event, receivedAt) => line.postCall(event, receivedAt, false),
+      },
+    });
+  }
+
+  async function restart() {
+    store.close();
+    await start();
+  }
+
+  const inbound = (conversation: string) => ({
+    ...binding(conversation),
+    caller_id: OWNER,
+    called_number: AGENT_NUMBER,
+  });
+
+  /**
+   * An inbound call that began 60 s before the PIN (at T0): the owner names
+   * session 1 at T0+10 s, the agent reads it back at T0+15 s, and the owner
+   * says yes at T0+20 s. `send_instruction` arrives at `heldAt` seconds after
+   * T0, the daemon restarts at `restartAt`, and with `pinAgainAt` the owner
+   * gives the PIN again in the new run. Returns the instructions queued once
+   * the real, signed post-call webhook has been handled.
+   */
+  async function heldAcrossRestart(
+    heldAt: number,
+    restartAt: number,
+    pinAgainAt?: number,
+    /** What ElevenLabs' record of the finished call says, when it differs. */
+    record: { callSid?: string; durationSecs?: number } = {},
+  ) {
+    store.putSession({
+      id: "s-1",
+      agent: "claude-code",
+      cwd: "/work/demo-app",
+      nickname: "Claude in demo-app",
+      state: "working",
+      registeredAt: now.toISOString(),
+      lastSeenAt: now.toISOString(),
+    });
+    unplaced.add("conv_r");
+    const t0 = now.getTime();
+    const at = (seconds: number) => {
+      now = new Date(t0 + seconds * 1000);
+    };
+    expect((await tool("verify_pin", { ...inbound("conv_r"), pin: PIN })).json()).toMatchObject({
+      verified: true,
+    });
+    expect((await tool("get_status", inbound("conv_r"))).json()).toMatchObject({ result: "ok" });
+    at(heldAt);
+    const held = await tool("send_instruction", {
+      ...inbound("conv_r"),
+      session_number: 1,
+      instruction: "run the tests",
+      owner_words: "session 1, run the tests",
+    });
+    expect(held.json()).toEqual({ result: "queued" });
+    at(restartAt);
+    await restart();
+    if (pinAgainAt !== undefined) {
+      at(pinAgainAt);
+      // The same words, so a byte-identical body: checked again, not answered from memory.
+      expect((await tool("verify_pin", { ...inbound("conv_r"), pin: PIN })).json()).toMatchObject({
+        verified: true,
+      });
+    }
+    at(90);
+    const turn = (role: "agent" | "user", message: string, second: number) => ({
+      role,
+      message,
+      time_in_call_secs: 60 + second,
+    });
+    const response = await postCall({
+      type: "post_call_transcription",
+      event_timestamp: now.getTime() / 1000,
+      data: {
+        agent_id: AGENT_ID,
+        conversation_id: "conv_r",
+        status: "done",
+        transcript: [
+          turn("agent", "Hey, it's your hotline.", -60),
+          turn("user", "4821", -5),
+          turn("agent", "One live session. Session 1, Claude in demo-app: working.", 2),
+          turn("user", "session 1, run the tests", 10),
+          turn("agent", "For session 1: run the tests. Send it?", 15),
+          turn("user", "Yes.", 20),
+          turn("agent", "Sent.", 25),
+        ],
+        metadata: {
+          start_time_unix_secs: t0 / 1000 - 60,
+          call_duration_secs: record.durationSecs ?? 90,
+          phone_call: {
+            direction: "inbound",
+            external_number: OWNER,
+            agent_number: AGENT_NUMBER,
+            phone_number_id: PHONE_ID,
+            call_sid: record.callSid ?? `CA${"0".repeat(31)}1`,
+          },
+        },
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    return store.listInstructions().map((i) => [i.sessionId, i.text, i.status]);
+  }
+
+  it("confirms an instruction held before the restart from the real post-call event", async () => {
+    expect(await heldAcrossRestart(22, 30)).toEqual([["s-1", "run the tests", "queued"]]);
+  });
+
+  it("does not count words said after the restart as the owner's until the PIN is given again", async () => {
+    // The yes comes after the restart, with no PIN in the new run: it is nobody's yes.
+    expect(await heldAcrossRestart(11, 12)).toEqual([]);
+  });
+
+  it("counts words said after the PIN is given again in the new run", async () => {
+    expect(await heldAcrossRestart(11, 12, 14)).toEqual([["s-1", "run the tests", "queued"]]);
+  });
+
+  it("uses a saved PIN time only for the call SID it was given on", async () => {
+    expect(await heldAcrossRestart(22, 30, undefined, { callSid: `CA${"9".repeat(32)}` })).toEqual([]);
+  });
+
+  it("uses a saved PIN time only when it falls within the call", async () => {
+    // The record says the call ended 30 s after it began, before the PIN time.
+    expect(await heldAcrossRestart(22, 30, undefined, { durationSecs: 30 })).toEqual([]);
+  });
+
+  it("refuses a replayed submit_answer once the call is over, and never re-runs it while it goes on", async () => {
+    await answer();
+    expect(answers).toHaveLength(1);
+    await restart();
+    // The call still goes on: the first response, without running the handler again.
+    expect((await answer()).json()).toEqual({ result: "recorded" });
+    expect(answers).toHaveLength(1);
+    // The call is over at ElevenLabs: the replay gets the refusal, not the remembered response.
+    const record = conversations.get("conv_1");
+    if (record === undefined) throw new Error("no record");
+    conversations.set("conv_1", { ...record, status: "done" });
+    expect((await answer()).json()).toEqual({ result: "refused", end_call: true });
+    expect(answers).toHaveLength(1);
+  });
+
+  it("never reads out the status to a get_status replayed after the call ended", async () => {
+    unplaced.add("conv_s");
+    await tool("verify_pin", { ...inbound("conv_s"), pin: PIN });
+    const read = await tool("get_status", inbound("conv_s"));
+    expect(read.json()).toMatchObject({ result: "ok" });
+    const record = conversations.get("conv_s");
+    if (record === undefined) throw new Error("no record");
+    conversations.set("conv_s", { ...record, status: "done" });
+    const replay = await tool("get_status", inbound("conv_s"));
+    expect(replay.json()).toEqual({ result: "refused", end_call: true });
+    expect(replay.body).not.toContain("demo-app");
+    expect(replay.body).not.toContain("session");
+    // A status is never remembered.
+    expect(store.countToolDeliveries(now.getTime())).toBe(1);
+  });
+
+  it("never lets the saved PIN time serve a live tool after a restart", async () => {
+    store.putSession({
+      id: "s-1",
+      agent: "claude-code",
+      cwd: "/work/demo-app",
+      nickname: "Claude in demo-app",
+      state: "working",
+      registeredAt: now.toISOString(),
+      lastSeenAt: now.toISOString(),
+    });
+    unplaced.add("conv_l");
+    await tool("verify_pin", { ...inbound("conv_l"), pin: PIN });
+    await tool("get_status", inbound("conv_l"));
+    await tool("send_instruction", {
+      ...inbound("conv_l"),
+      session_number: 1,
+      instruction: "run the tests",
+      owner_words: "session 1, run the tests",
+    });
+    await restart();
+    expect(line.savedPin("conv_l")).toEqual({ verifiedAt: now, callSid: `CA${"0".repeat(31)}1` });
+    expect((await tool("get_status", inbound("conv_l"))).json()).toMatchObject({ result: "pin-required" });
+  });
+
+  it("checks the same right PIN again on the same call after a restart", async () => {
+    unplaced.add("conv_p");
+    const say = () => tool("verify_pin", { ...inbound("conv_p"), pin: PIN });
+    expect((await say()).json()).toMatchObject({ verified: true });
+    await restart();
+    expect(pins.isVerified("conv_p")).toBe(false);
+    expect((await say()).json()).toMatchObject({ verified: true });
+    expect(pins.isVerified("conv_p")).toBe(true);
+    expect((await tool("get_status", inbound("conv_p"))).json()).toMatchObject({ result: "ok" });
+  });
+
+  it("still answers a wrong guess from before the restart from memory, spending nothing", async () => {
+    unplaced.add("conv_g");
+    const guess = () => tool("verify_pin", { ...inbound("conv_g"), pin: "1111" });
+    expect((await guess()).json()).toMatchObject({ verified: false, attempts_left: 1 });
+    await restart();
+    expect((await guess()).json()).toMatchObject({ verified: false, attempts_left: 1 });
+    expect(store.pinFailureTimes("inbound")).toHaveLength(1);
+  });
+
+  it("never stores a key the PIN could be found from without the tool secret", async () => {
+    unplaced.add("conv_k");
+    const body = { ...inbound("conv_k"), pin: "7391" };
+    await tool("verify_pin", body);
+    store.close();
+    const raw = new DatabaseSync(path);
+    const stored = raw
+      .prepare("SELECT key FROM tool_deliveries")
+      .all()
+      .map((row) => String(row.key));
+    raw.close();
+    const text = `verify_pin\0${JSON.stringify(body)}`;
+    expect(stored).toEqual([createHmac("sha256", TOOL_SECRET).update(text, "utf8").digest("base64url")]);
+    expect(stored).not.toContain(createHash("sha256").update(text, "utf8").digest("base64url"));
+    await start();
+  });
+
+  it("refuses a delivery whose saved response is damaged, rather than run it again", async () => {
+    await answer();
+    expect(answers).toHaveLength(1);
+    store.close();
+    const raw = new DatabaseSync(path);
+    raw.exec("UPDATE tool_deliveries SET response = 'not json'");
+    raw.close();
+    await start();
+    expect((await answer()).json()).toEqual({ result: "busy" });
+    expect(answers).toHaveLength(1);
   });
 });
