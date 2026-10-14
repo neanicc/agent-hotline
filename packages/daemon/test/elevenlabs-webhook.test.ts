@@ -31,6 +31,22 @@ const WEBHOOK_SECRET = "fake-webhook-secret-for-tests-01";
 const AGENT_ID = "agent_fake";
 const PIN = "4821";
 
+/**
+ * The log text without the numbers pino and Fastify add themselves (`time`,
+ * `pid`, `responseTime`), which can contain any digits and made PIN checks flaky.
+ */
+function loggedText(logLines: readonly string[]): string {
+  return logLines
+    .map((line) => {
+      const entry = JSON.parse(line) as Record<string, unknown>;
+      delete entry.time;
+      delete entry.pid;
+      delete entry.responseTime;
+      return JSON.stringify(entry);
+    })
+    .join("\n");
+}
+
 let lines: string[];
 let now: Date;
 let app: FastifyInstance;
@@ -276,7 +292,7 @@ describe("verify_pin", () => {
   it("never logs a PIN, right or wrong", async () => {
     await tool("verify_pin", { ...binding(), pin: "1397" });
     await tool("verify_pin", { ...binding(), pin: PIN });
-    const text = lines.join("");
+    const text = loggedText(lines);
     expect(text).not.toContain("1397");
     expect(text).not.toContain(PIN);
     expect(text).toContain('"tool":"verify_pin"');
@@ -569,6 +585,6 @@ describe("fake voice provider against the real routes", () => {
     expect(played.endedEarly).toBe(true);
     expect(played.tools.map((t) => t.tool)).toEqual(["verify_pin", "verify_pin"]);
     expect(statusCalls).toEqual([]);
-    expect(lines.join("")).not.toContain(PIN);
+    expect(loggedText(lines)).not.toContain(PIN);
   });
 });

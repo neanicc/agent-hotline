@@ -288,7 +288,9 @@ describe("runDaemon", () => {
     ]);
     const text = lines.join("");
     expect(text).not.toContain(toolSecret);
-    expect(text).not.toContain("4821");
+    // pino's own `time` is never redacted and can contain any digits.
+    const withoutTime = lines.map((line) => line.replace(/"time":\d+,?/, "")).join("");
+    expect(withoutTime).not.toContain("4821");
     expect(text).not.toContain("yes go ahead");
   });
 
