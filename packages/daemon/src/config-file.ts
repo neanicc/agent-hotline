@@ -15,6 +15,10 @@ export interface HotlinePaths {
   database: string;
   /** `daemon.lock`: holds the running daemon's process id, so only one runs per home. */
   lock: string;
+  /** `away.json`: whether away mode is on (`hotline away on|off`). The hooks read it. */
+  away: string;
+  /** `hook-state/`: per-session Stop-hook continuation counts, for the loop guard. */
+  hookState: string;
 }
 
 export interface PathOptions {
@@ -37,6 +41,8 @@ export function hotlinePaths({ env, homeDir }: PathOptions): HotlinePaths {
     secrets: join(home, "secrets.json"),
     database: join(home, "hotline.db"),
     lock: join(home, "daemon.lock"),
+    away: join(home, "away.json"),
+    hookState: join(home, "hook-state"),
   };
 }
 

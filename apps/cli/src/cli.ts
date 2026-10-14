@@ -3,6 +3,8 @@ import { homedir } from "node:os";
 import type { Readable, Writable } from "node:stream";
 import { type AgentKind, productName } from "@hotline/core";
 import type { LogDestination, SignalSource } from "@hotline/daemon";
+import { awayCommand, hookCommand } from "./hook.js";
+import { loadDaemonSetup } from "./setup.js";
 
 export interface Output {
   stdout(text: string): void;
@@ -19,7 +21,7 @@ export interface CliContext {
   logDestination: LogDestination;
   /** The working directory; `hotline mcp` registers its session there. Defaults to `process.cwd()`. */
   cwd?: string;
-  /** The MCP protocol streams for `hotline mcp`. Default to the process's own. */
+  /** The MCP protocol streams for `hotline mcp`, and the hook payload for `hotline hook`. Default to the process's own. */
   stdin?: Readable;
   stdout?: Writable;
 }
@@ -49,12 +51,14 @@ export function usage(): string {
     "Usage: hotline <command>",
     "",
     "Commands:",
+    "  away        Switch away mode on or off (on, off, status)",
     "  daemon      Run the Hotline daemon (agent API and webhook listener)",
+    "  hook        The Claude Code and Codex permission and Stop hook (stdin JSON)",
     "  mcp         Run the MCP server for Claude Code or Codex (stdio)",
     "  help        Show this message",
     "  version     Print the hotline version",
     "",
-    "More commands (init, install, away, doctor, voice, test-call, hook)",
+    "More commands (init, install, doctor, voice, test-call)",
     "arrive with later tickets; see docs/plan.md.",
   ].join("\n");
 }
@@ -170,17 +174,8 @@ async function mcpCommand(args: readonly string[], out: Output, context: CliCont
   const daemon = new DaemonClient({
     // Read on first use and again after a failure, so the daemon may start later.
     connection: async () => {
-      const { hotlinePaths, loadConfig, openSecretStore } = await import("@hotline/daemon");
       try {
-        const paths = hotlinePaths({ env: context.env, homeDir: context.homeDir });
-        const config = await loadConfig(paths.config);
-        const secrets = openSecretStore({
-          choice: config.secrets.store,
-          platform: context.platform,
-          filePath: paths.secrets,
-        });
-        const token = await secrets.get("daemon.apiToken");
-        if (token === undefined) throw new Error('no API token yet; start "hotline daemon" first');
+        const { config, token } = await loadDaemonSetup(context);
         return { port: port ?? config.daemon.port, token };
       } catch (error) {
         const message = (error as Error).message;
@@ -217,6 +212,10 @@ export async function run(
   switch (command) {
     case "daemon":
       return daemonCommand(args, out, context);
+    case "hook":
+      return hookCommand(args, out, context);
+    case "away":
+      return awayCommand(args, out, context);
     case "mcp":
       return mcpCommand(args, out, context);
     case "help":
