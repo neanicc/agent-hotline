@@ -55,7 +55,7 @@ Template:
   `../package.json`; HL-15 must keep that working when it bundles. Revisit
   TypeScript 7 once it has a few months of patch releases.
 
-## 2026-10-13 — HL-02 Contracts and config (#PR)
+## 2026-10-13 — HL-02 Contracts and config (#21)
 
 - Decision / change: zod 4.6.5 pinned in `@hotline/core` (4.6.6 and 4.6.7 were
   under two weeks old). Core holds the schemas for Session, Ask, Answer/Decision,
