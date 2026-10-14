@@ -388,3 +388,40 @@ describe("audit", () => {
     raw.close();
   });
 });
+
+describe("ask change listeners", () => {
+  it("hear committed status changes and answers, not refused ones", async () => {
+    const db = await open();
+    db.putSession(session);
+    db.addAsk(ask());
+    db.addAsk(ask({ id: "a2", createdAt: T1 }));
+    const heard: string[] = [];
+    const stop = db.onAskChange((id) => heard.push(id));
+    db.onAskChange(() => {
+      throw new Error("a broken listener");
+    });
+
+    expect(() => db.recordAnswer(answer({ decision: { type: "allow" } }), new Date(T1))).toThrow(StoreError);
+    db.recordAnswer(answer(), new Date(T1));
+    expect(db.setAskStatus("a1", "cancelled")).toBe(false);
+    expect(db.setAskStatus("a2", "cancelled")).toBe(true);
+    expect(heard).toEqual(["a1", "a2"]);
+    expect(db.getAsk("a2")?.status).toBe("cancelled");
+
+    stop();
+    db.addAsk(ask({ id: "a3" }));
+    db.setAskStatus("a3", "expired");
+    expect(heard).toEqual(["a1", "a2"]);
+  });
+
+  it("list one session's newest asks first", async () => {
+    const db = await open();
+    db.putSession(session);
+    db.putSession({ ...session, id: "s2", agentSessionId: "agent-session-2" });
+    db.addAsk(ask());
+    db.addAsk(ask({ id: "a2", createdAt: T1 }));
+    db.addAsk(ask({ id: "a3", sessionId: "s2" }));
+    expect(db.listSessionAsks("s1", 10).map((a) => a.id)).toEqual(["a2", "a1"]);
+    expect(db.listSessionAsks("s1", 1).map((a) => a.id)).toEqual(["a2"]);
+  });
+});

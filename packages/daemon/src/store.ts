@@ -187,8 +187,12 @@ interface Schema<T> {
   safeParse(input: unknown): { success: true; data: T } | { success: false };
 }
 
+/** Told the id of an ask whose status changed, after the change is committed. */
+export type AskChangeListener = (askId: string) => void;
+
 export class HotlineStore {
   private closed = false;
+  private readonly askListeners = new Set<AskChangeListener>();
 
   constructor(
     private readonly db: DatabaseSync,
@@ -263,6 +267,26 @@ export class HotlineStore {
     return row === undefined ? undefined : this.decode(Ask, "ask", row);
   }
 
+  /** The newest `limit` asks of one session, newest first. */
+  listSessionAsks(sessionId: string, limit: number): Ask[] {
+    return this.db
+      .prepare("SELECT id, record FROM asks WHERE session_id = ? ORDER BY created_at DESC, id DESC LIMIT ?")
+      .all(sessionId, limit)
+      .map((row) => this.decode(Ask, "ask", row));
+  }
+
+  /**
+   * Calls `listener` with an ask's id each time `setAskStatus` or `recordAnswer`
+   * changes that ask, after the transaction commits. Returns a function that stops
+   * listening. A listener that throws affects neither the write nor other listeners.
+   */
+  onAskChange(listener: AskChangeListener): () => void {
+    this.askListeners.add(listener);
+    return () => {
+      this.askListeners.delete(listener);
+    };
+  }
+
   /** Asks in creation order, optionally only those with one of `statuses`. */
   listAsks(statuses?: readonly AskStatus[]): Ask[] {
     const rows =
@@ -286,12 +310,14 @@ export class HotlineStore {
     if ((status as AskStatus) === "answered") {
       throw new StoreError("An ask is answered only through recordAnswer");
     }
-    return this.transaction(() => {
+    const changed = this.transaction(() => {
       const ask = this.getAsk(id);
       if (ask === undefined || (ask.status !== "pending" && ask.status !== "in-flight")) return false;
       this.writeAskStatus({ ...ask, status });
       return true;
     });
+    if (changed) this.askChanged(id);
+    return changed;
   }
 
   // Answers ----------------------------------------------------------------
@@ -313,6 +339,7 @@ export class HotlineStore {
         .run(record.askId, record.answeredAt, JSON.stringify(record));
       this.writeAskStatus({ ...ask, status: "answered" });
     });
+    this.askChanged(record.askId);
   }
 
   getAnswer(askId: string): Answer | undefined {
@@ -400,6 +427,16 @@ export class HotlineStore {
   }
 
   // Internals --------------------------------------------------------------
+
+  private askChanged(askId: string): void {
+    for (const listener of [...this.askListeners]) {
+      try {
+        listener(askId);
+      } catch {
+        // A listener's failure must not undo or hide a committed write.
+      }
+    }
+  }
 
   private writeAskStatus(ask: Ask): void {
     const record = Ask.parse(ask);

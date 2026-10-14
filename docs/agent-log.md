@@ -284,3 +284,84 @@ Template:
   HMAC; both plug into `WebhookRoute`. HL-13 should extend the redaction corpus
   with `.env` files and real provider payload shapes. Bump Fastify once a fixed
   release is two weeks old.
+
+## 2026-10-13 — HL-05 MCP server
+
+- Decision / change: `hotline mcp` is a stdio MCP server in `packages/agents`
+  with `ask_human`, `notify_human` and `check_inbox`; `docs/mcp.md` documents
+  it. `@modelcontextprotocol/sdk` is pinned at 1.31.0 (2026-09-28, 15 days old).
+  Its only change since 1.30.1 binds stored OAuth credentials to their issuer,
+  which stdio does not use. 1.32.x is under two weeks old. The SDK's v2 split
+  packages (`@modelcontextprotocol/server` and `client`) were not used, because
+  the ticket names `sdk`. zod 4.6.5 is now a direct dependency of `agents` and
+  `daemon`, the same pin as core.
+- Daemon routes (the minimal set the server needs, all behind the existing
+  token and loopback `Host` checks): `POST /v1/sessions`,
+  `POST /v1/sessions/:id/asks` (question or notify only; HL-06 adds the
+  permission and stop kinds), `GET /v1/asks/:id/outcome?waitSeconds=0..30`
+  (long poll), `POST /v1/asks/:id/cancel`, and `GET /v1/sessions/:id/inbox`.
+  Ask text and options are redacted with the daemon's redactor before they are
+  stored. An `answered` outcome is built only from an answer the store holds,
+  which `recordAnswer` accepted after `answerProblem` passed (the requirement
+  carried over on #7 and #10). An expired open ask becomes `expired` when read.
+  The store gained `onAskChange` (fires after commit) and `listSessionAsks`.
+  There is no migration.
+- Decisions without a plan answer: (1) The agent comes from `--agent claude|codex`
+  in the config snippet. Without the flag it is guessed from `clientInfo.name`.
+  Claude Code's `CLAUDE_CODE_SESSION_ID`, set for stdio MCP servers per the
+  env-vars docs, becomes `agentSessionId`, so HL-06 hooks can reuse the session.
+  Codex exposes no session id that we could verify. (2) Registration happens
+  when the client finishes initializing, and again on the next tool call if the
+  daemon was down. If the daemon has forgotten the session, the server registers
+  again once. (3) `ask_human` returns JSON text: `answered` with the choice or
+  free text and the owner's verbatim words, or `no-answer` with a reason and a
+  note that it is not approval. It also returns `no-answer` when the daemon's
+  outcome is for another ask or has a decision a question cannot have. (4) The
+  server waits by long-polling for 25 s at a time. After 3 failed polls (1, 2 and
+  4 s apart) it returns `no-answer` / `failed`, and it gives up 60 s after
+  `expiresAt` even if the daemon never says so. A cancelled call, or a client
+  that disconnects, cancels the ask on the daemon. (5) Progress notifications go
+  out every 60 s, but only when the client sent a `progressToken`, as the spec
+  requires. (6) `check_inbox` returns `instructions: []` until HL-10 adds the
+  owner's instruction queue. No contract or migration was added for it here.
+  (7) Timeouts from the docs, via the hl-researcher agent: Claude Code's default
+  `MCP_TOOL_TIMEOUT` is about 28 h. A per-server `timeout` is a hard limit that
+  progress does not extend. The stdio idle timeout
+  (`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`) is 30 min and progress resets it. So the
+  snippet sets no `timeout` and suggests a 40-minute idle timeout. Codex's
+  `tool_timeout_sec` defaults to 60 s, and per the rmcp client source it does
+  not reset on progress, so the snippet sets 2100. That Codex reading comes
+  from reading the source, not from a test.
+- Bug found and fixed: a client that aborted a long poll could leave an agent
+  API connection that `server.close()` never reaped, so shutdown hung until the
+  10 s timeout (exit 1). In the MCP cancel tests, `daemon.close()` hung in about
+  1 run in 4. On shutdown the agent API now releases long polls, closes idle
+  connections every 50 ms, and after a 2 s grace closes any connection left.
+  With that reaper disabled, 9 of 10 runs of the MCP test file failed. With it,
+  12 of 12 passed, and the full suite passed 6 times in a row.
+- Evidence (automated, worktree, Node 24.11.0 and 22.23.1): `run.sh setup`,
+  `build` (Biome, `tsc -b`, typecheck, CLI smoke) and `test` pass: 354 tests in
+  21 files. They include 26 MCP tests through the SDK `Client` over
+  `InMemoryTransport` against a real daemon on 127.0.0.1 (temp store, fake
+  clock), 8 `hotline mcp` CLI tests over stdio framing on in-process streams,
+  14 daemon route tests and 2 store tests. Mutation checks: dropping the
+  `askId` match fails 1 test; skipping redaction of the ask text fails 2. Manual:
+  the built CLI ran as real child processes. `hotline daemon --port 0` and
+  `hotline mcp --agent codex` were driven by the SDK's `StdioClientTransport` in
+  a temp `HOTLINE_HOME`. The client saw the three tools; `notify_human` queued;
+  `ask_human` returned option 2 with the owner's words after an answer was
+  recorded through `recordAnswer`; `check_inbox` listed both asks; the daemon
+  exited 0 on SIGTERM; and neither process's stderr held the token. The scenario
+  suite does not exist yet (HL-12). Real agent integration was not run: `claude`
+  and `codex` are installed, but driving them would call their model APIs, and
+  this run allows no network beyond 127.0.0.1. No live call.
+- Open issues or follow-ups: HL-09 should record the specific no-answer reason
+  (`no-pickup`, `unclear`, `dropped`) on the ask. Today only `expired` maps to
+  `timeout` and `cancelled` to `cancelled`. HL-10 should add the instruction
+  queue that the inbox and the next ask deliver. HL-06 should add the permission
+  and stop ask kinds, with `toolName` and `risk`, to `POST /v1/sessions/:id/asks`.
+  HL-11 `hotline install` should write the snippets in `docs/mcp.md`. Nothing
+  marks a session `ended` when its MCP server exits, so the inbound line (HL-10)
+  should rely on `lastSeenAt`. A human should confirm, with real Claude Code and
+  Codex sessions and fake providers, that the snippets load and that
+  `ask_human` survives a wait of more than 60 s in Codex.

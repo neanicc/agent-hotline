@@ -109,7 +109,16 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
     const redactor = createRedactor([apiToken]);
     const log = { level: options.logLevel ?? "info", destination: options.logDestination, redactor };
     store = await openStore(paths.database, { redactor });
-    daemon = await startDaemon({ apiToken, store, ...ports, log, version: options.version });
+    daemon = await startDaemon({
+      apiToken,
+      store,
+      ...ports,
+      log,
+      version: options.version,
+      clock,
+      askTimeoutMinutes: config.policy.askTimeoutMinutes,
+      nicknames: config.nicknames,
+    });
     store.appendAudit(
       "daemon.started",
       { version: options.version, apiPort: daemon.apiPort, hooksPort: daemon.hooksPort },

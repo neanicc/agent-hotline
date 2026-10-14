@@ -17,7 +17,11 @@
     "test": "vitest run --root ../.. --project cli"
   },
   "dependencies": {
+    "@hotline/agents": "workspace:*",
     "@hotline/core": "workspace:*",
     "@hotline/daemon": "workspace:*"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.31.0"
   }
 }
