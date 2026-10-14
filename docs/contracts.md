@@ -300,6 +300,7 @@ does I/O; `packages/core/test/purity.test.ts` scans the sources to keep it so.
 | `text-sent` | The text for an ask went out; ends a notification as `delivered` |
 | `text-failed` | The text for an ask could not be sent |
 | `cancel` | The agent stopped waiting |
+| `call-me` | The owner texted `call me`. The daemon sends it only for an inbound text it verified came from the owner's number. Not an answer |
 
 | Action | What the daemon does |
 | --- | --- |
@@ -346,7 +347,38 @@ Rules:
   though one call can read several of them out.
 - **Quiet hours** (start inclusive, end exclusive, local time in
   `quietHours.timeZone`, equal start and end meaning none): asks are texted. Only
-  urgent asks are called, and only when `allowUrgentCalls` is set.
+  urgent asks are called, and only when `allowUrgentCalls` is set, plus the one
+  call the owner asks for with `call me`.
+- **Call me.** A `call-me` event asks for one call now.
+  - *Who is on it.* Open asks that are not notifications, not duplicates, not past
+    their expiry, and waiting or already texted: highest priority first, at most
+    `DEFAULT_MAX_ASKS_PER_CALL`.
+  - *What it overrides.* Quiet hours, the batch window, a retry delay and an
+    earlier fallback to text (`after-call`, the only reason an ask is held to
+    text), for that call only. Later asks and retries follow the normal rules.
+  - *What it never overrides.* The call limit: over it the event is `ignored`
+    ("over the call limit; open asks keep going by text") and the asks carry on
+    by text. A call in progress: `ignored` ("a call is already in progress"); a
+    call past the stuck-call timeout is hung up with `end-call` first and does not
+    count. With nothing to call about it is `ignored` ("no open asks to call
+    about"). The daemon may reply to the owner from these reasons, since
+    `send-text` always carries an ask.
+  - *Not an answer.* Each ask on the call still needs the owner's own words.
+    `place-call` names asks, never a number: the daemon dials only the configured
+    owner number.
+  - *After the call.* An ask that was texted before it and is still open goes back
+    to awaiting its text reply (no retry, no second text); if it then expires the
+    reason is `timeout` (the unanswered text), not the call's result. A
+    `text-sent` or `text-failed` may arrive while it is on the call: a failed text
+    marks it as not texted (no SMS reply counts) and, when the call ends, it
+    follows the usual no-pickup rules, which text it again. An ask never texted
+    follows the usual no-pickup rules. A call-me call counts as a call attempt for
+    each ask on it, so it uses up automatic retries (`DEFAULT_MAX_CALL_ATTEMPTS`).
+  - *Daemon duties.* Send `call-me` only for an inbound text verified as coming
+    from the owner's number, and deliver each inbound text once (dedupe on the
+    provider message id). The queue has no call-me cooldown beyond the call limit
+    and one call at a time, so a redelivered webhook could otherwise place a
+    second call.
 - **Rate limits** count over a rolling hour and a rolling 24 hours; a send stamped
   after `now` (the clock moved back) still counts. With no call
   left, a due ask is texted; with no text left either, it waits for a slot or its

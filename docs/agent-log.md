@@ -463,6 +463,84 @@ Template:
     `ok` to the parser's yes words fails the generated test, which passed
     before.
 
+## 2026-10-13 — HL-03b Call-me text event (#31)
+
+- Decision / change: the queue takes a pure `call-me` event for an owner text of
+  `call me` (issue #28, plan flow E). With no call in progress and at least one
+  open ask that needs an answer (not a notification, not a duplicate, not past
+  expiry, waiting or already texted), it places one call at once, highest
+  priority first, at most four asks. `place-call` still names asks only; the daemon
+  dials the owner number and must send `call-me` only for a text it verified came
+  from that number. The event is never an answer, so silence after it still ends
+  as `no-answer` and a permission request still denies.
+- Decisions (no human available; recorded per the ticket):
+  - An explicit owner request overrides quiet hours for that one call (the issue's
+    stated default). It also overrides the batch window, a retry delay and an
+    earlier fallback to text, because the owner asked to be called now. Later asks
+    and retries follow quiet hours again.
+  - It never overrides the call limit: over the limit the event is `ignored` with
+    the reason "over the call limit; open asks keep going by text", and the asks
+    keep their text path. A call already in progress also makes it `ignored`.
+  - No open asks: the event is `ignored` ("no open asks to call about") rather than
+    a new "nothing pending" text action. `send-text` always carries an ask id, and
+    a new action type would widen the daemon contract for one reply; HL-09 can
+    answer the owner from the ignore reason.
+  - A call already past the stuck-call timeout does not block the request: it is
+    hung up (`end-call`) and treated as dropped first, as a `tick` would.
+  - When a `call-me` call ends with an ask that had been texted still open, the ask
+    returns to awaiting its text reply instead of being retried or texted again,
+    so the owner gets no duplicate text and can still reply by SMS.
+- Evidence (automated, worktree, Node 24.11.0 locally; CI covers Node 22):
+  `scripts/ci/run.sh build` passes (Biome, `tsc -b`, test typecheck);
+  `scripts/ci/run.sh test` passes 376 tests in 22 files, 116 of them in core.
+  Nine new unit tests cover: open asks with no call (calls at once, by priority,
+  notifications left to text), an ask already texted (voice answer on the call, an
+  SMS reply afterwards, no second text), an ask in its retry delay, a call in
+  progress, a stuck call (hung up, then the owner's call placed), quiet hours (one call only, no retry call, the next ask texted), over
+  the call limit, no open asks (empty, notification only, expired), and call-me
+  never answering a high-risk permission. The property suite adds `call-me` to the
+  random event mix: the silent property still sees only `no-answer` and `deny`;
+  every place-call names asks and no number; a call-me call never starts while
+  one is in progress and covers only eligible asks; quiet-hours and retry-delay
+  checks are exempted only for the call the owner asked for; rate limits hold
+  with call-me calls counted. A liveness check requires a call-me with an open
+  ask, no call and a free call slot to place exactly the expected call; a
+  temporary counter showed it firing 384 times per suite run. A mutation check
+  broke the change eight ways (ignore the call limit, ignore a call in progress,
+  call about notifications, never call, wrong order, call about expired asks,
+  keep a stuck call blocking, retry or re-text an already texted ask);
+  each made the tests fail. `scripts/ci/run.sh eval` is not built yet (HL-12);
+  no real agent or live call evidence applies.
+- Review fixes (bot staff review): a `call-me` during a live call now always
+  reports "a call is already in progress", even when every open ask is on that
+  call. `docs/contracts.md` states that a call-me call counts as a call attempt
+  (it uses up automatic retries) and that the queue has no call-me cooldown beyond
+  the call limit and one call at a time. Repeated owner texts after a call ended
+  are honored as fresh requests; a redelivered webhook is the daemon's to dedupe
+  by message id.
+- Review fixes (Greptile P1 and the bot staff review on 233d8e8): a texted ask can
+  be on a `call-me` call before its text is confirmed. A `text-failed` arriving then
+  used to be ignored, leaving the ask waiting for a reply to a text that never
+  arrived. It now marks the ask as not texted (no SMS reply counts), and when the
+  call ends the ask follows the no-pickup rules and is texted again. `text-sent`
+  is accepted during the call too. A texted ask whose call-me call goes unanswered
+  now expires as `timeout`, not as the call's `no-pickup` or `dropped`, because
+  the text is the outstanding channel. The property suite then found a stale
+  `readyAt`: a call-me call placed inside the batch window left `readyAt` in the
+  future, so a zero-delay retry looked early. The call now sets `readyAt` to the
+  call time. A regression unit test pins it, and 40 more property-suite runs
+  (about 36,000 random runs) passed. The hand mutation check now has eleven
+  mutants: the eight above, plus keeping a failed text as texted, dropping the
+  `readyAt` reset, and ignoring a text failure during the call. All are killed.
+  `scripts/ci/run.sh test` passes 379 tests (119 in core).
+- Catch-up with main after HL-07 (#30): only this log conflicted; HL-07's
+  `sms-reply.ts` sits next to the queue in `@hotline/core` with no name clash.
+  `scripts/ci/run.sh build` passes and `scripts/ci/run.sh test` passes 507 tests
+  in 26 files (186 in core).
+- Open issues or follow-ups: HL-07's `parseSmsReply` already turns `call me` into
+  the `call-me` command; HL-09 maps that command to this event, dedupes inbound
+  texts by message id, and turns the ignore reasons into owner replies.
+
 ## 2026-10-13 — HL-05 MCP server
 
 - Decision / change: `hotline mcp` is a stdio MCP server in `packages/agents`
@@ -519,7 +597,7 @@ Template:
   12 of 12 passed, and the full suite passed 6 times in a row.
 - Evidence (automated, worktree, Node 24.11.0 and 22.23.1): `run.sh setup`,
   `build` (Biome, `tsc -b`, typecheck, CLI smoke) and `test` pass: 354 tests in
-  21 files, and 545 in 29 files after merging main with HL-03 and HL-07. They include 26 MCP tests through the SDK `Client` over
+  21 files, and 562 in 29 files after merging main with HL-03, HL-07 and HL-03b. They include 26 MCP tests through the SDK `Client` over
   `InMemoryTransport` against a real daemon on 127.0.0.1 (temp store, fake
   clock), 8 `hotline mcp` CLI tests over stdio framing on in-process streams,
   14 daemon route tests and 2 store tests. Mutation checks: dropping the
