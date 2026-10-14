@@ -275,6 +275,22 @@ describe("send_instruction", () => {
     });
   });
 
+  it("tells the owner when a call's post-call event never came and its instructions were dropped", async () => {
+    session("s-1", "Claude in demo-app");
+    line.getStatus(call());
+    expect(instruct(1)).toBe("queued");
+    now = new Date(now.getTime() + 61 * 60_000);
+    line.getStatus(call("conv-later"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sms.sent.map((s) => s.text)).toEqual([expect.stringContaining("was not passed on")]);
+    expect(store.listAudit().find((e) => e.event === "voice.instruction-unconfirmed")?.detail).toEqual({
+      reason: "no post-call event",
+    });
+    // A late post-call event for it queues nothing.
+    await line.postCall(transcript("conv-1", "session 1, run the tests"), now, false);
+    expect(store.listInstructions()).toEqual([]);
+  });
+
   it("stores the owner's own words, never the model's text", async () => {
     session("s-1", "Claude in demo-app");
     line.getStatus(call());

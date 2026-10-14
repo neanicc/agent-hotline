@@ -530,10 +530,14 @@ anyone else's text the generic SMS reply.
   event stores it once. Anything else is dropped
   (`voice.instruction-unconfirmed` with the reason), and the owner gets one
   text saying it was not passed on. The held instructions and the call's
-  numbering live in memory for an hour; past that, or after a restart before
-  the post-call event, they are dropped without a text (fail closed; the
+  numbering live in memory for an hour. Past that without a post-call event
+  they are dropped, audited (`no post-call event`) and the owner gets the same
+  "not passed on" text. A restart before the post-call event drops them
+  without a text, though the voice agent had said `queued` (fail closed; the
   PinGate's verification is in memory too, so nothing would count as the
-  owner's anyway), though the voice agent had said `queued`.
+  owner's anyway; persisting them is HL-13 work). The Stop hook looks for
+  instructions only with the agent's own session id, so it never registers a
+  throwaway session to look.
 - **Delivery.** Each instruction is handed over once, oldest first, to the
   session's next reader: the MCP server after `ask_human` returns (it adds
   them to the result), `check_inbox` (the inbox route), or the Stop hook, which

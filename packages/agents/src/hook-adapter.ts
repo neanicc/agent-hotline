@@ -397,6 +397,9 @@ async function queuedInstructions(
   daemon: HotlineDaemon,
   session: { agent: AgentKind; cwd: string; agentSessionId: string | undefined },
 ): Promise<string | undefined> {
+  // Without the agent's own session id each registration is a new session,
+  // which has no instructions waiting: do not spend one on looking.
+  if (session.agentSessionId === undefined) return undefined;
   try {
     const registered = await daemon.registerSession({
       agent: session.agent,

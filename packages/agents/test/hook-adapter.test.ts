@@ -732,6 +732,22 @@ describe("Stop hook loop guards", () => {
     expect(unsavedDaemon.calls).not.toContain("take:stop");
   });
 
+  it("does not register a throwaway session to look for instructions without the agent's session id", async () => {
+    const daemon = fakeDaemon({
+      take: async () => left("run the tests"),
+      outcome: async (ask) => instruction(ask),
+    });
+    const unusable = fixtureText("codex/stop.input.json", (json) => {
+      json.session_id = "x".repeat(200);
+    });
+    const result = await runHook(
+      options(daemon, new MemoryState(), { agent: "codex", event: "stop", input: unusable }),
+    );
+    expect(parse(result.stdout)).toEqual({ decision: "block", reason: "keep going" });
+    expect(daemon.calls.filter((call) => call === "register")).toHaveLength(1);
+    expect(daemon.calls).not.toContain("take:stop");
+  });
+
   it("asks the owner as usual when the instructions cannot be fetched", async () => {
     const daemon = fakeDaemon({
       take: async () => {

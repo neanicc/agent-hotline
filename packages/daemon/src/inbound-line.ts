@@ -282,8 +282,22 @@ export class InboundLine {
 
   /** Forgets calls past `CALL_MEMORY_MS` (their instructions are never queued), and the oldest past `MAX_CALLS`. */
   #forget(now: Date): void {
+    let lost = 0;
     for (const [id, memory] of this.#calls) {
-      if (memory.expires <= now.getTime() || this.#calls.size > MAX_CALLS) this.#calls.delete(id);
+      if (memory.expires > now.getTime() && this.#calls.size <= MAX_CALLS) continue;
+      this.#calls.delete(id);
+      // The voice agent told the owner these were queued: say they were not.
+      for (const held of memory.held.filter((h) => !h.done)) {
+        this.#store.appendAudit("voice.instruction-unconfirmed", { reason: "no post-call event" }, now, {
+          sessionId: held.sessionId,
+        });
+        lost += 1;
+      }
+    }
+    if (lost > 0) {
+      this.#text(INBOUND_TEXTS.notQueued(lost), "instruction-not-queued", now).catch((error: unknown) =>
+        this.#options.log?.().warn({ err: error }, "could not text about instructions not passed on"),
+      );
     }
   }
 

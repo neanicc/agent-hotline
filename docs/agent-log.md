@@ -1899,6 +1899,15 @@ Template:
   `requirePhoneNumber` comment is back in place; the restart gap is in
   docs/daemon.md. Evidence: build passes, test passed 57 files, 1492 tests,
   three times in a row.
+- Review fixes, fourth round (bot staff review of 146a44a, two P2s): held
+  instructions forgotten after an hour without a post-call event are now
+  audited and texted to the owner as not passed on (a restart still drops
+  them silently; HL-13), and the Stop hook skips the instruction lookup when
+  the payload has no usable session id, so it never registers a throwaway
+  session. P3s left as notes: the inbox GET hands instructions over (the
+  MCP server's `check_inbox` is its only reader on this Mac), the status text
+  carries the latest ask's redacted text to the owner's number, and the
+  lockout catch stays a commented no-op.
 - Decision: sessions are named by number. `get_status` numbers live sessions
   by registration and remembers, per call, which number is which session;
   `send_instruction` takes only a number that call's status read out
