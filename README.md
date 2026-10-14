@@ -117,9 +117,9 @@ To try it without accounts, run `hotline init --voice-provider fake --sms-provid
 | Setting | Default | What it does |
 | --- | --- | --- |
 | Rate limits | 4 calls an hour, 20 a day | Extra asks wait for a slot or go by text |
-| Quiet hours | Set in `init` | Asks become texts unless one is marked urgent and urgent calls are allowed |
+| Quiet hours | 22:00 to 08:00, in the time zone `init` sets | Asks become texts unless one is marked urgent and urgent calls are allowed. Change the window with `quietHours.start` and `quietHours.end` |
 | Ask timeout | 30 minutes | When it passes, the agent gets "no answer" |
-| Away-mode loop guard | 5 Stops in a row | At the cap the agent stops, and you get a notice |
+| Away-mode loop guard | 5 continuations in a row | At the cap the agent stops, and you get a notice |
 | Voice model | Claude Haiku 4.5 | `voice.llm` switches to Claude Sonnet 4.6 or 5.5 |
 | Reply judge | Off until you choose | `judge.backend`: `auto`, `claude-code`, `codex`, `anthropic-api` or `off` |
 
@@ -131,7 +131,7 @@ To try it without accounts, run `hotline init --voice-provider fake --sms-provid
 
 ### Scenario suite
 
-`bash scripts/ci/run.sh eval --local` runs the real daemon, MCP server and hook adapters against a fake phone, fake texts and scripted humans with a fake clock, then scores the run against [eval/thresholds.toml](eval/thresholds.toml). On `main` at `8b25518`, every required scenario passes, in CI on Ubuntu and macOS and locally:
+`bash scripts/ci/run.sh eval --local` runs the real daemon, MCP server and hook adapters against a fake phone, fake texts and scripted humans with a fake clock, then scores the run against [eval/thresholds.toml](eval/thresholds.toml). On `main` at `8b25518`, every required scenario passes, both in CI on Ubuntu and in a local run on macOS. CI on macOS runs the unit tests and the suite's self-test, not the full suite.
 
 | Area | Scenarios | Result |
 | --- | --- | ---: |
@@ -177,7 +177,7 @@ A self-test proves the suite can fail. A deliberately broken build that approves
 - **Every webhook is checked twice.** Twilio requests are signature-checked, ElevenLabs tool calls carry a shared secret and post-call webhooks are HMAC-checked; anything else gets 403. Then, before a text or call can decide anything, Hotline fetches the real record from Twilio or ElevenLabs and uses that. A forged webhook has nothing real behind it, so it approves nothing.
 - **Decisions come from your words.** An answer counts only from you on the call or by text, checked against the transcript, with the excerpt stored. Text an agent wrote, such as a question or a command preview, is treated as data and can't approve itself.
 - **Silence is no.** No pickup, a dropped call, an unclear answer or a timeout returns "no answer", and a permission prompt is denied.
-- **Minimum data to third parties.** Twilio and ElevenLabs get short summaries with API keys, tokens, private keys, `.env` values and passwords redacted first. The reply judge, if you turn it on, gets only your short reply, never the request. It runs on your own Claude Code or Codex login, never an API key, unless you set `judge.backend: anthropic-api`. The judge can only fail to confirm. If it errors or times out, your reply counts as not confirmed, never as a yes.
+- **Minimum data to third parties.** Twilio and ElevenLabs get short summaries with API keys, tokens, private keys, `.env` values and passwords redacted first. The reply judge, if you turn it on, gets only your short reply, never the request. It runs on your own Claude Code or Codex login. It only uses API billing if you choose `judge.backend: anthropic-api`, or if you leave it on `auto`, have neither CLI installed, and stored an Anthropic API key at `init`. The judge can only fail to confirm. If it errors or times out, your reply counts as not confirmed, never as a yes.
 - **Local first.** The agent API listens on 127.0.0.1 with a per-install token, and only `/hooks/*` is reachable through the tunnel. Credentials live in the macOS Keychain or a `0600` file, and the PIN only as a scrypt hash.
 
 <details>
@@ -199,12 +199,14 @@ About **USD 12–14 a month** for 60 minutes of calls and 200 texts. These rates
 | --- | --- | --- |
 | Twilio local number | $1.15 / month | $1.15 |
 | Twilio call leg | $0.014 / min | $0.84 |
-| Twilio texts, plus carrier fees | about $0.015 / segment | about $3 |
+| Twilio texts, plus carrier fees | $0.0083 + about $0.007 / segment | about $3 |
 | ElevenLabs Starter (Agents, voice cloning) | $6 / month, 75 call minutes included, then $0.08 / min | $6 |
-| Voice agent model, Claude Haiku 4.5, billed by ElevenLabs | $1 / $5 per million input / output tokens | about $2 |
+| Voice agent model, Claude Haiku 4.5, billed by ElevenLabs | $1 / $5 per million input / output tokens; `doctor` assumes $0.03 / min | about $2 |
 | Reply judge on your Claude Code or Codex plan | no extra charge | $0 |
 
-The voice agent runs on Haiku, the cheapest Claude model ElevenLabs offers, because it only talks and calls Hotline's tools while the daemon checks every decision. Rate limits cap the worst case, and `hotline doctor` prints a monthly estimate from your own last 30 days ([install.md](docs/install.md#monthly-cost-estimate)).
+The voice agent runs on Haiku, the cheapest Claude model ElevenLabs offers, because it only talks and calls Hotline's tools while the daemon checks every decision. Rate limits cap the worst case. Calls you place to Hotline add Twilio's inbound rate.
+
+`hotline doctor` prints a monthly estimate from your own last 30 days of calls and texts, priced locally with these rates. They're defined once in code as `DEFAULT_COST_RATES` ([packages/core/src/config.ts](packages/core/src/config.ts)), and you can set your own under `costs` in `config.json` ([install.md](docs/install.md#monthly-cost-estimate)).
 
 ## Build from source
 
