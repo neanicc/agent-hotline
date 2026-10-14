@@ -233,9 +233,25 @@ function checkInvariants({ h, asks }: Run): void {
 
   const within = (times: number[], at: number, window: number) =>
     times.filter((t) => t > at - window && t <= at).length;
+  // How each ask's latest call ended and when, tracked from the events alone so the
+  // retry-delay check does not rely on the queue's own `readyAt` bookkeeping.
+  const lastCallEnd = new Map<string, { at: number; result: CallEnd }>();
 
   for (const entry of h.log) {
     const calls = ofType(entry.actions, "place-call");
+    // A call that ends in this step ends before the step dispatches anything: by its
+    // `call-ended` event, or hung up as stuck (`end-call`), which counts as dropped.
+    const endingCall = entry.before.call;
+    let endedNow: string[] = [];
+    if (endingCall !== undefined) {
+      const reported = entry.event.type === "call-ended" && entry.event.callId === endingCall.id;
+      const hungUp = ofType(entry.actions, "end-call").some((action) => action.callId === endingCall.id);
+      if (reported || hungUp) {
+        const result = entry.event.type === "call-ended" && reported ? entry.event.result : "dropped";
+        endedNow = endingCall.askIds;
+        for (const askId of endedNow) lastCallEnd.set(askId, { at: entry.at, result });
+      }
+    }
     expect(calls.length).toBeLessThanOrEqual(1);
     // The owner texted `call me`: the calls that may happen now, by priority.
     const ownerAsked = entry.event.type === "call-me";
@@ -275,9 +291,18 @@ function checkInvariants({ h, asks }: Run): void {
       // exception is a call the owner asked for, which may also call during quiet hours.
       for (const askId of call.askIds) {
         const q = entry.before.open.find((open) => open.ask.id === askId);
-        if (!ownerAsked && q !== undefined && q.callAttempts > 0) {
-          expect(q.readyAt).toBeLessThanOrEqual(entry.at);
-        }
+        if (ownerAsked || q === undefined || q.callAttempts === 0) continue;
+        // Only a call that went unanswered (no pickup, failed) is retried by call, and not
+        // before `retryDelayMs` has passed since it ended.
+        const end = lastCallEnd.get(askId);
+        expect(end).toBeDefined();
+        expect(["no-pickup", "failed"]).toContain(end?.result);
+        if (end !== undefined) expect(entry.at).toBeGreaterThanOrEqual(end.at + settings.retryDelayMs);
+        // `before` is the state ahead of this step's event. When that event ended the ask's
+        // last call, the queue set the retry's `readyAt` during this step, so the earlier
+        // value (say, the end of a batch window the ask had joined the call inside) no
+        // longer applies; the check above covers that case (issue #50).
+        if (!endedNow.includes(askId)) expect(q.readyAt).toBeLessThanOrEqual(entry.at);
       }
       const quiet = inQuietHours(settings.quietHours, new Date(entry.at));
       for (const askId of call.askIds) {
@@ -379,24 +404,74 @@ function checkInvariants({ h, asks }: Run): void {
   }
 }
 
+/** A silent run: every invariant holds, and every ask ends unanswered (a permission, denied). */
+function checkSilentRun(settings: PolicySettings, start: number, commands: Command[]): void {
+  const result = run(settings, start, commands);
+  checkInvariants(result);
+  for (const action of ofType(result.h.allActions, "resolve")) {
+    expect(action.outcome.outcome).toBe("no-answer");
+    const ask = result.asks.get(action.askId);
+    if (ask?.kind === "permission") expect(permissionVerdict(ask, action.outcome)).toBe("deny");
+  }
+}
+
+const silentProperty = fc.property(
+  settingsArb,
+  START,
+  fc.array(silentCommand, { minLength: 5, maxLength: 80, size: "medium" }),
+  checkSilentRun,
+);
+
 describe("ask queue properties", () => {
   it("silence never yields approval: no pickup, drops, unclear answers, failures and timeouts all end unanswered", () => {
-    fc.assert(
-      fc.property(
-        settingsArb,
-        START,
-        fc.array(silentCommand, { minLength: 5, maxLength: 80, size: "medium" }),
-        (settings, start, commands) => {
-          const result = run(settings, start, commands);
-          checkInvariants(result);
-          for (const action of ofType(result.h.allActions, "resolve")) {
-            expect(action.outcome.outcome).toBe("no-answer");
-            const ask = result.asks.get(action.askId);
-            if (ask?.kind === "permission") expect(permissionVerdict(ask, action.outcome)).toBe("deny");
-          }
-        },
-      ),
-      { numRuns: 400 },
+    fc.assert(silentProperty, { numRuns: 400 });
+  });
+
+  // Issue #50: hosted CI failed once on this seed. A question joined a call inside its batch
+  // window, the call went unanswered and, with a zero retry delay, the retry went out in the
+  // same step. The queue was right; the invariant read the ask's `readyAt` from before the
+  // `call-ended` event that reset it. The seed and path replay that case only while the
+  // arbitraries above stay as they are; the fixed counterexample below does not depend on them.
+  it("replays seed -763136370 from issue #50", () => {
+    fc.assert(silentProperty, {
+      seed: -763136370,
+      path: "390:0:0:0:0:0:4:4:4:10:11:11:14:1:2:8:8:8:9:13:17:20:5:16:16:16:17:20:24:24:34:36:36:23:23:23:23:23:23:23:23:23",
+      endOnFailure: true,
+    });
+  });
+
+  it("holds for the shrunk counterexample from issue #50", () => {
+    const question = {
+      kind: "ask",
+      session: 0,
+      askKind: "question",
+      risk: "low",
+      urgent: false,
+      ttlMinutes: 1,
+    } as const;
+    checkSilentRun(
+      {
+        quietHours: { start: "00:00", end: "00:00", timeZone: "America/Toronto", allowUrgentCalls: false },
+        rateLimits: { callsPerHour: 2, callsPerDay: 2, textsPerHour: 1, textsPerDay: 1 },
+        batchWindowMs: 10,
+        maxCallAttempts: 2,
+        retryDelayMs: 0,
+        maxAsksPerCall: 2,
+        callStuckAfterMs: 5 * MINUTE,
+      },
+      Date.parse("2026-01-01T00:00:00Z"),
+      [
+        { ...question, text: 0 },
+        { kind: "advance", ms: 1 },
+        { ...question, text: 1 },
+        { kind: "advance", ms: 9 },
+        { kind: "call-ended", result: "no-pickup", current: true },
+        { ...question, text: 0 },
+        { kind: "call-me" },
+        { kind: "call-me" },
+        { kind: "unclear", pick: 0 },
+        { ...question, text: 0 },
+      ],
     );
   });
 
