@@ -511,4 +511,20 @@ describe("call orchestration support", () => {
     expect(again.inboundMessageHandled(sid)).toBe(true);
     expect(again.inboundMessageHandled(`SM${"2".repeat(32)}`)).toBe(false);
   });
+
+  it("forgets finished inbound messages after a week, never unfinished ones", async () => {
+    const db = await open();
+    const [old, unfinished, fresh] = ["1", "2", "3"].map((d) => `SM${d.repeat(32)}`) as [
+      string,
+      string,
+      string,
+    ];
+    db.markInboundMessage(old, new Date(T0));
+    db.finishInboundMessage(old);
+    db.markInboundMessage(unfinished, new Date(T0));
+    db.markInboundMessage(fresh, new Date(Date.parse(T0) + 8 * 24 * 60 * 60 * 1000));
+    expect(db.inboundMessageHandled(old)).toBe(false);
+    expect(db.inboundMessageHandled(unfinished)).toBe(true);
+    expect(db.inboundMessageHandled(fresh)).toBe(true);
+  });
 });

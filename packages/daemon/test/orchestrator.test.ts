@@ -163,6 +163,22 @@ describe("crash recovery", () => {
     expect(store.getAnswer(ask.id)?.decision).toEqual({ type: "allow" });
   });
 
+  it("re-sends a high-risk text with the code the owner may already have", async () => {
+    const first = await orchestrator({ sms: hangingSms, newCode: () => "111111" });
+    addAsk({ risk: "high", text: "git push origin main" });
+    void advance(first, 20_000);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await first.stop();
+
+    const sms = new FakeSmsProvider({ ownerNumber: OWNER });
+    const second = await orchestrator({ sms, newCode: () => "222222" });
+    expect(sms.sent.map((s) => s.text)).toEqual([expect.stringContaining("Reply YES 111111")]);
+    clock.now = new Date(clock.now.getTime() + READ_MS);
+    expect(await second.ownerText({ messageSid: sid(3), body: "yes 111111", receivedAt: clock.now })).toBe(
+      "Hotline: got it.",
+    );
+  });
+
   it("treats a call that may never have been placed as failed, so the queue retries it", async () => {
     const awake = policySettings(
       parseConfig({
@@ -252,6 +268,25 @@ describe("owner texts that fail", () => {
     expect(await target.ownerText({ messageSid: sid(10), body: "yes", receivedAt: clock.now })).toBe(
       "Hotline: got it.",
     );
+  });
+});
+
+describe("a store that refuses an answer", () => {
+  it("ends the ask at once as no answer instead of leaving the agent waiting", async () => {
+    const target = await orchestrator({ sms: new FakeSmsProvider({ ownerNumber: OWNER }) });
+    const ask = addAsk();
+    await advance(target, 20_000);
+    clock.now = new Date(clock.now.getTime() + READ_MS);
+    const record = store.recordAnswer.bind(store);
+    store.recordAnswer = () => {
+      throw new Error("refused");
+    };
+    const reply = await target.ownerText({ messageSid: sid(11), body: "yes", receivedAt: clock.now });
+    store.recordAnswer = record;
+    expect(reply).toBe("Hotline: that answer could not be recorded.");
+    expect(store.getAnswer(ask.id)).toBeUndefined();
+    expect(store.getAsk(ask.id)?.status).toBe("expired");
+    expect(store.askEndReason(ask.id)).toBe("failed");
   });
 });
 

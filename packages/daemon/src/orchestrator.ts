@@ -651,12 +651,10 @@ export class CallOrchestrator {
           });
           return replyHint(plan.ask);
         }
-        const actions = await this.#process({ type: "answer", answer: plan.answer });
-        const answered = actions.some(
-          (action) =>
-            action.type === "resolve" && action.askId === askId && action.outcome.outcome === "answered",
-        );
-        return answered ? TEXT_REPLIES.answered : TEXT_REPLIES.notRecorded;
+        await this.#process({ type: "answer", answer: plan.answer });
+        // What the store holds is what the agent gets, so that is what the owner is told.
+        const recorded = this.#store.getAnswer(askId)?.sourceId === messageSid;
+        return recorded ? TEXT_REPLIES.answered : TEXT_REPLIES.notRecorded;
       }
     }
   }
@@ -863,7 +861,11 @@ export class CallOrchestrator {
     }
     const ask = this.#store.getAsk(askId) as Ask;
     const sms = this.#options.sms;
-    const code = ask.kind === "permission" && ask.risk === "high" ? this.#newCode() : undefined;
+    // A text sent again (say, on recovery) keeps the code the owner may already have.
+    const code =
+      ask.kind === "permission" && ask.risk === "high"
+        ? (this.#state.codes[askId] ?? this.#newCode())
+        : undefined;
     if (sms === undefined) {
       this.#store.appendAudit("text.failed", { reason: "no SMS provider" }, now, { askId });
       return [{ type: "text-failed", askId }];
@@ -935,6 +937,9 @@ export class CallOrchestrator {
       } catch (error) {
         this.#log.warn({ err: error }, "answer refused by the store");
         this.#store.appendAudit("ask.answer-refused", { channel: answer.channel }, now, ids);
+        // The queue has let the ask go, so end it now as no answer rather than
+        // leave the agent waiting until it expires.
+        this.#store.closeAsk(askId, "expired", "failed");
       }
       return;
     }

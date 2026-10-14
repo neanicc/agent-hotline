@@ -279,7 +279,7 @@ store, the providers and the webhooks through core's pure queue
   and its record being saved leaves a call Hotline no longer knows about; its
   answers are not served, and the retry may ring the owner a second time while
   the first call is still ringing (bounded by the call limits). A text is sent
-  again (at least once); recording an answer, closing an ask and ending a call are
+  again (at least once), with the confirmation code it already had; recording an answer, closing an ask and ending a call are
   idempotent. A post-call event's call stays live until all of its answers
   have reached the queue, so ElevenLabs' retry after a failure applies them
   again and the queue ignores the ones already applied.
@@ -400,7 +400,9 @@ store, the providers and the webhooks through core's pure queue
   turns the text into an answer, which goes through the queue and
   `recordAnswer`.
 - **Resolving.** An `answered` outcome is stored with `recordAnswer`, which
-  checks `answerProblem` again; nothing else marks an ask answered. A no-answer
+  checks `answerProblem` again; nothing else marks an ask answered. If the
+  store refuses it, the ask is closed at once as no answer (`failed`), and the
+  owner's text reply says it was not recorded. A no-answer
   closes the ask (`expired` or `cancelled`) with its specific reason
   (`no-pickup`, `dropped`, `failed`, `unclear`, `timeout`, `cancelled`), which
   the outcome route reports. A delivered notification is closed as `expired`
@@ -425,7 +427,9 @@ and `audit`. Each table keeps the record as JSON validated by the HL-02 schemas,
 on write and on read, next to the columns the daemon queries by. Migration 3
 (HL-09) adds `asks.end_reason` (why an ask ended without an answer, set by
 `closeAsk`), `daemon_state` (call orchestration's saved state, as JSON) and
-`inbound_messages` (the owner's texts claimed, by message SID, and whether each was finished).
+`inbound_messages` (the owner's texts claimed, by message SID, and whether each
+was finished; finished ones are dropped after a week, long past any Twilio
+redelivery).
 `onAskAdded` tells listeners about each new ask, as `onAskChange` does about
 status changes.
 

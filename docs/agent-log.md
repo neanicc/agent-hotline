@@ -1143,3 +1143,13 @@ Template:
   post-call; durable state and recovery) before HL-10 adds inbound handling.
   P3: the test seams on `RunDaemonOptions` now carry a comment that they must
   never be wired to config or the environment.
+- Bot staff review on fbefef4 (approve with nits, score 88):
+  - P2, fixed: when the store refused an answer the queue had accepted, the
+    ask stayed open until it expired. It is now closed at once as no answer
+    (`failed`), and the owner's text reply reports what the store actually
+    recorded. Test; the mutant fails 1.
+  - P2, follow-up (same as before): split the orchestrator before HL-10.
+  - P3, fixed: a text sent again on recovery keeps its confirmation code, so
+    the owner's `YES <code>` still matches. Test; the mutant fails 1.
+  - P3, fixed: finished inbound message SIDs are dropped after a week. Test;
+    the mutant fails 1.
