@@ -130,7 +130,7 @@ cap. Gaps it found, all failing safe (none approves anything), are listed under
 | File | Property | Bugs it found, fixed failing closed |
 | --- | --- | --- |
 | `packages/daemon/test/redact.property.test.ts` | Random registered secrets, values under secret-looking names, PINs and fake phone numbers embedded in JSON, nested JSON, form-encoded, URL query, `.env` (quoted, unquoted, `export`), YAML, HTTP-header and logfmt text never leave a 6-character piece in the output; random 16 KiB hostile shapes are redacted in linear time | A value after an encoded segment that opened a quote (`"token":"+,rest"`) kept its tail; an unquoted value stopped at a quote (`token=a'rest`); the JWT pattern was quadratic on `eyJ-eyJ-...` (now a linear scan of each run of token characters, which still finds a JWT after `-`) |
-| `packages/core/test/permission-risk.property.test.ts` | Obfuscated variants of 50+ high-risk commands (wrappers, quoting, `$'...'`, `${...}`, braces, globs, case, fullwidth and Cyrillic lookalikes, zero-width and no-break spaces, absolute command paths, attached option values, `cd`, environment prefixes, NFD) never classify as low; Codex argv arrays likewise; for random command lines the classifier calls low, `bash -n` and `zsh -n` must accept them and zsh's own word split (`${(z)...}`, the command passed as data, never run) must match `splitShell` | `git show HEAD:.env` was low (a revision's `:` was not a path boundary); `; ls`, `ls ;;` and `ls\n;` were low though bash refuses them; `ls &>>x` was low though macOS's bash 3.2 refuses it; `rg` options were a denylist, so `--hostname-bin` (runs a program) and unknown options were low |
+| `packages/core/test/permission-risk.property.test.ts` | Obfuscated variants of 50+ high-risk commands (wrappers, quoting, `$'...'`, `${...}`, braces, globs, case, fullwidth and Cyrillic lookalikes, zero-width and no-break spaces, absolute command paths, attached option values, `cd`, environment prefixes, NFD) never classify as low; Codex argv arrays likewise; for random command lines the classifier calls low, `bash -n` and `zsh -n` must accept them and zsh's own word split (`${(z)...}`, the command passed as data, never run) must match `splitShell` | `git show HEAD:.env` was low (a revision's `:` was not a path boundary); `; ls`, `ls ;;` and `ls\n;` were low though bash refuses them; `ls &>>x` was low though macOS's bash 3.2 refuses it; `rg` options were a denylist, so `--hostname-bin` (runs a program) and unknown options were low; the first positive list still held `--hidden`, `--no-ignore`, `-u` and `-L`, so `rg -uu KEY` searched `.env` and `.git` as low (staff review) |
 | `packages/core/test/sms-reply.property.test.ts` | Random and word-salad texts approve only as `<yes word> <that request's code>`; nothing approves when no code was sent; conditional, negated, hedged or wrong-code yeses never approve | none |
 | `packages/daemon/test/voice-reply.property.test.ts` | The voice fast path never agrees with a reply holding a refusal, negation, condition or hedge, in one turn or split across turns; a random reply it agrees with has no doubt marker; whatever the model judge says, a reply with a condition, correction or negation is never agreed | none |
 | `packages/daemon/test/exposure.test.ts` | The exposure audit above | none |
@@ -145,6 +145,8 @@ happens to stay under 50 ms still fails on growth; what changed is only that
 one unlucky timed run under parallel load no longer fails the check. On the dev
 Mac benign 16 KiB takes about 0.19 ms, the slowest linear hostile shapes 40 to
 50 times that, and the quadratic pattern HL-04 removed about 440 times.
+`test/linear-time.test.ts` holds the negative controls: quadratic work, both
+slow and under 50 ms on 16 KiB, never passes the helper.
 
 The bash differential only checks syntax, since bash has no way to split words
 without running them. zsh is not installed on Ubuntu runners, so there the zsh
@@ -165,6 +167,12 @@ request still needs the owner's own yes, and every failure denies. Its limits:
 - Read tools (`Read`, `Grep`, `Glob`) aimed outside the project are low unless
   the path looks like a credential (`docs/hooks.md` records this as the
   intended default). The read result reaches the agent, not a third party.
+- Only the paths a command names are checked. A recursive read of a folder
+  inside the project (`grep -rn KEY src`, `find .`) is low even though it reaches
+  any `.env` or `.git` under that folder, and `grep -R` follows symlinks. `rg`
+  skips hidden and ignored files by default, so its options that undo that
+  (`--hidden`, `--no-ignore`, `-u`) or follow symlinks (`-L`, `--follow`) are
+  left off its positive list and make the command high.
 - The tokenizer refuses anything bash and zsh might expand or read differently.
   The differential test covers the separators, quotes, redirections and file
   descriptors it accepts, against zsh's lexer and bash's parser; it cannot prove
@@ -239,10 +247,13 @@ Tracked on GitHub; each fails safe today.
   and held inbound instructions in SQLite, and the tool-call and post-call replay
   memories, so a restart resets none of them. These touch HL-13a's files, which
   #69 changed while this pass was in review, so they are a separate ticket.
-- Put a `maxInFlight` and a body deadline on the Twilio SMS and ElevenLabs tool
-  routes, as the post-call route has.
-- Count texts sent outside the queue (TwiML replies, inbound-line notices,
+  #78 also carries two related items: a `maxInFlight` and a body deadline on
+  the Twilio SMS and ElevenLabs tool routes, as the post-call route has, and
+  counting texts sent outside the queue (TwiML replies, inbound-line notices,
   lockout texts, crash reports) against the text rate limit.
+- Keep a genuine answer that verify by pull could not confirm (a post-call
+  record still processing, a reply Twilio stored with different whitespace):
+  [#80](https://github.com/neanicc/agent-hotline/issues/80). Both refuse today.
 - Raise a package-script run to high after the same away window edited
   `package.json` or a script it runs.
 - Consider making read tools aimed outside the project high.

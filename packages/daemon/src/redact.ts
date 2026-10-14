@@ -197,7 +197,7 @@ function withoutEscapes(text: string): string {
 /**
  * The quote a segment leaves open, if any, read left to right: a quote opens
  * only outside quotes and closes only the quote it opened, so the `'` in
- * `"ab'cd"` opens nothing (the review on #77).
+ * `"ab'cd"` opens nothing.
  */
 function unclosedQuote(segment: string): string | undefined {
   let open: string | undefined;

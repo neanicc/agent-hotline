@@ -161,7 +161,9 @@ the `twilio.accountSid` and `twilio.authToken` secrets exist. Otherwise it logs
   unhandled so Twilio's retry can get through, and a copy that arrives while
   the first is still being handled waits for that attempt, then either answers
   with empty TwiML or, if the attempt failed, handles the message itself.
-  Durable replay protection is HL-13.
+  Owner texts are also claimed by SID in SQLite before any effect
+  (`inbound_messages`), so a replay after a restart changes nothing
+  ([security.md](security.md#webhook-replay-protection-and-rate-limits-hl-13-review)).
 - **Replies are redacted:** a reply the owner handler returns goes through the
   required `redact` option (the daemon's redactor) and the SMS length check
   before it is put in the TwiML. One that is empty after redaction or longer
@@ -180,7 +182,8 @@ records it in the audit log as `sms.received` with its SID and reply type
 Known limit: the PinGate's attempt counters, its verified calls and both replay
 memories are in memory, so a daemon restart resets them. Per-call limits (2
 wrong PINs) still apply after a restart; the hourly budget starts again.
-Persisting them is HL-13 work.
+Persisting them is [#78](https://github.com/neanicc/agent-hotline/issues/78)
+(HL-13b).
 
 **Verified by pull (HL-13a).** The tool secret and the post-call HMAC secret
 can be read by any process running as the owner, so neither proves a request
@@ -230,7 +233,8 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
   ones (only possible with the tool secret), a new delivery gets
   `{"result": "busy"}` and does not run. `get_status` only
   reads, after the PIN, and runs every time. The memory does not survive a
-  restart (HL-13).
+  restart; persisting it is
+  [#78](https://github.com/neanicc/agent-hotline/issues/78).
 - **Owner on the call:** the body's `caller_id` or `called_number`, which
   ElevenLabs fills from `system__caller_id` and `system__called_number`, must be
   `owner.phoneNumber`. Otherwise the answer is `{"result": "refused",
@@ -315,8 +319,8 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
   does not survive a restart, so a signed body replayed within its 30 minute
   window after a restart is handled again: call orchestration ignores an event
   for a call it is no longer waiting on. Live events are never evicted: with 1000 held, a new
-  one gets `503` so ElevenLabs retries it later. Durable replay protection is
-  HL-13.
+  one gets `503` so ElevenLabs retries it later. Persisting this memory is
+  [#78](https://github.com/neanicc/agent-hotline/issues/78).
 - **Known limits:** on an outbound call, whoever picks up the owner's phone
   counts as the owner (high-risk approvals still need the PIN). The inbound
   PIN boundary compares the daemon's clock with ElevenLabs' call start time
