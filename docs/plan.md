@@ -130,7 +130,10 @@ Defined in HL-02 and documented in `docs/contracts.md` once written.
   and is applied by `hotline init`.
 - **Persona:** short, casual sentences; says which agent and project is calling;
   reads options as numbers; repeats the decision back before ending; never
-  invents an answer; asks once more if unclear, then reports "no answer".
+  invents an answer; takes any clear phrasing, reads every approval back in one
+  short sentence and approves only on the owner's yes to it, and takes a no at
+  once; asks once more if unclear ("is that a yes or a no?"), then says it
+  will text instead and leaves the ask to the text fallback. Never goes quiet.
 - **SMS: Twilio** with a Canadian number (no US 10DLC registration needed for
   Canadian recipients). Signature-validated inbound webhook.
 - **Fallback (Tier 2):** Twilio ConversationRelay with the conversation loop on
