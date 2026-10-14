@@ -168,6 +168,8 @@ fine). The daemon package implements it:
   `agent-hotline`, account = secret name, through `/usr/bin/security`. Values are
   written with `security -i` on stdin in hex (`-X`), so a secret never appears in a
   process argument list, and read back to confirm the write. Exit 44 means "not set".
+  `hotline doctor` checks these assumptions against the real binary on a
+  throwaway item ([install.md](install.md#keychain-self-test)).
 - `FileSecretStore`: `secrets.json` in the hotline home,
   `{"version": 1, "secrets": {...}}`, written atomically with mode `0600` in a
   `0700` directory. A file other users can access is refused. `set` and `delete`
