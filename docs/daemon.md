@@ -88,15 +88,21 @@ fails closed in three places:
    UTF-8, an unsupported content type, over 256 KiB) gets `403`, not a 4xx that
    would show the route exists. Form bodies are parsed strictly by
    `parseFormBody`, which keeps repeated names so a verifier can refuse them.
+   JSON bodies are not parsed here: they stay raw text, so a verifier can check
+   an HMAC over the exact bytes, and the route parses them after verification.
 3. After parsing, the verifier runs. Anything other than a literal `true`
    (`false`, a truthy value, a throw or a rejected promise) gets `403`.
 
+A route may also set `bodyLimit` (a larger body limit) and `maxInFlight`
+(requests read or handled at once; more get the 403 before their body is read),
+with `bodyTimeoutMs` (default 10 s) after which a sender that has not delivered
+its body is cut off.
 Every rejection is the same bare `403` with an empty body, so a scanner cannot
 tell a missing route from a bad signature or a malformed body. A rejected request
 is logged with its method, path and reason (`no verifier`, `precheck failed`,
 `unreadable request`, `verification failed`) only, never its body, headers or
 query string. Paths outside `/hooks` get `404`. Routes are added through
-`startDaemon({ webhookRoutes })`; HL-08 adds the ElevenLabs ones.
+`startDaemon({ webhookRoutes })`.
 
 ### Twilio SMS (`POST /hooks/twilio/sms`)
 
@@ -140,6 +146,109 @@ the `twilio.accountSid` and `twilio.authToken` secrets exist. Otherwise it logs
 Until call orchestration (HL-09) answers asks by text, an owner's text is
 recorded in the audit log as `sms.received` with its SID and reply type
 (`yes`, `option`, `status`, ...), not its words, and gets no reply.
+
+### ElevenLabs (`/hooks/el/*`)
+
+Known limit: the PinGate's attempt counters, its verified calls and both replay
+memories are in memory, so a daemon restart resets them. Per-call limits (2
+wrong PINs) still apply after a restart; the hourly budget starts again.
+Persisting them is HL-13 work.
+
+`elevenLabsRoutes` (`elevenlabs-webhook.ts`) serves the voice agent's four
+server tools and the post-call webhook. `runDaemon` registers them only when
+`voice.provider` is `elevenlabs`, `voice.agentId` and `tunnel.publicUrl` are set,
+and the `elevenlabs.toolSecret` and `elevenlabs.webhookSecret` secrets exist.
+Otherwise it logs `voice webhooks off` with the reason and the paths stay a
+`403`. The tool definitions that point ElevenLabs at these URLs are in
+`@hotline/providers` (`hotlineToolConfigs`; see [contracts](contracts.md#voice-providers)).
+
+**Server tools** (`POST /hooks/el/tools/<name>`):
+
+- **Precheck:** the `x-hotline-tool-secret` header must equal
+  `elevenlabs.toolSecret`, compared in constant time (both sides hashed with
+  SHA-256), and the content type must be JSON, or `403` before the body is
+  read. An empty secret never matches. `verify` repeats the secret check.
+- **Once per delivery:** `submit_answer`, `verify_pin` and `send_instruction`
+  remember each delivery (tool name and exact body) for two hours. A repeat,
+  such as an ElevenLabs retry or a replay, gets the first response and the
+  handler does not run again, so a repeated wrong PIN spends no attempt. Only
+  deliveries that changed state are remembered (`recorded`, `queued`, or a PIN
+  attempt); anything else (`pin-required`, `needs-pin`, `not-recorded`,
+  `invalid`, `refused`) or a failure is forgotten, so the same call can succeed
+  once it is allowed, such as an approval resent after `verify_pin`. One
+  consequence: the owner giving the same session the same instruction twice in
+  one call (byte-identical body) queues it once, though the voice agent hears
+  `queued` both times. Likewise a byte-identical `verify_pin` in the same call gets
+  its first answer again, even after a lockout has ended; the owner has to say
+  the PIN on a new call. A
+  remembered delivery is never evicted before its window ends: with 1000 live
+  ones (only possible with the tool secret), a new delivery gets
+  `{"result": "busy"}` and does not run. `get_status` only
+  reads, after the PIN, and runs every time. The memory does not survive a
+  restart (HL-13).
+- **Owner on the call:** the body's `caller_id` or `called_number`, which
+  ElevenLabs fills from `system__caller_id` and `system__called_number`, must be
+  `owner.phoneNumber`. Otherwise the answer is `{"result": "refused",
+  "end_call": true}` and no handler runs. The voice model cannot set these
+  fields: they are dynamic-variable parameters, not model-filled ones.
+- A verified request whose JSON or fields do not parse gets `{"result": "invalid"}`.
+
+| Tool | What the route does |
+| --- | --- |
+| `verify_pin` | Checks the PIN with the `PinGate`: 2 wrong PINs per call, then `end_call: true` and no further checks on that call; 6 wrong PINs across all calls of one direction in a rolling hour, or 10 in a rolling day, lock every check on that direction, the right PIN included, until enough time has passed. A caller spoofing the owner's number therefore gets at most 10 guesses a day (0.1% of a 4-digit PIN space). Each lockout calls the PinGate's `onLockout` so the owner can be told (HL-10 texts them). Inbound and outbound calls have separate budgets, so someone guessing on inbound calls (caller ID can be spoofed) cannot block PIN approvals on calls Hotline placed to the owner. The trade-off: such guessing still locks the owner's own inbound line for up to an hour, which fails closed. Answers `{verified, attempts_left, end_call}`. A verified PIN is registered with the redactor (`addShortSecret`). The PIN is checked against `owner.pinHash` with scrypt and never logged or stored |
+| `submit_answer` | On an inbound call, `pin-required` until this call passed `verify_pin`, because caller ID can be spoofed. A call is outbound only when the injected `placedCall(conversationId)` says Hotline placed it (call orchestration knows) and it went to the owner's number from another number; everything else counts as inbound. Until HL-09, `runDaemon` passes `() => false`, so every call needs the PIN. Otherwise passes the ask number, decision (`option`, `allow`, `deny`, `text`, `done` or `unclear`), the owner's words, the direction and the call ids to the `submitAnswer` handler. `confirmation` is `pin` only when this call passed `verify_pin`; nothing in the request can set it |
+| `get_status` | `{"result": "pin-required"}` until this call passed `verify_pin`. Then the `getStatus` handler's text, redacted and cut to 1500 characters |
+| `send_instruction` | `pin-required` until this call passed `verify_pin`. Then the `sendInstruction` handler gets the session number, instruction and the owner's words |
+
+**Post-call webhook** (`POST /hooks/el/post-call`):
+
+- **Precheck:** a well-formed, fresh `ElevenLabs-Signature` header (exactly
+  one `t=` timestamp within the tolerance below and one `v0=` of 64 hex digits)
+  and a JSON content type. The HMAC covers the body, so it can only be checked
+  after the body is read; at most 4 post-call requests are read or handled at
+  once (`maxInFlight` on the route), and the rest get the bare 403 before their
+  body is read. A sender that has not delivered its body within 5 seconds is
+  cut off. Behind the tunnel every request comes from 127.0.0.1, so a per-IP
+  limit would not help; a determined sender can still keep real webhooks out,
+  which fails closed (HL-09 must treat a missing post-call event as no answer). A slot is given
+  back when the response is sent or the sender goes away. Rate limiting at the
+  tunnel is still worthwhile.
+- **Verify:** `t=<seconds>,v0=<hex HMAC-SHA256(webhookSecret, "<t>.<raw body>")>`,
+  the algorithm of ElevenLabs' SDK, compared in constant time over the raw body.
+  A timestamp more than 30 minutes old or 5 minutes ahead fails.
+- **Once per event:** a `post_call_transcription` or `call_initiation_failure`
+  for a conversation is handled once. A replay, or a retry after success, gets
+  `200` and is ignored, whatever its signature header looks like. Events are
+  remembered for 35 minutes, past the signature's age limit. A failed handler
+  leaves the event unhandled, so ElevenLabs' retry gets through. The memory
+  does not survive a restart, so a signed body replayed within its 30 minute
+  window after a restart is handled again: handlers must be idempotent per
+  conversation (HL-09). Live events are never evicted: with 1000 held, a new
+  one gets `503` so ElevenLabs retries it later. Durable replay protection is
+  HL-13.
+- **Known limits:** on an outbound call, whoever picks up the owner's phone
+  counts as the owner (high-risk approvals still need the PIN). The inbound
+  PIN boundary compares the daemon's clock with ElevenLabs' call start time
+  with no skew margin; a turn at the same second as the verification is a
+  caller's.
+- **Who spoke:** the person's transcript turns are labelled `owner` only on an
+  outbound call Hotline placed whose other end is `owner.phoneNumber`, or, on an inbound call
+  from that number, turns spoken after `verify_pin` succeeded (call start plus
+  the turn's time in the call, against the PinGate's verification time; a turn
+  without a time does not count). Everything else is a `caller` turn, which
+  `ownerSaid` never matches.
+- Events for another agent id and other webhook types (such as
+  `post_call_audio`) get `200` and are ignored. This route reads bodies up to
+  1 MiB (the listener's default is 256 KiB), enough for a long transcript; a
+  bigger body gets the bare 403. Do not enable audio webhooks.
+- **Logs:** tool name and result, event kind. Never bodies, words, transcripts,
+  PINs or numbers.
+
+Until call orchestration (HL-09) and the inbound line (HL-10) provide the
+handlers, `runDaemon` records `voice.answer` (decision kind only),
+`voice.instruction` and `voice.<event>` in the audit log, answers
+`not-recorded` and `unknown-session`, and reads out no status. The PIN check
+and its limits are live.
 
 ## Store
 
