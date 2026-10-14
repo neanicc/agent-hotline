@@ -34,8 +34,8 @@ describe("phone numbers", () => {
     "127.0.0.1:7341",
     "version 5.12.5",
     "took 1234 ms",
-    "123e4567-e89b-12d3-a456-426614174000",
-    `CA${"0123456789abcdef".repeat(2)}`,
+    "123e4567-e89b-12d3-a456-4266a4174b00",
+    `CA${"0a1b2c3d4e5f6a7b".repeat(2)}`,
   ])("leaves %s alone", (input) => {
     expect(text(input)).toBe(input);
   });
@@ -167,6 +167,114 @@ describe("secrets", () => {
     ]) {
       expect(text(line)).toBe(line);
     }
+  });
+});
+
+describe("bypasses closed after the security review", () => {
+  it("cuts a 16 KiB hostile line in linear time", () => {
+    // A long run of non-separator characters with a separator near the end used to
+    // make the truncation pattern backtrack quadratically.
+    const hostile = `${"a".repeat(MAX_REDACTED_TEXT - 2)}, ${"b".repeat(MAX_REDACTED_TEXT)}`;
+    const started = performance.now();
+    const out = text(hostile);
+    expect(performance.now() - started).toBeLessThan(50);
+    expect(out.endsWith("[truncated]")).toBe(true);
+    expect(out).not.toContain("b");
+  });
+
+  it.each([
+    "a".repeat(MAX_REDACTED_TEXT),
+    `${"x".repeat(MAX_REDACTED_TEXT - 100)}token=${"y".repeat(90)}`,
+    `password="${"\\a".repeat(MAX_REDACTED_TEXT / 2)}`,
+    `${"5".repeat(9)}x`.repeat(MAX_REDACTED_TEXT / 10),
+    `${"%2B".repeat(MAX_REDACTED_TEXT / 3)}`,
+    `${"-----BEGIN ".repeat(MAX_REDACTED_TEXT / 11)}`,
+  ])("redacts 16 KiB of hostile shape %# in under 50 ms", (input) => {
+    const started = performance.now();
+    text(input);
+    expect(performance.now() - started).toBeLessThan(50);
+  });
+
+  it.each([
+    ["Digits=1234&CallSid=CAxyz", "1234"],
+    ['{"Digits":"1234"}', "1234"],
+    ["pin: 4821", "4821"],
+    ["passcode=9090", "9090"],
+    ["otp=123456", "123456"],
+    ["ownerPin=5555", "5555"],
+  ])("removes PINs and keypresses in %s", (input, secret) => {
+    const out = text(input);
+    expect(out).toContain(REDACTED);
+    expect(out).not.toContain(secret);
+  });
+
+  it("removes PIN and keypress values in objects", () => {
+    expect(redactor.value({ Digits: "1234", pin: 4821, passcode: "9090", otp: "123456" })).toEqual({
+      Digits: REDACTED,
+      pin: REDACTED,
+      passcode: REDACTED,
+      otp: REDACTED,
+    });
+  });
+
+  it("removes a registered PIN wherever it stands alone, never inside longer numbers", () => {
+    const known = createRedactor();
+    known.addShortSecret("4821");
+    expect(known.text("the caller said 4821 twice: 4821.")).toBe(
+      `the caller said ${REDACTED} twice: ${REDACTED}.`,
+    );
+    expect(known.text("order 948210 and 14821")).toBe("order 948210 and 14821");
+    expect(known.value({ heard: "4821" })).toEqual({ heard: REDACTED });
+    // A phone number ending in the PIN is still masked as a phone number first.
+    expect(known.text("+15555554821")).toBe(`***${REDACTED}`);
+    expect(() => known.addShortSecret("12")).toThrow();
+    expect(() => known.addShortSecret("abcd")).toThrow();
+  });
+
+  it("masks phone numbers used as object keys and as numbers", () => {
+    expect(redactor.value({ [OWNER]: "owner", caller: 15555550100, calls: 3, ms: 1234.5 })).toEqual({
+      "***0100": "owner",
+      caller: "***0100",
+      calls: 3,
+      ms: 1234.5,
+    });
+  });
+
+  it.each([
+    ['password="qv\\"zw" next', "zw"],
+    [`password="qv"zw" next`, "zw"],
+    [`token='it\\'s-secret' next`, "secret"],
+    [`password="never-closed ${"x".repeat(20)}`, "never-closed"],
+    [`password="${"z".repeat(5000)}" tail`, "zzzz"],
+  ])("removes the whole quoted value in %s, failing closed", (input, fragment) => {
+    const out = text(input);
+    expect(out).toContain(REDACTED);
+    expect(out).not.toContain(fragment);
+  });
+
+  it("keeps text after a properly closed quoted secret", () => {
+    expect(text('password="qv\\"zw" next')).toBe(`password="${REDACTED}" next`);
+  });
+
+  it.each([
+    ["From%3D%2B15555550100", "From%3D***0100"],
+    ["x15555550100", "x***0100"],
+    ["id:abc5555550100def", "id:abc***0100def"],
+    ["tel:+15555550100", "tel:***0100"],
+  ])("masks the phone number in %s", (input, expected) => {
+    expect(text(input)).toBe(expected);
+  });
+
+  it("over-redacts 10-digit runs inside identifiers rather than risk a leak", () => {
+    expect(text(`CA${"0123456789abcdef".repeat(2)}`)).not.toContain("0123456789");
+  });
+
+  it("keeps pino's own timestamp in log lines", () => {
+    const lines: string[] = [];
+    redactingStream({ write: (line) => lines.push(line) }, createRedactor()).write(
+      `${JSON.stringify({ time: 1760392680000, caller: 15555550100 })}\n`,
+    );
+    expect(JSON.parse(lines[0] ?? "")).toEqual({ time: 1760392680000, caller: "***0100" });
   });
 });
 

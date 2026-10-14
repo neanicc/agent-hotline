@@ -90,14 +90,26 @@ headers or body. Each line is also redacted just before it is written, so the
 message, request fields, error stacks and bindings are all covered:
 
 - Phone numbers become `***` plus their last four digits (`+15555550100` becomes
-  `***0100`, `%2B`-encoded and national formats included).
+  `***0100`, `%2B`-encoded and national formats included, also right after a URL
+  escape such as `%3D`). Any bare run of 10 to 15 digits is masked the same way,
+  even inside a word or identifier, as are numeric values and object keys of
+  that shape. pino's own `time` field is the one exception.
 - Secrets are replaced with `[REDACTED]`: the daemon's own token and any other
   known secret value, `Bearer` credentials, `name=value` and JSON pairs whose name
   looks like a credential, PEM private keys, recognisable key formats (`sk_`,
   `ghp_`, AWS, Slack, Twilio `AC`/`SK` SIDs, JWTs), and any long run of letters and
   digits. Twilio call and message SIDs, ElevenLabs ids and UUIDs are kept.
 - Values under keys such as `authorization`, `cookie`, `*token*`, `*secret*`,
-  `*signature*` or `*api-key*` are removed whatever they hold.
+  `*signature*`, `*api-key*`, `*pin*`, `*passcode*`, `*otp*` or Twilio's
+  `Digits` (the owner's keypresses) are removed whatever they hold. The same names
+  in `name=value` and JSON text lose their values too. Quoted values honour
+  backslash escapes. An unterminated quote fails closed: the rest of the line is
+  removed.
+- The owner's PIN, which is shorter than the 8-character minimum for known
+  secrets, can be registered with `addShortSecret` (4 to 8 digits). It is then
+  removed wherever it stands alone, never inside a longer digit run. Until the
+  inbound line (HL-10) handles a spoken or keyed PIN, key-based redaction above
+  is what protects it.
 - Strings longer than 16 KiB are cut, along with the word at the cut, and
   marked `[truncated]`. The patterns are bounded, so redaction stays linear on
   long or hostile input.

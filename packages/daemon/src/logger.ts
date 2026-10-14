@@ -17,6 +17,18 @@ export interface LogOptions {
   redactor: Redactor;
 }
 
+/**
+ * Redacts one parsed log entry. pino's own top-level `time` (epoch milliseconds,
+ * 13 digits) is kept as it is; any other number of that length is masked as a
+ * possible phone number.
+ */
+function redactEntry(entry: unknown, redactor: Redactor): unknown {
+  const redacted = redactor.value(entry);
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return redacted;
+  const time = (entry as { time?: unknown }).time;
+  return typeof time === "number" ? { ...(redacted as Record<string, unknown>), time } : redacted;
+}
+
 /** A pino-compatible stream that redacts every line it is given. */
 export function redactingStream(
   destination: LogDestination,
@@ -26,7 +38,7 @@ export function redactingStream(
     write(line: string) {
       let redacted: string;
       try {
-        redacted = `${JSON.stringify(redactor.value(JSON.parse(line)))}\n`;
+        redacted = `${JSON.stringify(redactEntry(JSON.parse(line), redactor))}\n`;
       } catch {
         redacted = redactor.text(line);
       }

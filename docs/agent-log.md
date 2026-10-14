@@ -208,6 +208,24 @@ Template:
     at a name boundary with bounded repetitions. Strings over 16 KiB are cut
     before pattern redaction, after known secrets have been replaced, and the
     word at the cut is dropped, so no token fragment survives.
+  - Third round (coordinator security findings on `redact.ts`):
+    - (1) Truncation now uses a backward scan instead of `/[^…]*$/`. That
+      regex took 129 ms on a hostile 16 KiB line, and a test now requires
+      under 50 ms. Every other pattern is anchored or bounded, and six hostile
+      16 KiB shapes are timed.
+    - (2) `pin`, `passcode`, `otp` and Twilio's `Digits` count as secret names
+      in keys, `name=value` and JSON text. `addShortSecret` registers a 4 to 8
+      digit PIN, matched only where it stands alone, and runs after phone
+      masking so it cannot break a number apart.
+    - (3) Object keys go through text redaction. Numbers with 10 to 15 digits
+      are masked as phone numbers, except pino's top-level `time`.
+    - (4) Quoted values honour backslash escapes, and the rest of the word
+      after the closing quote goes too. An unterminated or over-long quote
+      fails closed to the end of the line.
+    - (5) A `%XX` escape before a number is a boundary, and any bare 10 to 15
+      digit run is masked even inside a word.
+    - The bias is to over-redact: ids with 10 or more consecutive digits lose
+      those digits.
   - Not changed: webhook verification still runs after body parsing (256 KiB
     cap), which signatures over form parameters need. HL-07 can refuse a
     missing signature header earlier.
