@@ -1825,6 +1825,93 @@ Template:
   the same (the fixed counterexample test does not depend on them).
 - Open issues or follow-ups: none.
 
+## 2026-10-14 — HL-15 Packaging and docs (#51)
+
+- Decision / change: `pnpm run package` runs `pnpm run build`, then
+  `scripts/package.mjs` bundles `apps/cli/dist/main.js` with esbuild 0.28.2
+  (exact devDependency, released 2026-08-08) into `dist/hotline/` (gitignored,
+  not published): `bin/hotline` (a CommonJS launcher that imports
+  `../lib/main.mjs`, so a symlink to it works), `lib/*.mjs` (ESM, `splitting`
+  on so every `await import(...)` stays a lazy chunk and a hook or `--version`
+  never loads Fastify, SQLite or the MCP SDK), `package.json` with the CLI's
+  version, `LICENSE` and `THIRD_PARTY_LICENSES.txt` (built from esbuild's
+  metafile). Any esbuild warning fails the build.
+  - Version lookup (HL-01 note on #16): kept as is. `cli.ts` reads
+    `createRequire(import.meta.url)("../package.json")`; every bundle file sits
+    in `lib/`, so that resolves to `dist/hotline/package.json`, which the
+    packager writes with `apps/cli/package.json`'s version.
+  - Bundled CommonJS dependencies (Fastify) call `require()` for Node
+    built-ins, so each output file starts with a `createRequire` banner under a
+    private alias (`cli.ts` already imports `createRequire`).
+  - `pnpm-workspace.yaml` sets `allowBuilds: esbuild: false`: pnpm 11 refuses
+    an unapproved build script, and esbuild's script only re-checks the platform
+    binary that pnpm already installs as an optional dependency.
+  - `scripts/ci/run.sh package` now always does real work: `pnpm run package`,
+    then `scripts/ci/check-package.mjs`, which copies `dist/hotline` to a
+    `mkdtemp` folder outside the workspace and runs it through a symlinked
+    launcher with a minimal environment (temporary `HOME`, `HOTLINE_HOME`,
+    `CODEX_HOME`, no inherited `HOTLINE_*`): `--version` equals
+    `hotline <apps/cli version>` (also via `node lib/main.mjs`), `--help`,
+    `init` with fake providers and a file secret store, `install claude` and
+    `install codex --home <temp>`, `away status`, `daemon` on a free port pair,
+    `doctor` (must PASS `daemon`), `mcp` answering `initialize` and listing
+    `ask_human`, `hook claude stop` printing nothing outside away mode, and exit
+    0 after SIGTERM. Biome now lints `scripts/*.mjs` and `scripts/ci/*.mjs`.
+  - Docs: README rewritten around setup, costs, limits and the security model
+    with the accepted limits (same-user secret access, one install token for all
+    agents, the classifier decides proof strength only); `docs/demo.md` is a
+    screen-recording script whose scenes 1 to 5 use fakes and 6 to 9 are marked
+    owner-only real-phone scenes; `docs/install.md` explains the packaged
+    command; `docs/ci.md` describes the package stage.
+- Decisions (no human available):
+  - esbuild over `pnpm deploy`: one self-contained folder with no
+    `node_modules` and no workspace-injection settings.
+  - Cost table: the plan's USD 10–15 a month, itemised with rates read from the
+    public Twilio Canada and ElevenLabs pricing pages on 2026-10-14 (Twilio
+    number $1.15/month, outbound call leg $0.014/min, texts $0.0083/segment plus
+    carrier fees; ElevenLabs Starter $6/month with 75 call minutes, $0.08/min
+    after, LLM billed on top). They are labelled assumptions, not quotes; the
+    Twilio pages do not name the currency.
+  - The demo leaves out the inbound status call: HL-10 is still open.
+- Evidence (worktree, Node 24.11.0 and 22.23.1 locally):
+  - `scripts/ci/run.sh package` passes (all ten checks); the check script also
+    passes under Node 22.23.1.
+  - Negative check: a throwaway packager variant with `external: ["fastify"]`
+    produced a bundle whose `--version` and `--help` still passed, and the check
+    failed at `init` with `ERR_MODULE_NOT_FOUND`, so `--version` alone would
+    not have caught a missing dependency.
+  - The fake scenes of `docs/demo.md` (1 to 4 as written, with a scratch
+    `HOTLINE_HOME` and `--home`) were rehearsed with the packaged CLI: doctor
+    9 pass, 2 warn, 0 fail; `test-call` recorded a fake call; the permission
+    hook with `--wait-seconds 5` and nobody answering printed Claude Code's deny
+    output after about 5.5 s. Scene 5's test file passes (5 tests).
+  - Scenario suite: not built yet (HL-12). Real agent integration: none beyond
+    the MCP `initialize` handshake above. Live call: not done (owner only).
+- Open issues or follow-ups:
+  - Every command that loads `@hotline/daemon` (hooks and `away` included)
+    prints Node's `node:sqlite` ExperimentalWarning on stderr, bundled or not.
+    Harmless for the hook output contract (stdout only), but noisy; the daemon
+    could import `node:sqlite` lazily, only where the store opens.
+  - `hotline install` recognises a packaged `node .../lib/main.mjs` launcher
+    only through `--command`; the docs point at `bin/hotline` instead.
+  - `docs/contracts.md` (Secrets, HL-02) still says same-user access "does not
+    let an agent approve anything". As Greptile found on #51, a same-user
+    process can read the Twilio auth token and a pending request's text code,
+    forge a signed `YES <code>` webhook and approve. HL-13's threat model should
+    correct it there and in `docs/security.md`.
+- Greptile review fixes on #51: the README now treats same-user processes as
+  trusted (they can forge owner replies and approve, not only misuse the
+  provider keys); the setup sequence passes `--public-url`, `--sms-from` and
+  `--agent-phone-number-id`, which `init` never prompts for; demo scene 8
+  replies `YES <code>` to a permission text, since a bare `yes` is no answer.
+- Staff review P3s on #51: license reads now fail on any error but `ENOENT`;
+  the package check also runs `hook claude permission --wait-seconds 2` in
+  away mode and requires Claude Code's deny output (silence is not consent,
+  from the packaged CLI); the README says the itemised costs land at about
+  $12–14 within the plan's USD 10–15. Not changed: the check keeps the
+  caller's `PATH` so it can find `node`; the copy sits outside the workspace,
+  so the workspace `node_modules` is not on its resolution path.
+
 ## 2026-10-14 — HL-09c Voice approvals confirmed by read-back (#42)
 
 - Owner direction (autopilot session, on #42): approving by voice must be as

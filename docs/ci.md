@@ -18,8 +18,16 @@ Workflows are human-owned. Agents change what CI does by editing
 `scripts/ci/run.sh` (lane:build), which every stage calls. Since HL-01, `setup`
 runs `pnpm install --frozen-lockfile` with the pnpm pinned in `package.json`;
 `build` runs Biome (`pnpm run lint`), `tsc -b`, the test typecheck and a smoke
-run of the built CLI; `test` runs Vitest across every package. `package` prints
-a notice until HL-15 adds a package script. The scenario stage reports `NOT RUN` and passes in CI
+run of the built CLI; `test` runs Vitest across every package. `package` (HL-15)
+runs `pnpm run package`, which bundles the CLI with esbuild into `dist/hotline`
+(uploaded as `package-<os>`), then `scripts/ci/check-package.mjs`: it copies the
+bundle to a temporary folder outside the workspace, so a dependency left out of
+the bundle cannot be found in `node_modules`, and runs it through a symlinked
+launcher: `--version` (must match `apps/cli/package.json`), `--help`, and with
+fake providers in a temporary home, `init`, `install claude` and `install codex`,
+`away status`, the daemon, `doctor` against it, an MCP `initialize` and
+`tools/list`, a Stop hook outside away mode, a permission hook in away mode
+that must deny when nobody answers, and a clean SIGTERM shutdown. The scenario stage reports `NOT RUN` and passes in CI
 until HL-12 adds the suite, but `eval --local` fails until then, so the
 acceptance gate cannot pass early.
 
