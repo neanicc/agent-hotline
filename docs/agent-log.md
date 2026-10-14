@@ -838,3 +838,102 @@ Template:
   - Mutation checks, each reverted: outbound without `placedCall` in the route
     (1 test fails), owner turns on an unplaced outbound call (2), evicting
     live post-call events (1).
+
+## 2026-10-14 — HL-09 Call orchestration (#PR)
+
+- Decision / change: `packages/daemon/src/orchestrator.ts` (`CallOrchestrator`)
+  drives core's pure queue with the injected clock and one real timer at
+  `nextWakeAt`, one step at a time. It saves its state (the `QueueState`, the
+  calls it is waiting on with their held voice answers, and the text
+  confirmation codes) in a new `daemon_state` table after every step, carries
+  out the actions through the providers, and resolves asks through the store
+  (`recordAnswer`, which re-checks `answerProblem`), so the agent API long poll
+  and the MCP server get the outcome. `runDaemon` builds `TwilioSmsProvider`
+  and `ElevenLabsVoiceProvider` from the config and secrets with
+  `globalThis.fetch` and the redactor, and wires `placedCall`, `submit_answer`,
+  the post-call webhook and owner texts to the orchestrator. Store migration 3
+  adds `asks.end_reason`, `daemon_state` and `inbound_messages`, plus
+  `onAskAdded` and `closeAsk`. The fake voice agent now reads each ask aloud as
+  its own transcript turn, and scripts gained a `say` step and `spoken` on
+  answers. No contract changed. Documented in `docs/daemon.md` (new "Call
+  orchestration" section) and `docs/contracts.md`.
+- Acceptance criteria from the comments on #10, each with a test in
+  `packages/daemon/test/orchestration.test.ts` (through the real routes) unless
+  noted:
+  - HL-02: only the resolution path produces `answered`, after `answerProblem`;
+    a high-risk allow without the PIN gets `needs-pin` and nothing is stored.
+  - HL-03: `submit_answer` is delivered before `call-ended`; `text-sent` and
+    `text-failed` are reported; asks resolved mid-call answer `not-recorded`;
+    text replies map to ask ids. `end-call` cannot hang up (no provider has a
+    hang-up API), so the daemon stops serving that call instead.
+  - HL-07: a text answers only an ask Hotline texted that is still open; one
+    reply binds to exactly one ask (a `YES <code>` names it, otherwise exactly
+    one may be waiting) and several waiting fail closed; codes are random per
+    ask, die with it, are spent on use, and a wrong one burns all waiting codes;
+    texts say "Reply YES or NO" (with the code for high risk).
+  - HL-03b: `call me` reaches the queue only from the owner's number on a
+    verified webhook, once per MessageSid, also across a restart.
+  - HL-05: urgent asks call in quiet hours only with `allowUrgentCalls`, and
+    within the rate limits; each ask is checked open and its session live before
+    a call or text; specific no-answer reasons are stored and reported.
+  - HL-08: `placedCall` is supplied; voice decisions are confirmed with
+    `ownerSaid` under the turn-ordering rule (owner turns after the agent turn
+    that read the ask, before the next ask was read), so an early "yes" and a
+    "yes" after a different ask approve nothing (also unit tests in
+    `voice-confirm.test.ts`); a missing post-call event is no answer; a replayed
+    post-call event after a restart changes nothing; a high-risk allow without
+    the PIN is refused.
+- Decisions (no human available):
+  - No grace period at expiry: an ask expires at `expiresAt` even mid-call, and
+    a voice answer still held then does not count. Keeps the agent's wait
+    bounded and fails closed.
+  - Voice answers are held until the post-call transcript and the
+    `submit_answer` reply is `recorded` on arrival. The ask stays open until
+    the transcript confirms it; if it never does, the queue texts the ask after
+    the call.
+  - Finding the reading of an ask: the agent turn with the best share of the
+    ask's key words (text, nickname, tool; at least half; ties read nothing).
+    The call's first agent turn (the fixed greeting) never counts, so ask text
+    written to look like the greeting cannot open its window early. If a
+    paraphrase defeats the match, the answer is not confirmed (fails closed).
+  - Defense in depth beyond the issue: free-text decisions (questions, stop
+    instructions) must themselves be the owner's words, and an `allow` must
+    contain a yes word and no word of refusal or hesitation. Two different
+    decisions for one ask on one call count as neither.
+  - The stored `ownerExcerpt` for a voice decision is the matching owner turns
+    from the transcript, not the model's `owner_words`.
+  - A transcription where the owner never spoke is `no-pickup` (retried); a
+    call that left asks open is `dropped` (texted at once).
+  - Several texted asks with a reply that names none: nothing is recorded and
+    the owner is told to text `call me`. Per-ask reply labels for low-risk asks
+    are a follow-up.
+  - A delivered notification is stored as `expired` with reason `delivered`
+    (`AskStatus` has no `delivered`); its outcome still reads `no-answer`.
+  - Inbound calls answer no asks (`not-recorded`) until HL-10.
+  - Call cost estimate: 12 US cents a minute, a rough constant for `hotline
+    doctor`.
+- Evidence (automated, worktree, Node 24.11.0 locally; CI covers Node 22):
+  `scripts/ci/run.sh build` (Biome, `tsc -b`, test typecheck, CLI smoke) and
+  `scripts/ci/run.sh test` pass: 783 tests in 38 files, 5 full runs in a row
+  green. New: 33 end-to-end tests through the real daemon, 18 unit tests for
+  the confirmation rule, 3 store tests, 1 fake-voice test. Mutation checks, each
+  reverted, against the daemon suite: trusting `owner_words` without the
+  transcript (3 tests fail), `placedCall` always false (12), taking the first of
+  several texted asks (1), keeping codes after a wrong code (1), no durable
+  message dedupe (1), calling asks of an ended session (1), last conflicting
+  answer wins (1), holding a high-risk allow without the PIN (1), no yes-word
+  check (5), greeting can read an ask (1), window not ending at another ask (3).
+  Not spending a matched code survives: it is redundant with the resolve path,
+  which deletes the code too. Scenario suite: not built yet (HL-12). No real
+  agent run (no MCP or hook change) and no live call; no real Twilio or
+  ElevenLabs request was made.
+- Open issues or follow-ups:
+  - HL-14 (persona): tell the agent to read each ask on its own turn, with its
+    words, and to submit free-text answers as the owner's exact words; the
+    reading match and the text check fail closed otherwise. The live check
+    should confirm both on a real call.
+  - Per-ask reply labels so several texted low-risk asks can be answered by
+    text (today: `call me`).
+  - A provider hang-up for `end-call`.
+  - HL-10: inbound answers, `status` by text, the instruction queue, texting the
+    owner about PIN lockouts. HL-13: persist PIN and webhook replay memories.

@@ -452,3 +452,63 @@ describe("ask change listeners", () => {
     expect(db.listSessionAsks("s1", 1).map((a) => a.id)).toEqual(["a2"]);
   });
 });
+
+describe("call orchestration support", () => {
+  it("closes an open ask with its reason, and fills a missing reason without reopening", async () => {
+    const db = await open();
+    db.putSession(session);
+    db.addAsk(ask());
+    db.addAsk(ask({ id: "a2" }));
+    db.addAsk(ask({ id: "a3" }));
+    const changed: string[] = [];
+    db.onAskChange((id) => changed.push(id));
+    expect(db.closeAsk("a1", "expired", "no-pickup")).toBe(true);
+    expect(db.getAsk("a1")?.status).toBe("expired");
+    expect(db.askEndReason("a1")).toBe("no-pickup");
+    // Already final: the status and the recorded reason stay.
+    expect(db.closeAsk("a1", "cancelled", "cancelled")).toBe(false);
+    expect([db.getAsk("a1")?.status, db.askEndReason("a1")]).toEqual(["expired", "no-pickup"]);
+    // The agent API expired a2 a moment earlier, without a reason: the reason is filled in.
+    db.setAskStatus("a2", "expired");
+    expect(db.closeAsk("a2", "expired", "dropped")).toBe(false);
+    expect(db.askEndReason("a2")).toBe("dropped");
+    // An answered ask never gets a reason.
+    db.recordAnswer(answer({ askId: "a3" }), new Date(T1));
+    expect(db.closeAsk("a3", "expired", "timeout")).toBe(false);
+    expect(db.askEndReason("a3")).toBeUndefined();
+    expect(changed).toEqual(["a1", "a2", "a3"]);
+    expect(() => db.closeAsk("a1", "expired", "approved" as never)).toThrow();
+  });
+
+  it("tells listeners about each added ask", async () => {
+    const db = await open();
+    db.putSession(session);
+    const added: string[] = [];
+    const stop = db.onAskAdded((a) => added.push(a.id));
+    db.onAskAdded(() => {
+      throw new Error("a broken listener changes nothing");
+    });
+    db.addAsk(ask());
+    stop();
+    db.addAsk(ask({ id: "a2" }));
+    expect(added).toEqual(["a1"]);
+    expect(db.getAsk("a2")).toBeDefined();
+  });
+
+  it("saves state as JSON and remembers handled inbound messages across a reopen", async () => {
+    const path = join(dir, "home", "hotline.db");
+    const db = await open(path);
+    expect(db.getState("orchestrator")).toBeUndefined();
+    db.putState("orchestrator", { version: 1, calls: [] });
+    db.putState("orchestrator", { version: 1, calls: ["c1"] });
+    const sid = `SM${"1".repeat(32)}`;
+    expect(db.inboundMessageHandled(sid)).toBe(false);
+    db.markInboundMessage(sid, new Date(T0));
+    db.markInboundMessage(sid, new Date(T1));
+    db.close();
+    const again = await open(path);
+    expect(again.getState("orchestrator")).toEqual({ version: 1, calls: ["c1"] });
+    expect(again.inboundMessageHandled(sid)).toBe(true);
+    expect(again.inboundMessageHandled(`SM${"2".repeat(32)}`)).toBe(false);
+  });
+});

@@ -65,6 +65,49 @@ describe("FakeVoiceProvider", () => {
     expect(JSON.stringify(voice.placed[0]?.variables)).not.toContain("hl08-fake-token");
   });
 
+  it("reads each ask as its own agent turn before the owner answers it, unfenced and redacted", async () => {
+    const { client, recorded } = recordingClient();
+    const voice = new FakeVoiceProvider({
+      ownerNumber: OWNER,
+      client,
+      redact: (text) => text.replace(/hl08-fake-token-\w+/g, "[REDACTED]"),
+    });
+    const second = {
+      ...call.asks[0],
+      askId: "ask-2",
+      text: "Run npm publish",
+    } as OutboundCall["asks"][number];
+    voice.script(
+      scriptedHuman.says(
+        { kind: "say", words: "yes, I can hear you" },
+        { kind: "answer", ask: 2, decision: "deny", words: "no" },
+        { kind: "answer", ask: 1, decision: "allow", words: "yes", spoken: null },
+      ),
+    );
+    await voice.callOwner({ callId: "call-2", asks: [call.asks[0] as never, second] });
+    await voice.playPending();
+    const event = parsePostCallEvent(recorded.postCalls[0], {
+      ownerNumber: OWNER,
+      pinVerifiedAt: () => undefined,
+      placedCall: () => true,
+    });
+    const turns = event?.type === "transcription" ? event.transcript : [];
+    expect(turns.map((t) => [t.role, t.message])).toEqual([
+      ["agent", "Hey, it's your hotline. One of your agents needs you for a sec. Got a moment?"],
+      ["owner", "yes, I can hear you"],
+      [
+        "agent",
+        "Ask 1, from Codex in api, permission request to use Bash, low risk: Run rm -rf build with token [REDACTED]",
+      ],
+      ["agent", "Ask 2, from Codex in api, permission request to use Bash, low risk: Run npm publish"],
+      ["owner", "no"],
+      ["agent", "Got it."],
+      // `spoken: null`: the model submits words nobody said here.
+      ["agent", "Got it."],
+    ]);
+    expect(recorded.tools.map((t) => t.body.owner_words)).toEqual(["no", "yes"]);
+  });
+
   it("nobody picks up when no script was given", async () => {
     const { client, recorded } = recordingClient();
     const voice = new FakeVoiceProvider({ ownerNumber: OWNER, client });

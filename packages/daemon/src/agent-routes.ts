@@ -172,8 +172,12 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
         if (answer === undefined) throw new Error("answered ask without a stored answer");
         return { ask: current, outcome: { outcome: "answered", answer } };
       }
-      case "expired":
-        return { ask: current, outcome: { outcome: "no-answer", askId: current.id, reason: "timeout" } };
+      case "expired": {
+        // The specific reason call orchestration recorded (no pickup, dropped, unclear, ...).
+        const ended = store.askEndReason(current.id);
+        const reason = ended === undefined || ended === "delivered" ? "timeout" : ended;
+        return { ask: current, outcome: { outcome: "no-answer", askId: current.id, reason } };
+      }
       case "cancelled":
         return { ask: current, outcome: { outcome: "no-answer", askId: current.id, reason: "cancelled" } };
       default:

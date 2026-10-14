@@ -1,0 +1,832 @@
+// Call orchestration (HL-09): drives core's pure ask queue with the daemon's
+// clock and a real timer, persists its state, carries out its actions through
+// the voice and SMS providers, and resolves asks through the store.
+//
+// Safety rules this file keeps (AGENTS.md):
+// - Decisions come only from the owner. A voice answer is held until the
+//   post-call transcript confirms it (`confirmVoiceDecision`: the owner's own
+//   turns, after the ask was read and before the next one); a text answer is
+//   accepted only for the one ask Hotline texted that is still open. Both then
+//   go through the queue (`answerProblem` at arrival) and `recordAnswer`, which
+//   checks `answerProblem` again. Nothing else produces an answered outcome.
+// - Silence is not consent: no pickup, a dropped call, a missing post-call
+//   event, an unconfirmed or conflicting answer, an unclear one and every
+//   failure leave the ask unanswered, and the queue ends it as `no-answer`.
+// - High-risk approvals need the PIN on the call (the route's PinGate sets
+//   `confirmation: "pin"`) or `YES <code>` by text with a random, single-use
+//   code that dies with the ask.
+// - Before a call or text goes out, each ask is checked again: still open in
+//   the store and its session not ended.
+// - Owner only: providers are bound to the owner's number; texts reach this
+//   file only from the owner's number on a verified webhook, once per message
+//   SID (remembered in the store across restarts).
+// - Logs and audit entries carry ids, kinds, counts and reasons, never words.
+import { randomInt, randomUUID, timingSafeEqual } from "node:crypto";
+import {
+  Answer,
+  Ask,
+  type AskStatus,
+  createQueue,
+  nextWakeAt,
+  type PolicySettings,
+  parseSmsReply,
+  type QueueAction,
+  type QueueEvent,
+  type QueueState,
+  type SmsReply,
+  smsAnswer,
+  step,
+} from "@hotline/core";
+import type { PostCallEvent, SmsProvider, VoiceAsk, VoiceProvider } from "@hotline/providers";
+import { z } from "zod";
+import type { SubmitAnswerResult, VoiceAnswer } from "./elevenlabs-webhook.js";
+import type { OwnerSms } from "./sms-webhook.js";
+import type { HotlineStore } from "./store.js";
+import { confirmVoiceDecision, type ReadAsk } from "./voice-confirm.js";
+
+/** Key of the orchestrator's saved state in the store. */
+export const ORCHESTRATOR_STATE_KEY = "orchestrator";
+/** A timer never fires sooner than this after the last step, so overdue work cannot spin. */
+const MIN_TIMER_MS = 100;
+const MAX_TIMER_MS = 2 ** 31 - 1;
+/** Agent text in an outgoing SMS, cut like the voice read-out. */
+const SMS_ASK_LENGTH = 300;
+const SMS_OPTION_LENGTH = 80;
+/** Rough cost of a call minute in US cents (Twilio voice plus ElevenLabs Agents), for `hotline doctor`. */
+export const CALL_CENTS_PER_MINUTE = 12;
+
+/** The subset of a pino/Fastify logger the orchestrator uses. */
+export interface OrchestratorLog {
+  info(detail: object, message: string): void;
+  warn(detail: object, message: string): void;
+  error(detail: object, message: string): void;
+}
+
+const silentLog: OrchestratorLog = { info() {}, warn() {}, error() {} };
+
+export interface CallOrchestratorOptions {
+  store: HotlineStore;
+  settings: PolicySettings;
+  /** The daemon's injected clock. Every queue step uses it. */
+  clock: () => Date;
+  /** Places calls to the owner. Without one, every call fails and asks fall back to text. */
+  voice?: VoiceProvider;
+  /** Texts the owner. Without one, every text fails. */
+  sms?: SmsProvider;
+  /** The daemon's redactor; a confirmation code it would change is never used. */
+  redact: (text: string) => string;
+  log?: OrchestratorLog;
+  /** Tick at `nextWakeAt` with a real timer (default). Tests may turn it off and call `tick()`. */
+  autoTick?: boolean;
+  /** For tests: the next confirmation code. Default: 6 random digits. */
+  newCode?: () => string;
+}
+
+/** A voice answer held until the post-call transcript confirms it. */
+interface PendingVoiceAnswer {
+  decision: Answer["decision"] | "unclear";
+  ownerWords: string;
+  confirmation: Answer["confirmation"];
+  answeredAt: string;
+  /** The model submitted a different decision for this ask on the same call: nothing counts. */
+  conflict?: boolean;
+}
+
+/** A call Hotline placed and is waiting on, until its post-call event, its failure or the stuck-call limit. */
+interface LiveCall {
+  callId: string;
+  conversationId: string;
+  callSid?: string;
+  /** The asks read out, in order: ask number N on the call is `askIds[N - 1]`. */
+  askIds: string[];
+  placedAt: string;
+  answers: Record<string, PendingVoiceAnswer>;
+}
+
+interface SavedState {
+  version: 1;
+  queue: QueueState;
+  calls: LiveCall[];
+  /** Confirmation codes of texted high-risk permission asks, by ask id. Single use. */
+  codes: Record<string, string>;
+}
+
+const QueuedAskSchema = z.strictObject({
+  ask: Ask,
+  phase: z.enum(["waiting", "calling", "texted"]),
+  readyAt: z.number(),
+  callAttempts: z.int().min(0),
+  texted: z.boolean(),
+  textOnly: z.enum(["notify", "quiet-hours", "call-limit", "after-call"]).optional(),
+  duplicateOf: z.string().optional(),
+  lastFailure: z.enum(["no-pickup", "dropped", "failed"]).optional(),
+});
+const PendingSchema = z.strictObject({
+  decision: z.union([z.literal("unclear"), Answer.shape.decision]),
+  ownerWords: z.string().min(1),
+  confirmation: Answer.shape.confirmation,
+  answeredAt: z.iso.datetime(),
+  conflict: z.boolean().optional(),
+});
+const SavedStateSchema = z.strictObject({
+  version: z.literal(1),
+  queue: z.strictObject({
+    open: z.array(QueuedAskSchema),
+    call: z.strictObject({ id: z.string(), askIds: z.array(z.string()), placedAt: z.number() }).optional(),
+    callTimes: z.array(z.number()),
+    textTimes: z.array(z.number()),
+    callSeq: z.int().min(0),
+    idPrefix: z.string().min(1),
+  }),
+  calls: z.array(
+    z.strictObject({
+      callId: z.string(),
+      conversationId: z.string(),
+      callSid: z.string().optional(),
+      askIds: z.array(z.string()),
+      placedAt: z.iso.datetime(),
+      answers: z.record(z.string(), PendingSchema),
+    }),
+  ),
+  codes: z.record(z.string(), z.string()),
+});
+
+const OPEN: ReadonlySet<AskStatus> = new Set<AskStatus>(["pending", "in-flight"]);
+
+function flat(text: string, max: number): string {
+  const one = text
+    .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return one.length <= max ? one : `${one.slice(0, max - 1).trimEnd()}…`;
+}
+
+function sameCode(presented: string, expected: string): boolean {
+  const a = Buffer.from(presented);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function sameDecision(a: PendingVoiceAnswer["decision"], b: PendingVoiceAnswer["decision"]): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** What the owner's reply is, for the audit log: never the words. */
+function replyKind(reply: SmsReply): string {
+  return reply.type === "command" ? reply.command : reply.type;
+}
+
+export class CallOrchestrator {
+  readonly #options: CallOrchestratorOptions;
+  readonly #store: HotlineStore;
+  #log: OrchestratorLog;
+  #state: SavedState;
+  #chain: Promise<unknown> = Promise.resolve();
+  #timer: NodeJS.Timeout | undefined;
+  #stopped = false;
+  #unsubscribe: (() => void)[] = [];
+
+  constructor(options: CallOrchestratorOptions) {
+    this.#options = options;
+    this.#store = options.store;
+    this.#log = options.log ?? silentLog;
+    this.#state = {
+      version: 1,
+      queue: createQueue(`call-${randomUUID().slice(0, 8)}`),
+      calls: [],
+      codes: {},
+    };
+  }
+
+  /** Sends logs to the daemon's logger once it exists. */
+  attachLog(log: OrchestratorLog): void {
+    this.#log = log;
+  }
+
+  /**
+   * Restores the saved state, reconciles it with the store (asks closed while the
+   * daemon was down are dropped, open asks it does not know are queued), starts
+   * listening for new and changed asks, and runs the first step.
+   */
+  start(): Promise<void> {
+    const saved = SavedStateSchema.safeParse(this.#store.getState(ORCHESTRATOR_STATE_KEY));
+    if (saved.success) this.#state = saved.data as SavedState;
+    else if (this.#store.getState(ORCHESTRATOR_STATE_KEY) !== undefined) {
+      // Unreadable state fails closed: open asks are queued afresh below.
+      this.#log.warn({}, "call orchestration state unreadable; starting a new queue");
+    }
+    this.#unsubscribe.push(
+      this.#store.onAskAdded((ask) => {
+        if (ask.status === "pending") void this.#run(() => this.#process({ type: "ask", ask }));
+      }),
+      this.#store.onAskChange((askId) => {
+        void this.#run(() => this.#storeChanged(askId));
+      }),
+    );
+    return this.#run(async () => {
+      const queued = new Set(this.#state.queue.open.map((q) => q.ask.id));
+      for (const askId of queued) await this.#storeChanged(askId);
+      for (const ask of this.#store.listAsks(["pending", "in-flight"])) {
+        if (!queued.has(ask.id)) await this.#process({ type: "ask", ask: { ...ask, status: "pending" } });
+      }
+      await this.#process({ type: "tick" });
+    });
+  }
+
+  /** Stops the timer and the store listeners, after the step in progress. */
+  async stop(): Promise<void> {
+    this.#stopped = true;
+    clearTimeout(this.#timer);
+    for (const unsubscribe of this.#unsubscribe.splice(0)) unsubscribe();
+    await this.idle();
+  }
+
+  /** Resolves once every queued step has run. */
+  async idle(): Promise<void> {
+    let seen: Promise<unknown> | undefined;
+    while (seen !== this.#chain) {
+      seen = this.#chain;
+      await seen;
+    }
+  }
+
+  /** Runs whatever is due now. The timer calls this; tests with a fake clock call it after moving the clock. */
+  tick(): Promise<void> {
+    return this.#run(async () => {
+      await this.#process({ type: "tick" });
+    });
+  }
+
+  /** The queue's current state, for tests and status. */
+  get queue(): QueueState {
+    return structuredClone(this.#state.queue);
+  }
+
+  /**
+   * Whether Hotline placed this conversation and is still waiting on it: the
+   * `placedCall` the ElevenLabs routes need. Only such a call is outbound.
+   */
+  placedCall(conversationId: string): boolean {
+    return this.#state.calls.some((call) => call.conversationId === conversationId);
+  }
+
+  // Voice ---------------------------------------------------------------------
+
+  /** `submit_answer`: holds the answer until the post-call transcript confirms it. */
+  submitAnswer(answer: VoiceAnswer): Promise<SubmitAnswerResult> {
+    return this.#run(async () => {
+      const result = this.#holdVoiceAnswer(answer);
+      this.#store.appendAudit(
+        "voice.answer",
+        { decision: answer.decision === "unclear" ? "unclear" : answer.decision.type, result },
+        answer.receivedAt,
+        result === "recorded" ? { callId: this.#callFor(answer.conversationId)?.callId } : {},
+      );
+      return result;
+    });
+  }
+
+  #callFor(conversationId: string): LiveCall | undefined {
+    return this.#state.calls.find((call) => call.conversationId === conversationId);
+  }
+
+  #holdVoiceAnswer(voice: VoiceAnswer): SubmitAnswerResult {
+    const call = this.#callFor(voice.conversationId);
+    // Asks are answered only on a call Hotline placed to the owner (the inbound line is HL-10).
+    if (call === undefined || voice.direction !== "outbound") return "not-recorded";
+    const askId = call.askIds[voice.askNumber - 1];
+    const queued = this.#state.queue.open.find((q) => q.ask.id === askId);
+    if (
+      askId === undefined ||
+      queued === undefined ||
+      queued.phase !== "calling" ||
+      this.#state.queue.call?.id !== call.callId
+    ) {
+      return "not-recorded";
+    }
+    const pending: PendingVoiceAnswer = {
+      decision: voice.decision,
+      ownerWords: voice.ownerWords,
+      confirmation: voice.confirmation,
+      answeredAt: voice.receivedAt.toISOString(),
+    };
+    if (voice.decision !== "unclear") {
+      const ask = queued.ask;
+      if (
+        ask.kind === "permission" &&
+        ask.risk === "high" &&
+        voice.decision.type === "allow" &&
+        voice.confirmation === "none"
+      ) {
+        return "needs-pin";
+      }
+      const parsed = Answer.safeParse({
+        askId,
+        decision: voice.decision,
+        channel: "voice",
+        ownerExcerpt: voice.ownerWords,
+        sourceId: voice.conversationId,
+        confirmation: voice.confirmation,
+        answeredAt: pending.answeredAt,
+      });
+      if (!parsed.success) return "not-recorded";
+    }
+    const earlier = call.answers[askId];
+    if (earlier !== undefined) {
+      // A repeat of the same decision is fine; a different one means nobody can
+      // tell what the owner chose, so neither counts.
+      if (!earlier.conflict && sameDecision(earlier.decision, pending.decision)) return "recorded";
+      earlier.conflict = true;
+      this.#save();
+      return "not-recorded";
+    }
+    call.answers[askId] = pending;
+    this.#save();
+    return "recorded";
+  }
+
+  /**
+   * A verified post-call webhook. The held answers that the transcript confirms
+   * reach the queue before the call's end, as the queue requires. Idempotent:
+   * an event for a call that is no longer live (a replay, a call given up on)
+   * changes nothing.
+   */
+  postCall(event: Exclude<PostCallEvent, { type: "other" }>, receivedAt: Date): Promise<void> {
+    return this.#run(async () => {
+      const call = this.#callFor(event.conversationId);
+      if (call === undefined) {
+        this.#store.appendAudit("voice.post-call-ignored", { kind: event.type }, receivedAt);
+        return;
+      }
+      this.#state.calls = this.#state.calls.filter((other) => other !== call);
+      this.#save();
+      const events: QueueEvent[] = [];
+      let result: "answered" | "no-pickup" | "dropped" | "failed";
+      if (event.type === "initiation-failure") {
+        result = event.reason === "unknown" ? "failed" : "no-pickup";
+      } else {
+        const asks = call.askIds.map((askId) => this.#readAsk(askId));
+        let settled = 0;
+        call.askIds.forEach((askId, index) => {
+          const held = call.answers[askId];
+          if (held === undefined) return;
+          if (held.conflict) {
+            this.#store.appendAudit("voice.answer-conflict", {}, receivedAt, { askId, callId: call.callId });
+            return;
+          }
+          if (held.decision === "unclear") {
+            events.push({ type: "unclear", askId });
+            settled += 1;
+            return;
+          }
+          const check = confirmVoiceDecision({
+            transcript: event.transcript,
+            asks,
+            index,
+            decision: held.decision,
+            ownerWords: held.ownerWords,
+          });
+          if (!check.confirmed) {
+            this.#store.appendAudit("voice.answer-unconfirmed", { reason: check.reason }, receivedAt, {
+              askId,
+              callId: call.callId,
+            });
+            return;
+          }
+          events.push({
+            type: "answer",
+            answer: {
+              askId,
+              decision: held.decision,
+              channel: "voice",
+              ownerExcerpt: check.excerpt,
+              sourceId: event.conversationId,
+              confirmation: held.confirmation,
+              answeredAt: held.answeredAt,
+            },
+          });
+          settled += 1;
+        });
+        const ownerSpoke = event.transcript.some((turn) => turn.role === "owner");
+        result = !ownerSpoke ? "no-pickup" : settled === call.askIds.length ? "answered" : "dropped";
+      }
+      events.push({ type: "call-ended", callId: call.callId, result });
+      this.#recordCall(call, event, result, receivedAt);
+      for (const next of events) await this.#process(next);
+    });
+  }
+
+  #readAsk(askId: string): ReadAsk {
+    const ask = this.#store.getAsk(askId);
+    const nickname = ask === undefined ? "" : (this.#store.getSession(ask.sessionId)?.nickname ?? "");
+    return {
+      text: ask?.text ?? "",
+      nickname,
+      ...(ask?.toolName === undefined ? {} : { toolName: ask.toolName }),
+    };
+  }
+
+  #recordCall(
+    call: LiveCall,
+    event: Exclude<PostCallEvent, { type: "other" }>,
+    result: string,
+    endedAt: Date,
+  ): void {
+    const duration = event.type === "transcription" ? (event.durationSeconds ?? 0) : 0;
+    const startedAt = new Date(Math.min(Date.parse(call.placedAt), endedAt.getTime()));
+    try {
+      this.#store.putCall({
+        id: call.callId,
+        provider: this.#options.voice?.name ?? "fake",
+        direction: "outbound",
+        providerIds: {
+          conversationId: call.conversationId,
+          ...(call.callSid === undefined ? {} : { callSid: call.callSid }),
+        },
+        askIds: call.askIds,
+        outcome:
+          result === "answered" || result === "dropped"
+            ? "answered"
+            : result === "failed"
+              ? "failed"
+              : "no-answer",
+        startedAt: startedAt.toISOString(),
+        endedAt: endedAt.toISOString(),
+        durationSeconds: duration,
+        costEstimateCents: Math.ceil(duration / 60) * CALL_CENTS_PER_MINUTE,
+      });
+    } catch (error) {
+      this.#log.error({ err: error, callId: call.callId }, "could not store the call record");
+    }
+    this.#store.appendAudit("call.ended", { result, durationSeconds: duration }, endedAt, {
+      callId: call.callId,
+    });
+  }
+
+  // SMS -----------------------------------------------------------------------
+
+  /**
+   * A verified text from the owner's number. Handled once per message SID, also
+   * across restarts. Returns the reply to send back, if any.
+   */
+  ownerText(message: OwnerSms): Promise<string | undefined> {
+    return this.#run(async () => {
+      if (this.#store.inboundMessageHandled(message.messageSid)) return undefined;
+      const reply = await this.#handleText(message);
+      this.#store.markInboundMessage(message.messageSid, message.receivedAt);
+      return reply;
+    });
+  }
+
+  async #handleText({ messageSid, body, receivedAt, optOutType }: OwnerSms): Promise<string | undefined> {
+    const reply = parseSmsReply(body);
+    this.#store.appendAudit("sms.received", { messageSid, reply: replyKind(reply) }, receivedAt);
+    // Twilio has already answered its own opt-out, opt-in and help keywords.
+    if (optOutType !== undefined || reply.type === "carrier-keyword") return undefined;
+    if (reply.type === "command") {
+      if (reply.command !== "call-me") return undefined; // `status` is the inbound line (HL-10); `stop` is Twilio's
+      const actions = await this.#process({ type: "call-me" });
+      const ignored = actions.find((action) => action.type === "ignored" && action.event === "call-me");
+      return ignored?.type === "ignored"
+        ? `Hotline: not calling, ${ignored.reason}.`
+        : "Hotline: calling you now.";
+    }
+
+    // Only asks Hotline texted and that are still open can take a text answer,
+    // and a reply must point at exactly one of them.
+    const texted = this.#state.queue.open.filter((q) => q.texted && q.duplicateOf === undefined);
+    const code = reply.type === "yes" ? reply.code : undefined;
+    let target: (typeof texted)[number] | undefined;
+    if (code !== undefined) {
+      target = texted.find((q) => {
+        const expected = this.#state.codes[q.ask.id];
+        return expected !== undefined && sameCode(code, expected);
+      });
+      if (target === undefined) {
+        // A wrong code burns every code still waiting: those requests can then
+        // only be approved on a call, with the PIN.
+        const burnt = Object.keys(this.#state.codes).length;
+        this.#state.codes = {};
+        this.#save();
+        this.#store.appendAudit("sms.code-mismatch", { messageSid, burnt }, receivedAt);
+        return "Hotline: that code does not match a waiting request, so nothing was approved. Text CALL ME to answer by phone.";
+      }
+    } else if (texted.length === 0) {
+      return "Hotline: nothing is waiting for an answer right now.";
+    } else if (texted.length > 1) {
+      this.#store.appendAudit("sms.ambiguous", { messageSid, waiting: texted.length }, receivedAt);
+      return `Hotline: ${texted.length} requests are waiting, so a reply cannot say which one it answers. Nothing was recorded. Text CALL ME to go through them by phone.`;
+    } else {
+      target = texted[0];
+    }
+    if (target === undefined) return undefined;
+    const askId = target.ask.id;
+    const confirmationCode = this.#state.codes[askId];
+    if (code !== undefined) {
+      // Single use: a code that matched is spent whatever happens next.
+      delete this.#state.codes[askId];
+      this.#save();
+    }
+    const result = smsAnswer({
+      ask: target.ask,
+      body,
+      messageSid,
+      receivedAt,
+      ...(confirmationCode === undefined ? {} : { confirmationCode }),
+    });
+    if (result.outcome === "no-answer") {
+      this.#store.appendAudit("sms.not-an-answer", { messageSid, reason: result.reason }, receivedAt, {
+        askId,
+      });
+      return replyHint(target.ask);
+    }
+    const actions = await this.#process({ type: "answer", answer: result.answer });
+    const answered = actions.some(
+      (action) =>
+        action.type === "resolve" && action.askId === askId && action.outcome.outcome === "answered",
+    );
+    return answered ? "Hotline: got it." : "Hotline: that answer could not be recorded.";
+  }
+
+  // The queue -----------------------------------------------------------------
+
+  /** Serializes every step: the queue sees one event at a time. A failure never blocks later steps. */
+  #run<T>(work: () => Promise<T>): Promise<T> {
+    const result = this.#chain.then(work);
+    this.#chain = result.then(
+      () => undefined,
+      (error: unknown) => this.#log.error({ err: error }, "call orchestration step failed"),
+    );
+    return result;
+  }
+
+  /** The store changed an ask (the agent cancelled, its session ended, the agent API expired it). */
+  async #storeChanged(askId: string): Promise<void> {
+    if (!this.#state.queue.open.some((q) => q.ask.id === askId)) return;
+    const ask = this.#store.getAsk(askId);
+    if (ask !== undefined && OPEN.has(ask.status)) return;
+    if (ask?.status === "expired" && this.#options.clock().getTime() >= Date.parse(ask.expiresAt)) {
+      // The queue expires it on its own, with the specific reason.
+      await this.#process({ type: "tick" });
+      return;
+    }
+    await this.#process({ type: "cancel", askId });
+  }
+
+  /** Steps the queue with `first` and every event its actions lead to; returns all actions. */
+  async #process(first: QueueEvent): Promise<QueueAction[]> {
+    const events: QueueEvent[] = [first];
+    const all: QueueAction[] = [];
+    for (let event = events.shift(); event !== undefined; event = events.shift()) {
+      const now = this.#options.clock();
+      const { state, actions } = step(this.#state.queue, event, now, this.#options.settings);
+      this.#state.queue = state;
+      this.#save();
+      all.push(...actions);
+      for (const action of actions) events.push(...(await this.#execute(action, now)));
+    }
+    this.#schedule();
+    return all;
+  }
+
+  #save(): void {
+    this.#store.putState(ORCHESTRATOR_STATE_KEY, this.#state);
+  }
+
+  #schedule(): void {
+    clearTimeout(this.#timer);
+    this.#timer = undefined;
+    if (this.#stopped || this.#options.autoTick === false) return;
+    const now = this.#options.clock();
+    const wake = nextWakeAt(this.#state.queue, now, this.#options.settings);
+    if (wake === undefined) return;
+    const delay = Math.min(MAX_TIMER_MS, Math.max(MIN_TIMER_MS, wake.getTime() - now.getTime()));
+    this.#timer = setTimeout(() => {
+      void this.tick().catch(() => {});
+    }, delay);
+    this.#timer.unref();
+  }
+
+  /** Why an ask must not go out now, or undefined: it closed, or its agent left. */
+  #notReachable(askId: string): string | undefined {
+    const ask = this.#store.getAsk(askId);
+    if (ask === undefined) return "unknown ask";
+    if (!OPEN.has(ask.status)) return `the ask is ${ask.status}`;
+    if (this.#store.getSession(ask.sessionId)?.state === "ended") return "the session ended";
+    return undefined;
+  }
+
+  /** Carries out one action; returns the events it leads to. */
+  async #execute(action: QueueAction, now: Date): Promise<QueueEvent[]> {
+    switch (action.type) {
+      case "place-call":
+        return this.#placeCall(action.callId, action.askIds, now);
+      case "end-call": {
+        // No provider offers a hang-up, so the daemon stops serving the call: its
+        // tool calls are no longer answered and its post-call event changes nothing.
+        this.#state.calls = this.#state.calls.filter((call) => call.callId !== action.callId);
+        this.#save();
+        this.#store.appendAudit("call.abandoned", {}, now, { callId: action.callId });
+        return [];
+      }
+      case "send-text":
+        return this.#sendText(action.askId, action.reason, now);
+      case "resolve":
+        this.#resolve(action, now);
+        return [];
+      case "delivered": {
+        const ask = this.#store.getAsk(action.askId);
+        this.#store.closeAsk(action.askId, "expired", "delivered");
+        this.#store.appendAudit("ask.delivered", {}, now, {
+          askId: action.askId,
+          ...(ask === undefined ? {} : { sessionId: ask.sessionId }),
+        });
+        return [];
+      }
+      case "ignored":
+        this.#log.info({ event: action.event, reason: action.reason }, "queue event ignored");
+        return [];
+    }
+  }
+
+  async #placeCall(callId: string, askIds: readonly string[], now: Date): Promise<QueueEvent[]> {
+    const events: QueueEvent[] = [];
+    const asks: VoiceAsk[] = [];
+    for (const askId of askIds) {
+      const why = this.#notReachable(askId);
+      if (why !== undefined) {
+        this.#store.appendAudit("ask.not-called", { reason: why }, now, { askId, callId });
+        events.push({ type: "cancel", askId });
+        continue;
+      }
+      const ask = this.#store.getAsk(askId) as Ask;
+      asks.push({
+        askId,
+        kind: ask.kind,
+        nickname: this.#store.getSession(ask.sessionId)?.nickname ?? "an agent",
+        text: ask.text,
+        options: ask.options,
+        risk: ask.risk,
+        ...(ask.toolName === undefined ? {} : { toolName: ask.toolName }),
+      });
+    }
+    const voice = this.#options.voice;
+    if (asks.length === 0 || voice === undefined) {
+      if (asks.length > 0)
+        this.#store.appendAudit("call.failed", { reason: "no voice provider" }, now, { callId });
+      events.push({ type: "call-ended", callId, result: "failed" });
+      return events;
+    }
+    for (const ask of asks) this.#store.setAskStatus(ask.askId, "in-flight");
+    try {
+      const placed = await voice.callOwner({ callId, asks });
+      this.#state.calls.push({
+        callId,
+        conversationId: placed.conversationId,
+        ...(placed.callSid === undefined ? {} : { callSid: placed.callSid }),
+        askIds: asks.map((ask) => ask.askId),
+        placedAt: now.toISOString(),
+        answers: {},
+      });
+      this.#save();
+      this.#store.appendAudit("call.placed", { asks: asks.length }, now, { callId });
+    } catch (error) {
+      const status = (error as { status?: unknown }).status;
+      this.#store.appendAudit("call.failed", { status: typeof status === "number" ? status : null }, now, {
+        callId,
+      });
+      events.push({ type: "call-ended", callId, result: "failed" });
+    }
+    return events;
+  }
+
+  async #sendText(askId: string, reason: string, now: Date): Promise<QueueEvent[]> {
+    const why = this.#notReachable(askId);
+    if (why !== undefined) {
+      this.#store.appendAudit("ask.not-texted", { reason: why }, now, { askId });
+      return [{ type: "cancel", askId }];
+    }
+    const ask = this.#store.getAsk(askId) as Ask;
+    const sms = this.#options.sms;
+    const code = ask.kind === "permission" && ask.risk === "high" ? this.#newCode() : undefined;
+    if (sms === undefined) {
+      this.#store.appendAudit("text.failed", { reason: "no SMS provider" }, now, { askId });
+      return [{ type: "text-failed", askId }];
+    }
+    if (code !== undefined) {
+      this.#state.codes[askId] = code;
+      this.#save();
+    }
+    const nickname = this.#store.getSession(ask.sessionId)?.nickname ?? "An agent";
+    try {
+      await sms.sendToOwner(textFor(ask, nickname, code));
+    } catch (error) {
+      if (code !== undefined) {
+        delete this.#state.codes[askId];
+        this.#save();
+      }
+      const { status, code: providerCode } = error as { status?: unknown; code?: unknown };
+      this.#store.appendAudit(
+        "text.failed",
+        {
+          status: typeof status === "number" ? status : null,
+          code: typeof providerCode === "number" ? providerCode : null,
+        },
+        now,
+        { askId },
+      );
+      return [{ type: "text-failed", askId }];
+    }
+    this.#store.setAskStatus(askId, "in-flight");
+    this.#store.appendAudit("text.sent", { reason, confirmationCode: code !== undefined }, now, {
+      askId,
+      sessionId: ask.sessionId,
+    });
+    return [{ type: "text-sent", askId }];
+  }
+
+  /** A random 6-digit code the redactor leaves alone and no other waiting ask has. */
+  #newCode(): string | undefined {
+    const outstanding = new Set(Object.values(this.#state.codes));
+    for (let tries = 0; tries < 20; tries++) {
+      const code = this.#options.newCode?.() ?? String(randomInt(0, 1_000_000)).padStart(6, "0");
+      if (/^\d{4,10}$/.test(code) && !outstanding.has(code) && this.#options.redact(code) === code)
+        return code;
+    }
+    // No usable code: the request goes out without one and cannot be approved by text.
+    return undefined;
+  }
+
+  #resolve(action: Extract<QueueAction, { type: "resolve" }>, now: Date): void {
+    const { askId, outcome } = action;
+    delete this.#state.codes[askId];
+    this.#save();
+    const ask = this.#store.getAsk(askId);
+    const ids = { askId, ...(ask === undefined ? {} : { sessionId: ask.sessionId }) };
+    if (outcome.outcome === "answered") {
+      const { answer } = outcome;
+      try {
+        // The store checks `answerProblem` again against its own copy of the ask.
+        this.#store.recordAnswer(answer, now);
+        this.#store.appendAudit(
+          "ask.answered",
+          { channel: answer.channel, decision: answer.decision.type, confirmation: answer.confirmation },
+          now,
+          ids,
+        );
+      } catch (error) {
+        this.#log.warn({ err: error }, "answer refused by the store");
+        this.#store.appendAudit("ask.answer-refused", { channel: answer.channel }, now, ids);
+      }
+      return;
+    }
+    const status = action.status === "cancelled" ? "cancelled" : "expired";
+    this.#store.closeAsk(askId, status, outcome.reason);
+    this.#store.appendAudit("ask.no-answer", { reason: outcome.reason }, now, ids);
+  }
+}
+
+/** The text that asks the owner one thing. Agent text is flattened and cut; the provider redacts it all. */
+export function textFor(ask: Ask, nickname: string, code: string | undefined): string {
+  const who = flat(nickname, 60);
+  const text = flat(ask.text, SMS_ASK_LENGTH);
+  switch (ask.kind) {
+    case "question": {
+      const options = ask.options
+        .map((option, i) => `\n${i + 1}) ${flat(option, SMS_OPTION_LENGTH)}`)
+        .join("");
+      const how = ask.options.length > 0 ? "an option number or your answer" : "your answer";
+      return `Hotline: ${who} asks: ${text}${options}\nReply with ${how}.`;
+    }
+    case "permission": {
+      const tool = flat(ask.toolName ?? "a tool", 80);
+      const how =
+        ask.risk !== "high"
+          ? "Reply YES or NO."
+          : code === undefined
+            ? "HIGH RISK: it can only be approved on a call with your PIN. Reply NO to deny, or CALL ME."
+            : `HIGH RISK. Reply YES ${code} to allow, or NO to deny.`;
+      return `Hotline: ${who} wants to use ${tool}: ${text}\n${how}`;
+    }
+    case "stop":
+      return `Hotline: ${who} finished its turn: ${text}\nReply with what to do next, or DONE.`;
+    case "notify":
+      return `Hotline: ${who}: ${text}`;
+  }
+}
+
+/** What to reply when a text did not answer the one waiting ask. */
+function replyHint(ask: Ask): string {
+  switch (ask.kind) {
+    case "permission":
+      return ask.risk === "high"
+        ? "Hotline: not recorded. Reply YES with the code from the text, or NO."
+        : "Hotline: not recorded. Reply YES or NO.";
+    case "question":
+      return "Hotline: not recorded. Reply with an option number or your answer.";
+    case "stop":
+      return "Hotline: not recorded. Reply with what to do next, or DONE.";
+    case "notify":
+      return "Hotline: nothing is waiting for an answer right now.";
+  }
+}
