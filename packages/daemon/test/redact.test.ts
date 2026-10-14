@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createRedactor, MAX_REDACTED_TEXT, REDACTED, redactingStream } from "../src/index.js";
+import { hostileRatio, MAX_HOSTILE_RATIO } from "./linear-time.js";
 
 // Obviously fake values only. Each literal is built at runtime so no scanner
 // mistakes this file for a leak.
@@ -174,9 +175,8 @@ describe("bypasses closed after the security review", () => {
     // A long run of non-separator characters with a separator near the end used to
     // make the truncation pattern backtrack quadratically.
     const hostile = `${"a".repeat(MAX_REDACTED_TEXT - 2)}, ${"b".repeat(MAX_REDACTED_TEXT)}`;
-    const started = performance.now();
+    expect(hostileRatio(text, hostile)).toBeLessThan(MAX_HOSTILE_RATIO);
     const out = text(hostile);
-    expect(performance.now() - started).toBeLessThan(50);
     expect(out.endsWith("[truncated]")).toBe(true);
     expect(out).not.toContain("b");
   });
@@ -188,10 +188,8 @@ describe("bypasses closed after the security review", () => {
     `${"5".repeat(9)}x`.repeat(MAX_REDACTED_TEXT / 10),
     `${"%2B".repeat(MAX_REDACTED_TEXT / 3)}`,
     `${"-----BEGIN ".repeat(MAX_REDACTED_TEXT / 11)}`,
-  ])("redacts 16 KiB of hostile shape %# in under 50 ms", (input) => {
-    const started = performance.now();
-    text(input);
-    expect(performance.now() - started).toBeLessThan(50);
+  ])("redacts 16 KiB of hostile shape %# in linear time, within a fixed ratio of benign text", (input) => {
+    expect(hostileRatio(text, input)).toBeLessThan(MAX_HOSTILE_RATIO);
   });
 
   it.each([
@@ -251,13 +249,14 @@ describe("bypasses closed after the security review", () => {
     "9 ".repeat(MAX_REDACTED_TEXT / 2),
     "(9-".repeat(MAX_REDACTED_TEXT / 3),
     "+9    ".repeat(MAX_REDACTED_TEXT / 6),
-  ])("scans hostile digit shape %# for the PIN in under 50 ms", (input) => {
-    const known = createRedactor();
-    known.addShortSecret("1234");
-    const started = performance.now();
-    known.text(input);
-    expect(performance.now() - started).toBeLessThan(50);
-  });
+  ])(
+    "scans hostile digit shape %# for the PIN in linear time, within a fixed ratio of benign text",
+    (input) => {
+      const known = createRedactor();
+      known.addShortSecret("1234");
+      expect(hostileRatio((s) => known.text(s), input)).toBeLessThan(MAX_HOSTILE_RATIO);
+    },
+  );
 
   it("still masks phone numbers that do not contain the PIN", () => {
     const known = createRedactor();
@@ -357,7 +356,10 @@ describe("bypasses closed after the security review", () => {
     expect(text("q=hello+world&path=%2Fv1%2Fhealth")).toBe("q=hello+world&path=%2Fv1%2Fhealth");
   });
 
-  it("decodes 16 KiB of hostile escapes in under 50 ms", () => {
+  // Was "in under 50 ms", which flaked under parallel load (HL-10, #14). The
+  // guarantee is linear time; a ratio to benign text of the same length keeps
+  // it without depending on how busy the machine is.
+  it("decodes 16 KiB of hostile escapes in linear time, within a fixed ratio of benign text", () => {
     const known = createRedactor(["plainword-secret"]);
     known.addShortSecret("4821");
     for (const input of [
@@ -365,9 +367,7 @@ describe("bypasses closed after the security review", () => {
       "+".repeat(MAX_REDACTED_TEXT),
       "%E0+".repeat(4096),
     ]) {
-      const started = performance.now();
-      known.text(input);
-      expect(performance.now() - started).toBeLessThan(50);
+      expect(hostileRatio((s) => known.text(s), input)).toBeLessThan(MAX_HOSTILE_RATIO);
     }
   });
 

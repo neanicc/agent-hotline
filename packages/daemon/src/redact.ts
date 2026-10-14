@@ -24,12 +24,13 @@ const SECRET_KEY = new RegExp(SECRET_NAME, "i");
  * `name=value`, `name: value` and `"name": "value"` where the name looks secret.
  * The match starts at a name boundary and every repetition is bounded. Quoted
  * values honour backslash escapes, and anything after the closing quote up to the
- * next separator goes too. An opening quote with no closing quote within the
- * bound fails closed: everything to the end of the line is removed.
+ * next separator goes too. An unquoted value runs to the next separator, quotes
+ * inside it included (`token=a'b`, HL-13). An opening quote with no closing quote
+ * within the bound fails closed: everything to the end of the line is removed.
  */
 const SECRET_ASSIGNMENT = new RegExp(
   String.raw`(?<![A-Za-z0-9_.-])(["']?[A-Za-z0-9_.-]{0,64}(?:${SECRET_NAME})[A-Za-z0-9_.-]{0,64}["']?\s{0,8}[:=]\s{0,8})` +
-    String.raw`(\[REDACTED\]|"(?:[^"\\\r\n]|\\.){0,4096}"[^\s,;&}\]]*|'(?:[^'\\\r\n]|\\.){0,4096}'[^\s,;&}\]]*|["'][^\r\n]*|[^\s,;&"'}\]]+)`,
+    String.raw`(\[REDACTED\]|"(?:[^"\\\r\n]|\\.){0,4096}"[^\s,;&}\]]*|'(?:[^'\\\r\n]|\\.){0,4096}'[^\s,;&}\]]*|["'][^\r\n]*|[^\s,;&"'}\]][^\s,;&}\]]*)`,
   "gi",
 );
 
@@ -87,7 +88,9 @@ const KNOWN_TOKENS: readonly RegExp[] = [
   /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, // AWS access key ids
   /\bxox[abprs]-[A-Za-z0-9-]{10,}/g, // Slack tokens
   /\b(?:AC|SK)[0-9a-f]{32}\b/g, // Twilio account and API key SIDs
-  /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/g, // JWTs
+  // JWTs. Not after a token character: with `\b`, every `eyJ` in `eyJ-eyJ-...`
+  // started a scan to the end of the run, which was quadratic (HL-13 fuzzing).
+  /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/g,
 ];
 
 /**
@@ -156,6 +159,20 @@ export interface Redactor {
    * towards removing too much.
    */
   addShortSecret(digits: string): void;
+}
+
+/** `text` without its backslash escapes, so an escaped quote is not taken for a closing one. */
+function withoutEscapes(text: string): string {
+  return text.replace(/\\[\s\S]/g, "");
+}
+
+/** The quote a segment leaves open (an odd number of unescaped `"`, else of `'`), if any. */
+function unclosedQuote(segment: string): string | undefined {
+  const unescaped = withoutEscapes(segment);
+  for (const quote of ['"', "'"]) {
+    if (unescaped.split(quote).length % 2 === 0) return quote;
+  }
+  return undefined;
 }
 
 function escapeRegExp(text: string): string {
@@ -228,12 +245,22 @@ export function createRedactor(knownSecrets: Iterable<string> = []): Redactor {
    */
   const removeEncodedSecrets = (input: string): string => {
     if (!/%[0-9A-Fa-f]{2}|\+/.test(input)) return input;
+    // A removed segment can end inside a quoted value that goes on past the
+    // delimiter (`"token":"+,rest"`): then every segment up to the closing
+    // quote goes too, since the later passes no longer see the name (HL-13).
+    let openQuote: string | undefined;
     return input
       .split(SEGMENT_DELIMITER)
       .map((segment, index) => {
         // Odd indexes are the delimiters the split captured.
-        if (index % 2 === 1 || !/%[0-9A-Fa-f]{2}|\+/.test(segment)) return segment;
-        return looksSecret(formDecode(segment)) ? REDACTED : segment;
+        if (index % 2 === 1) return segment;
+        if (openQuote !== undefined) {
+          if (withoutEscapes(segment).includes(openQuote)) openQuote = undefined;
+          return REDACTED;
+        }
+        if (!/%[0-9A-Fa-f]{2}|\+/.test(segment) || !looksSecret(formDecode(segment))) return segment;
+        openQuote = unclosedQuote(segment);
+        return REDACTED;
       })
       .join("");
   };
