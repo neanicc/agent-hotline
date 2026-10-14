@@ -493,7 +493,10 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
     ambient audio) is not fully the owner's choice; the damage stays small
     because the run cannot write or reach the network, and its answer is
     validated strictly and can only confirm an allow the voice agent
-    already held for the owner, or leave it unconfirmed. `HOTLINE_JUDGE=1` makes
+    already held for the owner, or leave it unconfirmed. So the Codex run is
+    read-only, not tool-less, and `auto` tries Claude Code first. An owner
+    who wants a judge with no tools sets `judge.backend` to `claude-code` or
+    `anthropic-api`. `HOTLINE_JUDGE=1` makes
     `hotline hook` and `hotline mcp` do nothing (exit 0, no output, no daemon
     contact): a second guard, after hooks and MCP servers are switched off for
     the run, so the judge's own session can never phone the owner. Each reply
@@ -518,7 +521,10 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
     the tests pass", "yes... actually no" and "sure, but not on main" are
     never approvals, whatever the model says, and "yeah let's ship that one"
     or "no problem" are when the model agrees. A `declined` ends the request
-    as no answer, as the fast path's clear no does. Tests drive every
+    as no answer, as the fast path's clear no does. The post-check's word
+    lists are English only: a condition in another language ("oui, mais
+    pas sur main") is caught only by the model's own `conditional` flag.
+    Tests drive every
     backend through an injected `JudgeHost` or `fetch` (`FakeJudgeHost`
     plays the CLIs), and the default `nodeJudgeHost` finds and runs nothing
     under the test runner or `HOTLINE_TEST_MODE=1`, so no real CLI or

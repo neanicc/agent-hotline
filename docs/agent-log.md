@@ -2706,3 +2706,20 @@ Template:
     sandbox; phone audio as input) is written down in docs/daemon.md.
   - P3 (AGENTS.md should name the judge's provider): human-owned, not
     edited.
+- Staff review at 03a1254 (84, 0 P0/P1, 2 P2, 3 P3):
+  - P2 (plan says the judge runs with no tools): true for Claude Code only.
+    The plan, README, install.md and daemon.md now say that Codex keeps its
+    shell tool in its read-only, offline sandbox, so it is read-only rather
+    than tool-less, and that `auto` tries Claude Code first. No Codex flag
+    was added: none that turns the shell tool off was checked against the
+    real CLI, and an unverified flag could break the owner's judge.
+  - P2 (owner direction unverified): recorded in the #56 issue body and the
+    #1 status comment of wave 8, both posted by the autopilot. The PR body
+    links them. A human confirms before this lands.
+  - P3 (post-check is English only): stated in daemon.md.
+  - P3 (duplicate post-call delivery judges twice): already handled. The
+    post-call route keeps one in-flight handler per event and conversation,
+    and a retry awaits it.
+  - P3 (Enter is yes on a first run): kept, per the owner's "least
+    friction". The explanation of what is sent prints before the question,
+    and an earlier `off` now defaults to no.

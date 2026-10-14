@@ -173,8 +173,11 @@ diff, user-level or `--project`. Tests run it against temporary home directories
   The daemon uses the first available of the Claude Code CLI on the owner's
   login (`claude -p`, a small model), the Codex CLI on the owner's login
   (`codex exec`), and an optional Anthropic API key. Each CLI run is isolated
-  (empty temporary directory, no hooks, no MCP servers, no tools, nothing
-  saved, and only the CLI's own login variables from the environment). A yes
+  (empty temporary directory, no hooks, no MCP servers, nothing saved, and
+  only the CLI's own login variables from the environment). Claude Code runs
+  with no tools. Codex keeps its shell tool, limited to its read-only sandbox
+  without network, so it is read-only rather than tool-less, and `auto` tries
+  Claude Code first. A yes
   with a condition ("yes if the tests pass") or taken back is never an
   approval; errors and timeouts are "unclear". Nothing is sent until the owner
   chooses the judge: `hotline init` asks once (Enter is yes) or takes

@@ -108,8 +108,10 @@ it uses the first of these it finds, with nothing else to set up:
 
 Only your short spoken reply is sent, redacted, never the request or anything an
 agent wrote. Each run is isolated: an empty temporary folder, hooks off, no MCP
-servers, no tools, no saved session, and `HOTLINE_JUDGE=1`, under which `hotline
-hook` and `hotline mcp` do nothing. The CLI gets only the environment it needs
+servers, no saved session, and `HOTLINE_JUDGE=1`, under which `hotline hook` and
+`hotline mcp` do nothing. Claude Code runs with no tools. Codex keeps its shell
+tool, limited to its read-only sandbox without network; choose `--judge
+claude-code` if you want a judge with no tools. The CLI gets only the environment it needs
 (`PATH`, `HOME`, locale, proxy settings and its own login variables such as
 `CLAUDE_CONFIG_DIR` or `CODEX_HOME`); no `HOTLINE_*` variable or Hotline
 credential reaches it. A yes with a condition ("yes if the tests pass", "sure,
