@@ -261,7 +261,10 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
   get the first response (a result or a PIN verdict, nothing else), and the
   handler does not run again, so a repeated wrong PIN spends no attempt. A
   replay once the call is over gets the refusal, never the remembered
-  response. Only
+  response. The cost: every repeat, an ElevenLabs retry included, makes one
+  ElevenLabs conversation GET, bounded by the 8 in-flight calls per tool. If
+  retries turn out to be common, a short memo of a recent live pull per
+  conversation would cut that. Only
   deliveries that changed state are remembered (`recorded`, `queued`, or a PIN
   attempt); anything else (`pin-required`, `needs-pin`, `not-recorded`,
   `invalid`, `refused`) or a failure is forgotten, so the same call can succeed
