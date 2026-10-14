@@ -123,7 +123,8 @@ describe("agent API routes", () => {
       ["GET", "/v1/asks/id-1/outcome"],
       ["POST", "/v1/asks/id-1/cancel"],
       ["POST", "/v1/sessions/id-1/end"],
-      ["POST", "/v1/sessions/id-1/instructions/take"],
+      ["GET", "/v1/sessions/id-1/instructions"],
+      ["POST", "/v1/sessions/id-1/instructions/ack"],
     ] as const) {
       expect((await api(daemon, method, path, method === "POST" ? {} : undefined, "")).status).toBe(401);
       expect(
@@ -566,7 +567,7 @@ function instruct(store: HotlineStore, sessionId: string, text: string, at = now
 }
 
 describe("owner instructions (HL-10)", () => {
-  it("hand a session's queued instructions over once, oldest first, through the inbox or the take route", async () => {
+  it("list queued instructions without handing them over, and hand over only what is acknowledged, once", async () => {
     const daemon = await start();
     const session = await register(daemon);
     const other = await register(daemon, { cwd: "/work/other" });
@@ -574,19 +575,32 @@ describe("owner instructions (HL-10)", () => {
     now = new Date(START.getTime() + 1000);
     instruct(daemon.store, session.id, "then open a PR");
     instruct(daemon.store, other.id, "rebase on main");
-    const taken = await api(daemon, "POST", `/v1/sessions/${session.id}/instructions/take`, { via: "stop" });
-    expect(taken.json).toEqual({
+    const peek = await api(daemon, "GET", `/v1/sessions/${session.id}/instructions`);
+    const listed = (peek.json as { instructions: { id: string; text: string }[] }).instructions;
+    expect(listed.map((i) => i.text)).toEqual(["run the tests", "then open a PR"]);
+    // A peek changes nothing; an unacknowledged instruction stays queued.
+    expect(daemon.store.listInstructions({ status: "queued" })).toHaveLength(3);
+    const ids = listed.map((i) => i.id);
+    const acked = await api(daemon, "POST", `/v1/sessions/${session.id}/instructions/ack`, {
+      via: "stop",
+      ids,
+    });
+    expect(acked.json).toEqual({
       instructions: [
         { text: "run the tests", receivedAt: START.toISOString() },
         { text: "then open a PR", receivedAt: now.toISOString() },
       ],
     });
-    // Once only, and only this session's.
+    // Once only, and only this session's: another session's id is never acknowledged here.
+    const otherId = daemon.store.listInstructions({ sessionId: other.id })[0]?.id ?? "";
     expect(
-      (await api(daemon, "POST", `/v1/sessions/${session.id}/instructions/take`, { via: "ask" })).json,
-    ).toEqual({
-      instructions: [],
-    });
+      (
+        await api(daemon, "POST", `/v1/sessions/${session.id}/instructions/ack`, {
+          via: "ask",
+          ids: [...ids, otherId],
+        })
+      ).json,
+    ).toEqual({ instructions: [] });
     const inbox = (await api(daemon, "GET", `/v1/sessions/${other.id}/inbox`)).json as InboxResponse;
     expect(inbox.instructions.map((i) => i.text)).toEqual(["rebase on main"]);
     expect(
@@ -602,17 +616,24 @@ describe("owner instructions (HL-10)", () => {
     ).toHaveLength(2);
   });
 
-  it("refuse a malformed take, and an unknown session", async () => {
+  it("refuse a malformed acknowledgement, and an unknown session", async () => {
     const daemon = await start();
     const session = await register(daemon);
-    for (const body of [{}, { via: "inbox" }, { via: "stop", extra: 1 }]) {
-      expect((await api(daemon, "POST", `/v1/sessions/${session.id}/instructions/take`, body)).status).toBe(
+    for (const body of [
+      {},
+      { via: "stop" },
+      { via: "inbox", ids: ["a"] },
+      { via: "stop", ids: [] },
+      { via: "stop", ids: ["a"], extra: 1 },
+    ]) {
+      expect((await api(daemon, "POST", `/v1/sessions/${session.id}/instructions/ack`, body)).status).toBe(
         400,
       );
     }
-    expect((await api(daemon, "POST", "/v1/sessions/nope/instructions/take", { via: "stop" })).status).toBe(
-      404,
-    );
+    expect(
+      (await api(daemon, "POST", "/v1/sessions/nope/instructions/ack", { via: "stop", ids: ["a"] })).status,
+    ).toBe(404);
+    expect((await api(daemon, "GET", "/v1/sessions/nope/instructions")).status).toBe(404);
   });
 
   it("drop a session's queued instructions when it ends", async () => {
@@ -625,9 +646,7 @@ describe("owner instructions (HL-10)", () => {
       dropReason: "session-ended",
     });
     // An ended session is unknown to its readers, so their client registers again.
-    expect(
-      (await api(daemon, "POST", `/v1/sessions/${session.id}/instructions/take`, { via: "stop" })).status,
-    ).toBe(404);
+    expect((await api(daemon, "GET", `/v1/sessions/${session.id}/instructions`)).status).toBe(404);
     expect((await api(daemon, "GET", `/v1/sessions/${session.id}/inbox`)).status).toBe(404);
   });
 
@@ -637,8 +656,16 @@ describe("owner instructions (HL-10)", () => {
     instruct(daemon.store, session.id, "run the tests");
     now = new Date(START.getTime() + 6 * 60 * 60 * 1000 + 1000);
     instruct(daemon.store, session.id, "then open a PR");
-    const taken = await api(daemon, "POST", `/v1/sessions/${session.id}/instructions/take`, { via: "stop" });
-    expect((taken.json as { instructions: { text: string }[] }).instructions.map((i) => i.text)).toEqual([
+    const peek = await api(daemon, "GET", `/v1/sessions/${session.id}/instructions`);
+    const listed = (peek.json as { instructions: { id: string; text: string }[] }).instructions;
+    expect(listed.map((i) => i.text)).toEqual(["then open a PR"]);
+    // An expired id is never acknowledged, even if a reader still holds it.
+    const stale = daemon.store.listInstructions()[0]?.id ?? "";
+    const acked = await api(daemon, "POST", `/v1/sessions/${session.id}/instructions/ack`, {
+      via: "stop",
+      ids: [stale, ...listed.map((i) => i.id)],
+    });
+    expect((acked.json as { instructions: { text: string }[] }).instructions.map((i) => i.text)).toEqual([
       "then open a PR",
     ]);
     expect(daemon.store.listInstructions().map((i) => [i.text, i.status, i.dropReason])).toEqual([
@@ -706,6 +733,30 @@ describe("session lifetime (HL-10)", () => {
     expect((await api(daemon, "POST", "/v1/sessions", { agent: "codex", cwd: "/work/room" })).status).toBe(
       201,
     );
+  });
+});
+
+describe("session cap eviction (HL-10)", () => {
+  it("at the cap, ends the longest-idle session with nothing open instead of refusing", async () => {
+    const daemon = await start();
+    const oldest = await register(daemon, { cwd: "/work/killed" });
+    now = new Date(START.getTime() + 1000);
+    const asking = await register(daemon, { cwd: "/work/asking" });
+    await ask(daemon, asking.id, { kind: "question", text: "Color?" });
+    for (let i = 2; i < MAX_LIVE_SESSIONS; i++) await register(daemon, { cwd: `/work/s${i}` });
+    // Not idle long enough yet: refused.
+    now = new Date(START.getTime() + 10 * 60_000);
+    expect((await api(daemon, "POST", "/v1/sessions", { agent: "codex", cwd: "/work/new" })).status).toBe(
+      429,
+    );
+    // Fifteen minutes on, the longest-idle session without an open ask makes room.
+    now = new Date(START.getTime() + 16 * 60_000);
+    expect((await api(daemon, "POST", "/v1/sessions", { agent: "codex", cwd: "/work/new" })).status).toBe(
+      201,
+    );
+    expect(daemon.store.getSession(oldest.id)?.state).toBe("ended");
+    expect(daemon.store.getSession(asking.id)?.state).not.toBe("ended");
+    expect(daemon.store.listAudit({ sessionId: oldest.id }).map((e) => e.event)).toContain("session.evicted");
   });
 });
 

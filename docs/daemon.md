@@ -45,13 +45,14 @@ adapters in [hooks.md](hooks.md) are the clients):
 | Route | Does |
 | --- | --- |
 | `GET /v1/health` | `{"ok": true, "version": "..."}` |
-| `POST /v1/sessions` | Registers `{agent, cwd, agentSessionId?}` and returns `{session}` (201). A live session with the same agent and `agentSessionId` is reused (200). A new one first ends stale sessions ([session lifetime](#session-lifetime)); past 20 live sessions it gets `429` (audited as `session.refused`) |
+| `POST /v1/sessions` | Registers `{agent, cwd, agentSessionId?}` and returns `{session}` (201). A live session with the same agent and `agentSessionId` is reused (200). A new one first ends stale sessions ([session lifetime](#session-lifetime)); at 20 live sessions it ends one idle for 15 minutes with nothing open, or gets `429` (audited as `session.refused`) |
 | `POST /v1/sessions/:sessionId/asks` | Queues `{kind, text, options?, toolName?, risk?, urgent?}` and returns `{ask}` (201). `kind` is `question`, `notify`, `permission` or `stop`. Only questions carry `options`; `permission` requires `toolName` (identifier characters, up to 100) and `risk` (`low` or `high`), and no other kind may send them. Text, options and the tool name are redacted before they are stored. The ask expires after `policy.askTimeoutMinutes`. Open-ask caps per session / across all sessions: questions 3 / 10, notifications 10 / 30, permission requests 3 / 10, stops 1 / 10; past them `429` (audited as `ask.refused`). A new `stop` cancels the session's older open `stop` first. `urgent` is the agent's request only; call policy decides |
 | `GET /v1/asks/:askId/outcome?waitSeconds=0..30` | `{state: "waiting", ask}` or `{state: "final", ask, outcome}`, waiting up to `waitSeconds` for a change |
 | `POST /v1/asks/:askId/cancel` | Cancels an ask that is still open: `{cancelled}` |
 | `POST /v1/sessions/:sessionId/end` | Marks the session `ended`, cancels its open asks and drops its queued instructions: `{ended}`. An ended session takes no new asks, and its inbox and instruction routes answer `404` too, so its client registers again |
 | `GET /v1/sessions/:sessionId/inbox` | `{session, instructions, asks}`: the owner's queued instructions for this session ([inbound line](#inbound-line)), handed over once, and the 20 newest asks with their outcomes |
-| `POST /v1/sessions/:sessionId/instructions/take` | `{via: "ask" \| "stop"}` hands over the session's queued instructions, oldest first, once: `{instructions: [{text, receivedAt}]}`. The MCP server calls it after `ask_human`, the Stop hook before and after its stop |
+| `GET /v1/sessions/:sessionId/instructions` | Lists the session's queued instructions, oldest first, without handing them over: `{instructions: [{id, text, receivedAt}]}` |
+| `POST /v1/sessions/:sessionId/instructions/ack` | `{via: "ask" \| "stop", ids}` marks those of `ids` still queued (and within their 6 hours) delivered and returns them: `{instructions: [{text, receivedAt}]}`. A reader acknowledges only what it is about to pass on: the MCP server just before it returns `ask_human`, the Stop hook once away mode and its count are settled |
 
 Bodies are strict: an unknown field, a relative `cwd`, more than 9 options,
 options on anything but a question, or a `toolName` or `risk` that is missing
@@ -546,7 +547,7 @@ anyone else's text the generic SMS reply.
   guards. A stop already waiting on the owner is cancelled when an instruction
   for its session is queued (`ask.cancelled` by `instruction`), and the hook
   then picks the instruction up. A permission request never carries one.
-  An ended session's inbox and take routes answer `404`, so its client
+  An ended session's inbox and instruction routes answer `404`, so its client
   registers again (`check_inbox` retries once at once).
   Instructions are dropped when their session ends and after 6 hours unread,
   checked again at every hand-over
@@ -574,10 +575,13 @@ older than 6 hours, then ends every live session nobody has heard from
 (`lastSeenAt`: registration, asks, inbox reads, instruction pickups) for 6
 hours that has no open ask and no queued instruction (`session.expired`). Ending
 a session cancels its open asks and drops its queued instructions, whoever ends
-it. At most 20 sessions are live at once: a new registration past that gets
-`429`, so a looping agent cannot flood the status, while an existing session
-can always refresh. A client whose session was ended registers again on its
-next call.
+it. At most 20 sessions are live at once. At the cap, a new registration ends
+the longest-idle live session that has no open ask and no queued instruction
+and has been idle for 15 minutes (`session.evicted`), so killed agents cannot
+lock registrations out for hours; when there is none it gets `429`
+(`session.refused`), so a looping agent cannot flood the status or evict
+sessions in use. An existing session can always refresh. A client whose
+session was ended registers again on its next call.
 
 ## Store
 
@@ -595,8 +599,10 @@ replayed at any time: finished SIDs are kept for 400 days and unfinished ones
 until they finish. Rows are tiny. Migration 4 (HL-10) adds `instructions`:
 the owner's confirmed instructions with their session, status (`queued`,
 `delivered`, `dropped`), how they were delivered or why they were dropped, and
-the record (text, excerpt, conversation id) as JSON. `takeInstructions` hands a
-session's queued ones over and marks them delivered in one transaction.
+the record (text, excerpt, conversation id) as JSON. `peekInstructions` lists a
+session's queued ones (dropping expired ones in the same transaction), and
+`ackInstructions` marks the given ids delivered in one transaction.
+`addInstruction` is idempotent by id.
 `onAskAdded` tells listeners about each new ask, as `onAskChange` does about
 status changes.
 

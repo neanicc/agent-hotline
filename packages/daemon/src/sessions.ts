@@ -11,6 +11,28 @@ import type { HotlineStore } from "./store.js";
 export const SESSION_IDLE_MS = 6 * 60 * 60 * 1000;
 /** Live sessions at once. A new one past this gets 429; an existing one can always refresh. */
 export const MAX_LIVE_SESSIONS = 20;
+/**
+ * At the cap, a session idle this long with nothing open makes room for a new
+ * one (a killed agent's, say), so restarts cannot lock registrations out for
+ * hours; a looping agent cannot evict sessions that are in use.
+ */
+export const EVICT_IDLE_MS = 15 * 60 * 1000;
+
+/**
+ * Ends the longest-idle live session that has no open ask and no queued
+ * instruction, if it has been idle for `EVICT_IDLE_MS`. Returns whether one was ended.
+ */
+export function evictIdleSession(store: HotlineStore, now: Date): boolean {
+  const busy = new Set([
+    ...store.listAsks(OPEN_STATUSES).map((ask) => ask.sessionId),
+    ...store.listInstructions({ status: "queued" }).map((instruction) => instruction.sessionId),
+  ]);
+  const idlest = liveSessions(store)
+    .filter((session) => !busy.has(session.id))
+    .filter((session) => now.getTime() - Date.parse(session.lastSeenAt) >= EVICT_IDLE_MS)
+    .sort((a, b) => a.lastSeenAt.localeCompare(b.lastSeenAt))[0];
+  return idlest !== undefined && endSession(store, idlest.id, now, "evicted");
+}
 /** A queued instruction no session picked up within this long is dropped. */
 export const INSTRUCTION_TTL_MS = 6 * 60 * 60 * 1000;
 
@@ -29,7 +51,12 @@ export function liveSessions(store: HotlineStore): Session[] {
  * that left) and drops its queued instructions. `by` says who ended it, for the
  * audit log. Returns false when it is unknown or already ended.
  */
-export function endSession(store: HotlineStore, sessionId: string, now: Date, by: "agent" | "idle"): boolean {
+export function endSession(
+  store: HotlineStore,
+  sessionId: string,
+  now: Date,
+  by: "agent" | "idle" | "evicted",
+): boolean {
   const session = store.getSession(sessionId);
   if (session === undefined || session.state === "ended") return false;
   for (const ask of store.listAsks(OPEN_STATUSES).filter((open) => open.sessionId === sessionId)) {
@@ -47,7 +74,7 @@ export function endSession(store: HotlineStore, sessionId: string, now: Date, by
     lastSeenAt: now.toISOString(),
   });
   store.appendAudit(
-    by === "agent" ? "session.ended" : "session.expired",
+    by === "agent" ? "session.ended" : by === "idle" ? "session.expired" : "session.evicted",
     dropped.length > 0 ? { instructionsDropped: dropped.length } : {},
     now,
     { sessionId },

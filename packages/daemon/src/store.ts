@@ -642,30 +642,58 @@ export class HotlineStore {
   }
 
   /**
-   * Hands over a session's queued instructions, oldest first, and marks them
-   * delivered in the same transaction, so each is delivered once.
+   * A session's queued instructions, oldest first, without handing them over.
+   * Those received before `expireBefore` are dropped as `expired` in the same
+   * transaction and never returned.
    */
-  takeInstructions(
+  peekInstructions(
     sessionId: string,
-    via: InstructionDelivery,
     at: Date,
-    /** Instructions received before this are dropped as `expired` in the same transaction, never delivered. */
-    expireBefore?: Date,
-  ): { taken: Instruction[]; expired: Instruction[] } {
+    expireBefore: Date,
+  ): { queued: Instruction[]; expired: Instruction[] } {
     return this.transaction(() => {
-      const taken: Instruction[] = [];
+      const queued: Instruction[] = [];
       const expired: Instruction[] = [];
       for (const instruction of this.listInstructions({ sessionId, status: "queued" })) {
-        const stale =
-          expireBefore !== undefined && Date.parse(instruction.receivedAt) < expireBefore.getTime();
-        this.writeInstruction(
-          stale
-            ? { ...instruction, status: "dropped", dropReason: "expired", closedAt: at.toISOString() }
-            : { ...instruction, status: "delivered", deliveredVia: via, closedAt: at.toISOString() },
-        );
-        (stale ? expired : taken).push(instruction);
+        if (Date.parse(instruction.receivedAt) < expireBefore.getTime()) {
+          this.writeInstruction({
+            ...instruction,
+            status: "dropped",
+            dropReason: "expired",
+            closedAt: at.toISOString(),
+          });
+          expired.push(instruction);
+        } else {
+          queued.push(instruction);
+        }
       }
-      return { taken, expired };
+      return { queued, expired };
+    });
+  }
+
+  /**
+   * Marks the session's instructions `ids` delivered, those still queued only,
+   * in one transaction, and returns them oldest first. A reader acknowledges
+   * only what it is about to pass on, so nothing is marked delivered and lost.
+   */
+  ackInstructions(
+    sessionId: string,
+    ids: readonly string[],
+    via: InstructionDelivery,
+    at: Date,
+  ): Instruction[] {
+    const wanted = new Set(ids);
+    return this.transaction(() => {
+      const acked = this.listInstructions({ sessionId, status: "queued" }).filter((i) => wanted.has(i.id));
+      for (const instruction of acked) {
+        this.writeInstruction({
+          ...instruction,
+          status: "delivered",
+          deliveredVia: via,
+          closedAt: at.toISOString(),
+        });
+      }
+      return acked;
     });
   }
 

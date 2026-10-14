@@ -29,6 +29,7 @@ import {
   type HotlineDaemon,
   type HotlineMcpOptions,
   type Inbox,
+  type ListedInstruction,
   type OutcomeState,
   type OwnerInstruction,
 } from "../src/index.js";
@@ -443,7 +444,7 @@ describe("hotline MCP server", () => {
   });
 
   it("still returns the answer when the instructions cannot be fetched", async () => {
-    // ScriptedDaemon's takeInstructions always fails.
+    // ScriptedDaemon's instruction calls always fail.
     const scripted = new ScriptedDaemon((ask) => answered(ask.id, { type: "text", text: "ship it" }));
     const { mcp } = await connect(scripted);
     const result = resultJson(await mcp.callTool({ name: "ask_human", arguments: { question: "Go?" } }));
@@ -526,7 +527,11 @@ class ScriptedDaemon implements HotlineDaemon {
     throw new DaemonError("unreachable", "down");
   }
 
-  async takeInstructions(): Promise<OwnerInstruction[]> {
+  async peekInstructions(): Promise<ListedInstruction[]> {
+    throw new DaemonError("unreachable", "down");
+  }
+
+  async ackInstructions(): Promise<OwnerInstruction[]> {
     throw new DaemonError("unreachable", "down");
   }
 

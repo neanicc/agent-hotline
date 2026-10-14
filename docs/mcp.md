@@ -18,8 +18,9 @@ status and leave one session an instruction ([inbound line](daemon.md#inbound-li
 Only instructions the daemon confirmed against the owner's own words in the
 call transcript are queued. A session picks its instructions up at its next
 ask: when `ask_human` returns (any outcome from the daemon, or its own
-timeout), the server takes them (`POST /v1/sessions/:id/instructions/take`,
-`via: "ask"`) and adds them to the result as
+timeout), the server lists them (`GET /v1/sessions/:id/instructions`),
+acknowledges them just before it returns (`POST .../instructions/ack`,
+`via: "ask"`) and adds the acknowledged ones to the result as
 `instructions: [{"text", "receivedAt"}]` with a note that they are not the
 answer to the question. `check_inbox` hands them over too. Each instruction is
 handed over once; if fetching them fails, the answer is still returned and the

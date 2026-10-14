@@ -353,6 +353,7 @@ function fakeDaemon(script: FakeScript): HotlineDaemon & { calls: string[]; asks
   const calls: string[] = [];
   const asks: CreateAskRequest[] = [];
   let created: Ask | undefined;
+  let listed: (OwnerInstruction & { id: string })[] = [];
   return {
     calls,
     asks,
@@ -387,9 +388,16 @@ function fakeDaemon(script: FakeScript): HotlineDaemon & { calls: string[]; asks
     async inbox() {
       throw new Error("unused");
     },
-    async takeInstructions(_sessionId, via) {
-      calls.push(`take:${via}`);
-      return script.take ? script.take() : [];
+    // `take` plays what is queued: listed by a peek, handed over by an ack.
+    async peekInstructions() {
+      calls.push("peek");
+      const queued = script.take ? await script.take() : [];
+      listed = queued.map((instruction, i) => ({ ...instruction, id: `instruction-${i + 1}` }));
+      return listed;
+    },
+    async ackInstructions(_sessionId, ids, via) {
+      calls.push(`ack:${via}`);
+      return listed.filter((instruction) => ids.includes(instruction.id));
     },
     async endSession() {
       return true;
@@ -661,7 +669,7 @@ describe("Stop hook loop guards", () => {
       decision: "block",
       reason: "run the tests\nthen open a PR",
     });
-    expect(daemon.calls).toEqual(["register", "take:stop"]);
+    expect(daemon.calls).toEqual(["register", "peek", "ack:stop"]);
     expect(daemon.asks).toEqual([]);
     expect(state.counts.get(SESSION)).toBe(1);
   });
@@ -680,7 +688,8 @@ describe("Stop hook loop guards", () => {
       decision: "block",
       reason: "now write the docs",
     });
-    expect(daemon.calls.filter((call) => call.startsWith("take"))).toHaveLength(2);
+    expect(daemon.calls.filter((call) => call === "peek")).toHaveLength(2);
+    expect(daemon.calls.at(-1)).toBe("ack:stop");
   });
 
   it("does not hand over instructions past the continuation cap, or after the owner said that's it", async () => {
@@ -688,14 +697,15 @@ describe("Stop hook loop guards", () => {
     state.counts.set(SESSION, 3);
     const capped = fakeDaemon({ take: async () => left("keep going") });
     expect((await run(capped, state, true)).stdout).toBeUndefined();
-    expect(capped.calls).not.toContain("take:stop");
+    expect(capped.calls).not.toContain("ack:stop");
     let takes = 0;
     const done = fakeDaemon({
       take: async () => (takes++ === 0 ? [] : left("keep going")),
       outcome: async (ask) => answered(ask, { type: "done" }),
     });
     expect((await run(done, new MemoryState(), false)).stdout).toBeUndefined();
-    expect(done.calls.filter((call) => call === "take:stop")).toHaveLength(1);
+    expect(done.calls.filter((call) => call === "peek")).toHaveLength(1);
+    expect(done.calls).not.toContain("ack:stop");
   });
 
   it("never takes an instruction it could not pass on: away mode off or the count unsaved", async () => {
@@ -712,7 +722,7 @@ describe("Stop hook loop guards", () => {
       }),
     });
     expect((await run(offDaemon, flips, false)).stdout).toBeUndefined();
-    expect(offDaemon.calls).not.toContain("take:stop");
+    expect(offDaemon.calls).not.toContain("ack:stop");
     // The continuation count cannot be saved.
     class Unsaved extends MemoryState {
       override async setContinuations(id: string, count: number) {
@@ -729,7 +739,7 @@ describe("Stop hook loop guards", () => {
       }),
     });
     expect((await run(unsavedDaemon, new Unsaved(), false)).stdout).toBeUndefined();
-    expect(unsavedDaemon.calls).not.toContain("take:stop");
+    expect(unsavedDaemon.calls).not.toContain("ack:stop");
   });
 
   it("does not register a throwaway session to look for instructions without the agent's session id", async () => {
@@ -745,7 +755,19 @@ describe("Stop hook loop guards", () => {
     );
     expect(parse(result.stdout)).toEqual({ decision: "block", reason: "keep going" });
     expect(daemon.calls.filter((call) => call === "register")).toHaveLength(1);
-    expect(daemon.calls).not.toContain("take:stop");
+    expect(daemon.calls).not.toContain("peek");
+  });
+
+  it("acknowledges nothing when the hand-over fails, so the instruction stays queued", async () => {
+    const daemon = fakeDaemon({ take: async () => left("run the tests") });
+    daemon.ackInstructions = async () => {
+      throw new DaemonError("unreachable", "gone");
+    };
+    const state = new MemoryState();
+    const result = await run(daemon, state, false);
+    expect(result.stdout).toBeUndefined();
+    expect(result.note).toContain("could not be picked up");
+    expect(state.counts.get(SESSION)).toBe(0);
   });
 
   it("asks the owner as usual when the instructions cannot be fetched", async () => {

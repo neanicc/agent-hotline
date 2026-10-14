@@ -1995,6 +1995,23 @@ Template:
   MCP server's `check_inbox` is its only reader on this Mac), the status text
   carries the latest ask's redacted text to the owner's number, and the
   lockout catch stays a commented no-op.
+- Review fixes, fifth round (bot staff review of 544dee0, two P2s): hand-over
+  is two steps, `GET /v1/sessions/:id/instructions` (list, with ids) and
+  `POST .../instructions/ack` (mark those ids delivered), replacing the
+  one-step take route. The Stop hook acknowledges only after away mode and its
+  continuation count are settled, and the MCP server just before it returns,
+  so an instruction is never marked delivered and then lost; the inbox, whose
+  response carries them, still acknowledges at once. At the 20-session cap a
+  new registration ends the longest-idle session that has nothing open and
+  has been idle 15 minutes (`session.evicted`) instead of refusing, so
+  restarted agents without a session id cannot lock registrations out for 6
+  hours, while a looping agent cannot evict sessions in use. P3s left as
+  notes: a second `get_status` on one call renumbers sessions (the read-back
+  names the number and session, and the owner confirms it); queuing an
+  instruction cancels the session's open stop even while it is on a live
+  call, by decision, since the instruction replaces the owner's answer to it;
+  the English lexicon follow-up to HL-09c's reply judge stays open.
+  Evidence: build passes, test passed 57 files, 1496 tests.
 - Decision: sessions are named by number. `get_status` numbers live sessions
   by registration and remembers, per call, which number is which session;
   `send_instruction` takes only a number that call's status read out

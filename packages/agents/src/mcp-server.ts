@@ -231,7 +231,19 @@ export function createHotlineMcpServer(options: HotlineMcpOptions): HotlineMcpSe
    * failure to fetch them leaves them queued for the next ask or inbox read.
    */
   const withInstructions = async (sessionId: string, result: AskHumanResult): Promise<CallToolResult> => {
-    const instructions = await daemon.takeInstructions(sessionId, "ask").catch(() => []);
+    // Acknowledged just before the result is returned, so they reach the agent with it.
+    const instructions = await daemon
+      .peekInstructions(sessionId)
+      .then((listed) =>
+        listed.length === 0
+          ? []
+          : daemon.ackInstructions(
+              sessionId,
+              listed.map((instruction) => instruction.id),
+              "ask",
+            ),
+      )
+      .catch(() => []);
     return json(
       instructions.length === 0 ? result : { ...result, instructions, instructionsNote: INSTRUCTIONS_NOTE },
     );
