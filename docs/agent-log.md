@@ -2020,7 +2020,21 @@ Template:
   name, never once they gave a number and never a word of the instruction,
   so an agent folder named like a command cannot split the owner's words.
   `sessions.ts` declarations are back in order. Evidence: build passes, test
-  passed 57 files, 1498 tests, three times in a row.
+  passed 57 files, 1498 tests, four of six full runs; the other two each
+  failed one timing test this PR does not touch (`redact.test.ts`, "decodes
+  16 KiB of hostile escapes in under 50 ms", 74 and 150 ms under a load
+  average near 6), which passed five runs alone. Its limit is unchanged.
+  The commit subject of 07d7290 runs past 72 characters; it is pushed, so it
+  stays (no history rewrite).
+- Review fixes, seventh round (bot staff review of 07d7290, two P2s): the MCP
+  server no longer acknowledges instructions once the client gave up on
+  `ask_human` (they stay queued), with a test that fails without the guard;
+  delivery is documented as at most once in docs/mcp.md and docs/hooks.md;
+  and a corpus test pins the over-blocking and refused cases of
+  `confirmInstruction`, so a later edit cannot loosen them unnoticed.
+  Splitting `instruction-confirm.ts` (tokeniser and span, session
+  reference, retraction) is a proposed follow-up. Evidence: build passes,
+  test passed 57 files, 1511 tests, three times in a row.
 - Decision: sessions are named by number. `get_status` numbers live sessions
   by registration and remembers, per call, which number is which session;
   `send_instruction` takes only a number that call's status read out

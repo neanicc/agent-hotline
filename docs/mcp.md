@@ -24,7 +24,11 @@ acknowledges them just before it returns (`POST .../instructions/ack`,
 `instructions: [{"text", "receivedAt"}]` with a note that they are not the
 answer to the question. `check_inbox` hands them over too. Each instruction is
 handed over once; if fetching them fails, the answer is still returned and the
-instructions stay queued. A cancelled `ask_human` takes none.
+instructions stay queued. A cancelled `ask_human`, or one whose client gave up
+before the instructions were acknowledged, takes none. Delivery is at most
+once: if the client goes away in the moment between the acknowledgement and
+the result reaching the agent, that instruction is lost (not delivered twice),
+and the audit log still says `instruction.delivered`.
 
 ## Rules it keeps
 

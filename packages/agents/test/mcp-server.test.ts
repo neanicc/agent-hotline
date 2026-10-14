@@ -443,6 +443,32 @@ describe("hotline MCP server", () => {
     expect(inbox.instructions).toEqual([]);
   });
 
+  it("acknowledges no instruction once the client gave up on ask_human, so it stays queued", async () => {
+    const giveUp = new AbortController();
+    const acked: string[][] = [];
+    class Abandoned extends ScriptedDaemon {
+      override async peekInstructions(): Promise<ListedInstruction[]> {
+        // The client cancels the call just as the instructions are listed.
+        giveUp.abort();
+        return [{ id: "instruction-1", text: "run the tests", receivedAt: START.toISOString() }];
+      }
+      override async ackInstructions(
+        _sessionId: string,
+        ids: readonly string[],
+      ): Promise<OwnerInstruction[]> {
+        acked.push([...ids]);
+        return [];
+      }
+    }
+    const scripted = new Abandoned((ask) => answered(ask.id, { type: "text", text: "ship it" }));
+    const { mcp } = await connect(scripted);
+    await mcp
+      .callTool({ name: "ask_human", arguments: { question: "Go?" } }, undefined, { signal: giveUp.signal })
+      .catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(acked).toEqual([]);
+  });
+
   it("still returns the answer when the instructions cannot be fetched", async () => {
     // ScriptedDaemon's instruction calls always fail.
     const scripted = new ScriptedDaemon((ask) => answered(ask.id, { type: "text", text: "ship it" }));
@@ -531,7 +557,7 @@ class ScriptedDaemon implements HotlineDaemon {
     throw new DaemonError("unreachable", "down");
   }
 
-  async ackInstructions(): Promise<OwnerInstruction[]> {
+  async ackInstructions(_sessionId: string, _ids: readonly string[]): Promise<OwnerInstruction[]> {
     throw new DaemonError("unreachable", "down");
   }
 

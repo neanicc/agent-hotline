@@ -340,6 +340,36 @@ describe("confirmInstruction", () => {
   });
 });
 
+// Pinned on purpose: the cases docs/daemon.md says over-block (an honest
+// instruction is dropped and the owner is texted), and the ones that must
+// stay refused. A change that loosens any of these must change this table.
+describe("confirmInstruction corpus", () => {
+  const said = "Session one, run the tests.";
+  it.each([
+    // [what the owner said, reply to the read-back, the owner's later turn, model instruction, confirmed?]
+    [said, "Yes.", undefined, "run the tests", true],
+    [said, "Yes.", "No, that's all.", "run the tests", false],
+    [said, "Yes.", "Nope, bye.", "run the tests", false],
+    [said, "Yes.", "Wait.", "run the tests", false],
+    [said, "Sounds good, thanks.", undefined, "run the tests", false],
+    [said, "Yes, but later.", undefined, "run the tests", false],
+    ["Session one, then run the tests.", "Yes.", undefined, "run the tests", false],
+    ["Session one, run the tests please.", "Yes.", undefined, "run the tests", true],
+    ["Session one, run the tests after lunch.", "Yes.", undefined, "run the tests", false],
+    ["Session one, don't run the tests.", "Yes.", undefined, "run the tests", false],
+    ["Session one, maybe run the tests.", "Yes.", undefined, "run the tests", false],
+    ["Run the tests.", "Yes.", undefined, "run the tests", false],
+  ] as const)("%j, reply %j, later %j, model %j: %s", (owner_, reply, later, instruction, expected) => {
+    const turns = call(
+      owner_,
+      "For session 1, Claude in demo-app: run the tests. Send it?",
+      reply,
+      ...(later === undefined ? [] : [owner(later)]),
+    );
+    expect(confirmInstruction(turns, held({ instruction, ownerWords: owner_ })).confirmed).toBe(expected);
+  });
+});
+
 describe("sessionsNamed", () => {
   const named = (text: string, listed = LISTED) => [...sessionsNamed(speechTokens(text), listed)].sort();
   it("reads numbers, ordinals, digits and unique names, and marks a tie as ambiguous", () => {

@@ -230,12 +230,18 @@ export function createHotlineMcpServer(options: HotlineMcpOptions): HotlineMcpSe
    * session when there are any: the next ask is where they are delivered. A
    * failure to fetch them leaves them queued for the next ask or inbox read.
    */
-  const withInstructions = async (sessionId: string, result: AskHumanResult): Promise<CallToolResult> => {
-    // Acknowledged just before the result is returned, so they reach the agent with it.
+  const withInstructions = async (
+    sessionId: string,
+    result: AskHumanResult,
+    signal: AbortSignal,
+  ): Promise<CallToolResult> => {
+    // Acknowledged just before the result is returned, so they reach the agent
+    // with it; not at all once the client gave up on the call, so they stay
+    // queued for the next ask, inbox read or Stop hook.
     const instructions = await daemon
       .peekInstructions(sessionId)
       .then((listed) =>
-        listed.length === 0
+        listed.length === 0 || signal.aborted
           ? []
           : daemon.ackInstructions(
               sessionId,
@@ -349,13 +355,13 @@ export function createHotlineMcpServer(options: HotlineMcpOptions): HotlineMcpSe
             if (extra.signal.aborted) break;
             if (clock().getTime() >= deadline) {
               await daemon.cancelAsk(ask.id).catch(() => false);
-              return withInstructions(ask.sessionId, noAnswer("timeout", ask.id));
+              return withInstructions(ask.sessionId, noAnswer("timeout", ask.id), extra.signal);
             }
             try {
               const state = await daemon.outcome(ask.id, pollSeconds, extra.signal);
               failures = 0;
               if (state.state === "final")
-                return withInstructions(ask.sessionId, askHumanResult(ask, state.outcome));
+                return withInstructions(ask.sessionId, askHumanResult(ask, state.outcome), extra.signal);
             } catch (error) {
               if (extra.signal.aborted || (error instanceof DaemonError && error.kind === "aborted")) break;
               const delay = retryDelaysMs[failures];

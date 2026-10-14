@@ -292,7 +292,9 @@ stop and the hook, seeing no answer, lists and acknowledges it the same way.
 The daemon confirmed each one against the owner's own words in the call
 transcript; the hook only relays it. The same loop guards and continuation
 count apply, and a failure to list them asks the owner as before. After the
-owner's `done` the hook takes none.
+owner's `done` the hook takes none. Delivery is at most once: a hook killed
+between the acknowledgement and printing its output loses that instruction
+rather than delivering it twice.
 
 Loop guards, always on:
 
