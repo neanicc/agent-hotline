@@ -618,7 +618,10 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
   "yes" can never approve a newer request. Only a salted scrypt hash of each
   code is stored with the state (`code-hash.ts`, HL-13a: a fresh 16-byte salt
   per code, N = 2^14), and a reply's code is compared with each waiting hash in
-  constant time, so the code cannot be read back from the database. Codes die
+  constant time, so the code cannot be read back from the database. Hashing
+  and comparing run on libuv's thread pool (async `scrypt`), so a text with
+  several waiting codes does not stall webhooks or agent polls; only migrating
+  plaintext codes on start hashes synchronously. Codes die
   with the ask and are spent on first use; a code that matches no waiting ask
   burns every waiting code, so those requests can then only be approved on a
   call. A text sent again (after a crash part way through a send) carries a

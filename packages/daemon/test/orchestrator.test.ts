@@ -18,7 +18,9 @@ import {
   codeMatches,
   type HotlineStore,
   hashCode,
+  hashCodeAtStart,
   isCodeHash,
+  matchingHashes,
   ORCHESTRATOR_STATE_KEY,
   openStore,
   RATE_STATE_KEY,
@@ -255,6 +257,10 @@ describe("owner texts", () => {
     const crashing = await orchestrator({ sms: hanging });
     clock.now = new Date(clock.now.getTime() + 20_000);
     void crashing.ownerText({ messageSid: sid(7), body: "yes 100001", receivedAt: clock.now });
+    // The code is checked off the event loop: wait for the answer, then for B's send to hang.
+    for (let waited = 0; store.getAnswer(a.id) === undefined && waited < 5_000; waited += 10) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(store.getAnswer(a.id)?.decision).toEqual({ type: "allow" });
     await crashing.stop();
@@ -356,7 +362,7 @@ describe("confirmation codes at rest (HL-13a)", () => {
     expect(sms.sent[0]?.text).toContain("Reply YES 482913");
     const state = store.getState(ORCHESTRATOR_STATE_KEY) as { codes: Record<string, string> };
     expect(state.codes[ask.id]).toMatch(/^scrypt1\$[\w-]{22}\$[\w-]{43}$/);
-    expect(codeMatches("482913", state.codes[ask.id] ?? "")).toBe(true);
+    expect(await codeMatches("482913", state.codes[ask.id] ?? "")).toBe(true);
     expect(JSON.stringify(state)).not.toContain("482913");
     for (const file of ["hotline.db", "hotline.db-wal", "hotline.db-journal"]) {
       const bytes = await readFile(join(dir, file)).catch(() => Buffer.alloc(0));
@@ -392,15 +398,37 @@ describe("confirmation codes at rest (HL-13a)", () => {
 });
 
 describe("hashCode and codeMatches", () => {
-  it("salts each hash and matches only the code it was made from, failing closed on a bad hash", () => {
-    const a = hashCode("482913");
-    const b = hashCode("482913");
-    expect(a).not.toBe(b);
-    expect([codeMatches("482913", a), codeMatches("482913", b)]).toEqual([true, true]);
-    expect(codeMatches("482914", a)).toBe(false);
-    expect(codeMatches("48291", a)).toBe(false);
-    expect(codeMatches("482913", "482913")).toBe(false);
-    expect(codeMatches("482913", `${a}x`)).toBe(false);
-    expect([isCodeHash(a), isCodeHash("482913")]).toEqual([true, false]);
+  it("salts each hash and matches only the code it was made from, failing closed on a bad hash", async () => {
+    const a = await hashCode("482913");
+    const b = await hashCode("482913");
+    const c = hashCodeAtStart("482913");
+    expect(new Set([a, b, c]).size).toBe(3);
+    expect(await Promise.all([a, b, c].map((hash) => codeMatches("482913", hash)))).toEqual([
+      true,
+      true,
+      true,
+    ]);
+    expect(await codeMatches("482914", a)).toBe(false);
+    expect(await codeMatches("48291", a)).toBe(false);
+    expect(await codeMatches("482913", "482913")).toBe(false);
+    expect(await codeMatches("482913", `${a}x`)).toBe(false);
+    expect([isCodeHash(a), isCodeHash(c), isCodeHash("482913")]).toEqual([true, true, false]);
+    const other = await hashCode("111111");
+    expect(await matchingHashes("482913", [a, other, a, "482913"])).toEqual(new Set([a]));
+  });
+
+  it("hashes and compares off the event loop, so the daemon keeps serving meanwhile", async () => {
+    const hashes = await Promise.all(["1", "2", "3", "4"].map((n) => hashCode(`48291${n}`)));
+    let ticks = 0;
+    const timer = setInterval(() => {
+      ticks += 1;
+    }, 1);
+    try {
+      await matchingHashes("482913", hashes);
+      await Promise.all(["5", "6", "7", "8"].map((n) => hashCode(`48291${n}`)));
+    } finally {
+      clearInterval(timer);
+    }
+    expect(ticks).toBeGreaterThan(0);
   });
 });

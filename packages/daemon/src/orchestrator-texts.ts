@@ -12,14 +12,14 @@
 import { randomInt } from "node:crypto";
 import type { Ask, QueueAction, QueueEvent } from "@hotline/core";
 import type { SmsProvider } from "@hotline/providers";
-import { codeMatches, hashCode } from "./code-hash.js";
+import { hashCode, matchingHashes } from "./code-hash.js";
 import {
   dropEvent,
   notReachable,
   type OrchestratorLog,
   type OrchestratorState,
 } from "./orchestrator-state.js";
-import { planTextReply, replyHint, replyKind, TEXT_REPLIES, textFor } from "./owner-texts.js";
+import { planTextReply, presentedCode, replyHint, replyKind, TEXT_REPLIES, textFor } from "./owner-texts.js";
 import type { OwnerSms } from "./sms-webhook.js";
 import type { HotlineStore } from "./store.js";
 
@@ -70,9 +70,9 @@ export class OwnerTexts {
       this.#store.appendAudit("text.failed", { reason: "no SMS provider" }, now, { askId });
       return [{ type: "text-failed", askId }];
     }
-    const code = ask.kind === "permission" ? this.#newCode(askId) : undefined;
+    const code = ask.kind === "permission" ? await this.#newCode(askId) : undefined;
     if (code !== undefined) {
-      state.codes[askId] = hashCode(code);
+      state.codes[askId] = await hashCode(code);
       this.#state.save();
     } else if (state.codes[askId] !== undefined) {
       delete state.codes[askId];
@@ -109,18 +109,15 @@ export class OwnerTexts {
   }
 
   /** A random 6-digit code the redactor leaves alone and no other waiting ask has. */
-  #newCode(askId: string): string | undefined {
+  async #newCode(askId: string): Promise<string | undefined> {
     const outstanding = Object.entries(this.#state.data.codes).flatMap(([id, hash]) =>
       id === askId ? [] : [hash],
     );
     for (let tries = 0; tries < 20; tries++) {
       const code = this.#options.newCode?.() ?? String(randomInt(0, 1_000_000)).padStart(6, "0");
-      if (
-        /^\d{4,10}$/.test(code) &&
-        this.#options.redact(code) === code &&
-        !outstanding.some((hash) => codeMatches(code, hash))
-      )
-        return code;
+      if (!/^\d{4,10}$/.test(code) || this.#options.redact(code) !== code) continue;
+      // Hashed off the event loop: the daemon keeps serving while the codes are compared.
+      if ((await matchingHashes(code, outstanding)).size === 0) return code;
     }
     // No usable code: the request goes out without one and cannot be approved by text.
     return undefined;
@@ -172,6 +169,28 @@ export class OwnerTexts {
     const state = this.#state.data;
     // Recorded by `ownerText` just before; a fresh claim reads `receivedAt`.
     const claimedAt = this.#store.inboundMessageFirstSeen(messageSid) ?? receivedAt;
+    const waiting = state.queue.open
+      .filter((q) => q.texted && q.duplicateOf === undefined)
+      .map((q) => {
+        const codeHash = state.codes[q.ask.id];
+        const sent = state.textedAt[q.ask.id];
+        return {
+          ask: q.ask,
+          ...(codeHash === undefined ? {} : { codeHash }),
+          ...(sent === undefined ? {} : { sentAt: new Date(sent) }),
+        };
+      });
+    // A presented code is compared with every waiting hash off the event loop.
+    // Text handling is serialized with the rest of call orchestration, so the
+    // waiting asks cannot change meanwhile.
+    const code = optOutType === undefined ? presentedCode(body) : undefined;
+    const matchingCodeHashes =
+      code === undefined
+        ? new Set<string>()
+        : await matchingHashes(
+            code,
+            waiting.flatMap((w) => (w.codeHash === undefined ? [] : [w.codeHash])),
+          );
     const plan = planTextReply({
       body,
       messageSid,
@@ -182,17 +201,8 @@ export class OwnerTexts {
       firstSeenAt:
         writtenAt !== undefined && writtenAt.getTime() < claimedAt.getTime() ? writtenAt : claimedAt,
       optedOut: optOutType !== undefined,
-      waiting: state.queue.open
-        .filter((q) => q.texted && q.duplicateOf === undefined)
-        .map((q) => {
-          const codeHash = state.codes[q.ask.id];
-          const sent = state.textedAt[q.ask.id];
-          return {
-            ask: q.ask,
-            ...(codeHash === undefined ? {} : { codeHash }),
-            ...(sent === undefined ? {} : { sentAt: new Date(sent) }),
-          };
-        }),
+      waiting,
+      matchingCodeHashes,
     });
     switch (plan.type) {
       case "ignore":

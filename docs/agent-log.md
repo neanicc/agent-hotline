@@ -2708,6 +2708,17 @@ Template:
     both ends is refused; an initiation failure ElevenLabs does not have is
     ignored). The run and harness configs gained `call_sid` and
     `agentPhoneNumberId`, which real ElevenLabs tool calls and configs carry.
+  - Greptile on d8f896d: (P2) confirmation codes are hashed and compared with
+    async `scrypt` (`matchingHashes`, side by side on the thread pool), so a
+    reply with ten waiting codes no longer blocks the event loop; the pure
+    planner takes the matched hashes as input. (P2) the forgery text no longer
+    says "Nothing was approved": a post-call body that differs from the record
+    is reported while the record, which may hold the owner's real yes, is
+    still used. (P1, inbound PINs refused without `agentPhoneNumberId`)
+    addressed differently from the suggestion: every pulled record must be on
+    the configured ElevenLabs number, so without it the voice routes are off
+    with that reason logged (doctor already reports it) instead of serving
+    and refusing every PIN.
   - After catching up with HL-12's scenario suite, its harness got the same
     backing as the daemon's: the config sets `voice.agentPhoneNumberId`, and
     `text()` records each owner text in the fake Twilio's log (timed by the

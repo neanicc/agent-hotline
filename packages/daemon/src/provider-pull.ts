@@ -98,8 +98,8 @@ export interface ToolCallBinding {
 export interface CallRecordExpectations {
   /** `config.voice.agentId`. */
   agentId: string;
-  /** `config.voice.agentPhoneNumberId`, when configured: the record's number must be it. */
-  agentPhoneNumberId?: string | undefined;
+  /** `config.voice.agentPhoneNumberId`: the record must be on that ElevenLabs number. */
+  agentPhoneNumberId: string;
   /** `config.owner.phoneNumber`. */
   ownerNumber: string;
   /** Whether Hotline placed this conversation and still waits on it (call orchestration knows). */
@@ -140,7 +140,7 @@ function hotlineLine(
   if (!isE164(phone.agent_number) || sameE164(phone.agent_number, expected.ownerNumber)) {
     return { reason: "the call is not on a Hotline number" };
   }
-  if (expected.agentPhoneNumberId !== undefined && phone.phone_number_id !== expected.agentPhoneNumberId) {
+  if (phone.phone_number_id !== expected.agentPhoneNumberId) {
     return { reason: "the call is not on the Hotline number" };
   }
   return { phone: { ...phone, direction } };
@@ -275,9 +275,14 @@ export function failedCallMismatch(
   return undefined;
 }
 
-/** The one text about possible forgeries. Says what happened and what to do; no numbers or words. */
+/**
+ * The one text about possible forgeries. Says what happened and what to do; no
+ * numbers or words. It promises nothing about approvals: when a post-call body
+ * differs from ElevenLabs' record, the record is still used, and what the owner
+ * really said on that call may approve a request.
+ */
 export const FORGERY_TEXT =
-  "Hotline: it ignored a message or call result that claimed to come from you but did not match Twilio's or ElevenLabs' records. If that was not you, something on your computer may be trying to answer for you. Nothing was approved.";
+  "Hotline: it got a message or call result that claimed to come from you but did not match Twilio's or ElevenLabs' records. It used only their records, never what that claim said. If that was not you, something on your computer may be trying to answer for you.";
 
 export interface ForgeryAlarmOptions {
   store: HotlineStore;

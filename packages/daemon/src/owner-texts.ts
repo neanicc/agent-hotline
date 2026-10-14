@@ -12,10 +12,10 @@
 // - A code that matches no waiting ask burns every waiting code (the plan says
 //   so); a code that matched is spent whatever happens next.
 // - `smsAnswer` (core) decides what the words mean; free text never approves.
-// - Codes are known here only as salted hashes (`code-hash.ts`, HL-13a), and a
-//   presented code is compared with each in constant time.
+// - Codes are known here only as salted hashes (`code-hash.ts`, HL-13a). The
+//   caller compares a presented code with each in constant time beforehand
+//   (`matchingHashes`) and passes the hashes it matched.
 import { type Answer, type Ask, parseSmsReply, type SmsReply, smsAnswer } from "@hotline/core";
-import { codeMatches } from "./code-hash.js";
 
 /** Agent text in an outgoing SMS, cut like the voice read-out. */
 const SMS_ASK_LENGTH = 300;
@@ -67,6 +67,18 @@ export interface TextReplyInput {
   optedOut: boolean;
   /** Open asks Hotline texted (not duplicates), with their codes. */
   waiting: readonly WaitingText[];
+  /**
+   * The waiting `codeHash`es that the reply's code (`presentedCode(body)`)
+   * matches. Hashing is slow, so the caller works this out beforehand with
+   * `matchingHashes`, off the event loop; empty when the reply has no code.
+   */
+  matchingCodeHashes: ReadonlySet<string>;
+}
+
+/** The confirmation code a `YES <code>` reply presents, if any. */
+export function presentedCode(body: string): string | undefined {
+  const reply = parseSmsReply(body);
+  return reply.type === "yes" ? reply.code : undefined;
 }
 
 /** What an owner's text means for the asks waiting on texts. */
@@ -77,6 +89,7 @@ export function planTextReply({
   firstSeenAt,
   optedOut,
   waiting,
+  matchingCodeHashes,
 }: TextReplyInput): TextPlan {
   const reply = parseSmsReply(body);
   if (optedOut || reply.type === "carrier-keyword") return { type: "ignore" };
@@ -87,7 +100,7 @@ export function planTextReply({
   const code = reply.type === "yes" ? reply.code : undefined;
   let target: WaitingText | undefined;
   if (code !== undefined) {
-    target = waiting.find((w) => w.codeHash !== undefined && codeMatches(code, w.codeHash));
+    target = waiting.find((w) => w.codeHash !== undefined && matchingCodeHashes.has(w.codeHash));
     if (target === undefined) return { type: "code-mismatch" };
   } else if (waiting.length === 0) {
     return { type: "nothing-waiting" };
