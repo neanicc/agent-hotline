@@ -2,13 +2,13 @@
 // number when it is created, and `callOwner` takes no recipient, so no caller can
 // phone anyone else. Only short, redacted summaries of each ask leave the machine.
 import type { AskKind, Risk, VoiceProviderName } from "@hotline/core";
+import { MAX_SPOKEN_NICKNAME_LENGTH, speakableName } from "./nickname.js";
 
 /** One call reads out at most this many asks (the queue's `DEFAULT_MAX_ASKS_PER_CALL`). */
 export const MAX_ASKS_PER_CALL = 4;
 /** Longest ask text sent to the provider, after redaction. Longer text is cut. */
 export const MAX_SPOKEN_ASK_LENGTH = 300;
 export const MAX_SPOKEN_OPTION_LENGTH = 80;
-export const MAX_SPOKEN_NICKNAME_LENGTH = 60;
 
 /** One ask as the voice agent reads it out. Every string is untrusted agent text. */
 export interface VoiceAsk {
@@ -90,7 +90,10 @@ function describeAsk(ask: VoiceAsk, index: number, redact: (text: string) => str
   // (nickname, tool name, options, text) sits inside its own fence; only the
   // fixed words around them come from Hotline.
   const fenced = (text: string, max: number) => `<agent_text>${cut(redact(text), max)}</agent_text>`;
-  const who = fenced(ask.nickname, MAX_SPOKEN_NICKNAME_LENGTH);
+  // The nickname is Hotline's (see `sessionNickname`), but its folder part came
+  // from the agent's process, so it is reduced to a speakable name here too.
+  const name = speakableName(redact(ask.nickname)) || "an unnamed session";
+  const who = `<agent_text>${cut(name, MAX_SPOKEN_NICKNAME_LENGTH)}</agent_text>`;
   const what = fenced(ask.text, MAX_SPOKEN_ASK_LENGTH);
   const tool = ask.toolName === undefined ? "" : ` to use ${fenced(ask.toolName, MAX_SPOKEN_OPTION_LENGTH)}`;
   const head: Record<AskKind, string> = {

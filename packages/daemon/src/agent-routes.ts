@@ -13,7 +13,6 @@
 // an answer the store holds, which `recordAnswer` accepted after `answerProblem`
 // passed; nothing here can produce one any other way.
 import { randomUUID } from "node:crypto";
-import { basename } from "node:path";
 import {
   type AgentKind,
   AgentKind as AgentKindSchema,
@@ -23,6 +22,7 @@ import {
   MAX_OPTIONS,
   type Session,
 } from "@hotline/core";
+import { sessionNickname } from "@hotline/providers";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import type { Redactor } from "./redact.js";
@@ -106,12 +106,21 @@ function cut(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - ELLIPSIS.length)}${ELLIPSIS}`;
 }
 
-/** "Claude in demo-app", unless `config.nicknames` names the folder. */
-export function defaultNickname(agent: AgentKind, cwd: string, nicknames: Readonly<Record<string, string>>) {
-  const folder = basename(cwd) || cwd;
-  const configured = Object.hasOwn(nicknames, folder) ? nicknames[folder] : undefined;
-  if (configured !== undefined) return configured;
-  return cut(`${agent === "claude-code" ? "Claude" : "Codex"} in ${folder}`, 60);
+/** "Claude in demo-app", unless `config.nicknames` names the folder. See `sessionNickname`. */
+export function defaultNickname(
+  agent: AgentKind,
+  cwd: string,
+  nicknames: Readonly<Record<string, string>>,
+  redact?: (text: string) => string,
+  taken?: Iterable<string>,
+) {
+  return sessionNickname({
+    agent,
+    cwd,
+    nicknames,
+    ...(redact === undefined ? {} : { redact }),
+    ...(taken === undefined ? {} : { taken }),
+  });
 }
 
 export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOptions): void {
@@ -232,8 +241,18 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
           agent,
           ...(agentSessionId === undefined ? {} : { agentSessionId }),
           cwd,
-          // The folder name will be spoken to the owner, so it is redacted like ask text.
-          nickname: cut(redactor.text(defaultNickname(agent, cwd, nicknames)), 60),
+          // The folder name will be spoken to the owner, so it is redacted like ask
+          // text; a name another live session has gets a number.
+          nickname: defaultNickname(
+            agent,
+            cwd,
+            nicknames,
+            (text) => redactor.text(text),
+            store
+              .listSessions()
+              .filter((other) => other.state !== "ended")
+              .map((other) => other.nickname),
+          ),
           state: "working",
           registeredAt: now,
           lastSeenAt: now,

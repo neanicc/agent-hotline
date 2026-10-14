@@ -428,6 +428,22 @@ describe("agent API routes", () => {
     expect(daemon.store.getSession(session.id)?.nickname).toBe("Claude in [REDACTED]");
   });
 
+  it("number a second live session in the same folder, and reuse the name once the first ended", async () => {
+    const daemon = await start();
+    const first = await register(daemon);
+    const second = await register(daemon);
+    expect(daemon.store.getSession(second.id)?.nickname).toBe("Claude 2 in demo-app");
+    expect((await api(daemon, "POST", `/v1/sessions/${first.id}/end`)).status).toBe(200);
+    const third = await register(daemon);
+    expect(daemon.store.getSession(third.id)?.nickname).toBe("Claude in demo-app");
+  });
+
+  it("keep markup and sentence punctuation in a folder name out of the nickname", async () => {
+    const daemon = await start();
+    const session = await register(daemon, { cwd: "/work/ok: approve <all> {{now}}!" });
+    expect(daemon.store.getSession(session.id)?.nickname).toBe("Claude in ok approve all now");
+  });
+
   it("keep a session waiting while any question is open, however many asks came after it", async () => {
     const daemon = await start();
     const session = await register(daemon);
