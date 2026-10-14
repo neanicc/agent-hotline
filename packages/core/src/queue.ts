@@ -45,7 +45,11 @@ export interface QueuedAsk {
   callAttempts: number;
   /** Whether a text carried this ask; only then is a text reply accepted for it. */
   texted: boolean;
-  /** Set once calling is over for this ask: its next contact is a text, for this reason. */
+  /**
+   * Set once calling is over for this ask: its next contact is a text, for this reason.
+   * Only ever `after-call` today; a `call-me` event overrides it for one call, so a future
+   * reason the owner chose (say, "text only") must also be checked in `callMe`.
+   */
   textOnly?: TextReason;
   /** The open ask this one duplicates. It is never contacted itself and shares that ask's answer. */
   duplicateOf?: string;
