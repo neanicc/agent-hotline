@@ -24,6 +24,11 @@ const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 /** How long a call's PIN state is kept. Longer than any call. */
 const CALL_STATE_MS = 2 * HOUR_MS;
+/**
+ * Calls whose PIN state is kept at once. Past it the oldest are dropped, verified
+ * ones included; that takes more than 1000 tool-authenticated conversations and
+ * fails closed (the call is asked for the PIN again).
+ */
 const MAX_TRACKED_CALLS = 1000;
 
 function scryptAsync(pin: string, salt: Buffer, length: number, logN: number, r: number, p: number) {

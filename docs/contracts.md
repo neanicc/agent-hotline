@@ -290,6 +290,11 @@ decision it submits or what `owner_words` it sends.
   timed with the injected `clock`. The fake ends a call
   when a tool answers `end_call: true`, as the prompt tells the real agent to.
 
+The daemon answers a byte-identical repeat of `submit_answer`, `verify_pin` or
+`send_instruction` within two hours from memory, for state-changing results
+only. A repeated identical failed `verify_pin` therefore never re-checks the
+PIN and spends no attempt; see [daemon.md](daemon.md#elevenlabs-hooksel).
+
 **The agent definition** (`elevenlabs-agent.ts`, `AGENT_DEFINITION_VERSION`):
 the prompt, first message and four webhook tools as code. `hotlineToolConfigs`
 gives each tool's `tool_config` (URL `<publicUrl>/hooks/el/tools/<name>`, the
