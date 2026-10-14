@@ -1,0 +1,11 @@
+{
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "transcript_path": "/Users/example/.claude/projects/-Users-example-src-demo-app/00000000-0000-4000-8000-000000000001.jsonl",
+  "cwd": "/Users/example/src/demo-app",
+  "permission_mode": "default",
+  "hook_event_name": "Stop",
+  "stop_hook_active": false,
+  "last_assistant_message": "I've completed the refactoring. Here's a summary...",
+  "background_tasks": [],
+  "session_crons": []
+}

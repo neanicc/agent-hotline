@@ -12,5 +12,8 @@
   },
   "scripts": {
     "test": "vitest run --root ../.. --project daemon"
+  },
+  "dependencies": {
+    "@hotline/core": "workspace:*"
   }
 }

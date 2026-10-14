@@ -54,3 +54,46 @@ Template:
   `setup --frozen-lockfile` catches drift in CI. The CLI reads its version from
   `../package.json`; HL-15 must keep that working when it bundles. Revisit
   TypeScript 7 once it has a few months of patch releases.
+
+## 2026-10-13 — HL-02 Contracts and config (#PR)
+
+- Decision / change: zod 4.6.5 pinned in `@hotline/core` (4.6.6 and 4.6.7 were
+  under two weeks old). Core holds the schemas for Session, Ask, Answer/Decision,
+  AskOutcome, CallRecord, Config, secret names and the hook payloads, plus
+  `answerProblem` (wrong-kind decisions, unoffered options and high-risk approvals
+  without PIN or text confirmation never count) and pure config parsing; it does no I/O.
+  The I/O adapters live in `packages/daemon`: `hotlinePaths`, `loadConfig`,
+  `KeychainSecretStore`, `FileSecretStore`, `openSecretStore`. Choices made without
+  a plan answer: the config is JSON (`config.json`, no TOML dependency) in
+  `$HOTLINE_HOME` or `~/.hotline`; plan question 5 takes the recommended default,
+  so `secrets.store: "auto"` means the Keychain on macOS and the `0600` file
+  elsewhere. The config holds the PIN hash (plan section 5), and a 4–6 digit PIN
+  is cheap to brute-force offline, so `loadConfig` refuses a config that other
+  users can access, the same rule as the secrets file. PIN hash format is
+  `scrypt$<log2 N>$<r>$<p>$<salt>$<hash>` with log2 N ≥ 15. Rate limits and the
+  continuation cap have a minimum of 1, so they cannot be switched off.
+  `policy.maxConsecutiveContinuations` defaults to 5, below Claude Code's own
+  cap of 8. Keychain writes go through `security -i` on stdin with a hex value
+  (`-X`), so a secret never appears in a process argument list. Each write is read
+  back, because interactive mode can exit 0 after a failed command. Secret values
+  are one line of printable ASCII. Hook fixtures are in
+  `packages/agents/test/fixtures/hooks` (lane:agents owns hook fixtures, and HL-06
+  consumes them). The Claude Code fixtures adapt the examples on
+  code.claude.com/docs/en/hooks. The Codex docs show no full payloads, so the Codex
+  fixtures are built from Codex's generated JSON schemas at openai/codex
+  `e444aa99`. Those four schemas are vendored verbatim (Apache-2.0) and excluded
+  from Biome so they stay byte-identical. A small draft-07 checker in the test
+  validates the Codex fixtures against them. Hook inputs are parsed loosely and
+  outputs strictly: Hotline never sends `updatedInput`, `updatedPermissions`, or
+  `interrupt` to Codex.
+- Evidence (automated, worktree, Node 22.23.1 and 24.11.0): `run.sh setup`,
+  `build` and `test` pass, with 97 tests in 12 files. Tests use temporary
+  directories and a fake `security`. `nodeExec` is exercised only by running Node
+  itself. No scenario suite exists yet (HL-12). No real agent or live call evidence
+  applies.
+- Open issues or follow-ups: the real `security` path is unverified on a Mac. That
+  covers `-i` with `-X`, exit 44 for a missing item, and `find -w` printing the
+  stored text. The read-back makes a wrong assumption fail loudly instead of
+  silently. Check it once by hand (HL-11 `hotline doctor` is a natural place).
+  Recheck the fixtures against `claude --version` and `codex --version` before
+  HL-06 golden tests rely on them. Neither docs page carries a version.
