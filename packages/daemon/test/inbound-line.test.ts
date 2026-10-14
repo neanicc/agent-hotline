@@ -324,6 +324,18 @@ describe("send_instruction", () => {
     expect(store.listInstructions().map((i) => i.text)).toEqual(["run the tests now"]);
   });
 
+  it("refuses, rather than alters, an instruction whose symbols would be stripped", async () => {
+    session("s-1", "Claude in demo-app");
+    line.getStatus(call());
+    expect(instruct(1, "use C++ now")).toBe("queued");
+    await line.postCall(transcript("conv-1", "session 1, use C++ now"), now, false);
+    expect(store.listInstructions()).toEqual([]);
+    expect(store.listAudit().find((e) => e.event === "voice.instruction-unconfirmed")?.detail).toEqual({
+      reason: "the instruction holds symbols that cannot be passed on as said",
+    });
+    expect(sms.sent.map((s) => s.text)).toEqual([expect.stringContaining("not passed on")]);
+  });
+
   it("redacts a secret the owner said before it is stored", async () => {
     session("s-1", "Claude in demo-app");
     line.getStatus(call());

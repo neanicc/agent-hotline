@@ -397,17 +397,21 @@ export class InboundLine {
       return redacted.length <= max ? redacted : `${redacted.slice(0, max - 1)}…`;
     };
     // Redacted first, so a secret is caught before its symbols are dropped.
-    const text = plainInstruction(cap(ownerWords, MAX_INSTRUCTION_LENGTH));
+    const redacted = cap(ownerWords, MAX_INSTRUCTION_LENGTH).replace(/\s+/g, " ");
+    const text = plainInstruction(redacted);
     const ownerExcerpt = cap(excerpt, 2000);
-    if (text === "" || ownerExcerpt === "") {
-      this.#store.appendAudit(
-        "voice.instruction-unconfirmed",
-        { reason: "nothing left after redaction" },
-        receivedAt,
-        {
-          sessionId: held.sessionId,
-        },
-      );
+    // Stripping symbols could change what the owner heard read back ("use C++"
+    // would become "use C"), so such an instruction is refused, not altered.
+    const reason =
+      text === "" || ownerExcerpt === ""
+        ? "nothing left after redaction"
+        : text !== redacted
+          ? "the instruction holds symbols that cannot be passed on as said"
+          : undefined;
+    if (reason !== undefined) {
+      this.#store.appendAudit("voice.instruction-unconfirmed", { reason }, receivedAt, {
+        sessionId: held.sessionId,
+      });
       return false;
     }
     const stored = this.#store.addInstruction({

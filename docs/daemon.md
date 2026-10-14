@@ -517,8 +517,10 @@ anyone else's text the generic SMS reply.
   What is queued is never the model's `instruction` text: it is the owner's
   own words for exactly the validated tokens, cut from the transcript (the
   utterance minus its session reference and filler), with invisible
-  characters removed; after redaction only letters, digits, spaces and plain
-  punctuation are kept (`plainInstruction`). The read-back reply is judged by
+  characters removed. After redaction it may hold only letters, digits, spaces
+  and plain punctuation (`plainInstruction`); one with any other symbol ("use
+  C++", "delete /tmp/x") is refused and the owner texted, never queued with
+  the symbol stripped. The read-back reply is judged by
   a fixed yes lexicon and fails closed; HL-09c's reply judge can replace it
   later.
   Every comparison uses one tokeniser, `speechTokens` in `@hotline/providers`

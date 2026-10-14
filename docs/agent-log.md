@@ -2093,6 +2093,16 @@ Template:
   Splitting `instruction-confirm.ts` (tokeniser and span, session
   reference, retraction) is a proposed follow-up. Evidence: build passes,
   test passed 57 files, 1511 tests, three times in a row.
+- Review fixes, eighth round (bot staff review of cc444bf, one P2 and two
+  P3s): an instruction whose owner words hold a symbol that
+  `plainInstruction` would strip ("use C++") is now refused and the owner
+  texted, never queued altered (P3). Left as is, by decision: the
+  at-most-once window between acknowledging an instruction and the hook
+  printing or the MCP result reaching the agent (P2, which the review marks
+  not a blocker). Closing it needs a receipt from the agent, which neither
+  agent offers; the window is documented, and the failure mode is that the
+  agent does not act. Unfenced agent text in the `status` SMS (P3) stays: it
+  goes only to the owner's number, and no text can approve without a code.
 - Decision: sessions are named by number. `get_status` numbers live sessions
   by registration and remembers, per call, which number is which session;
   `send_instruction` takes only a number that call's status read out
