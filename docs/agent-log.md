@@ -1565,13 +1565,14 @@ Template:
 
 - Decision / change: pure refactor of `packages/daemon/src/orchestrator.ts`
   (950 lines) before HL-10 adds the inbound line, as the HL-09 staff reviews
-  asked. The coordinator (`orchestrator.ts`, 362 lines) keeps
+  asked. Each part is now well under 400 lines. The coordinator
+  (`orchestrator.ts`) keeps
   `CallOrchestrator`: step serialization, the queue, the timer, start/stop and
-  resolving asks. `orchestrator-state.ts` (254) holds the saved state schema,
+  resolving asks. `orchestrator-state.ts` holds the saved state schema,
   the fail-closed restore of state and rate windows, crash recovery
   (`recoverPending`) and the before-send checks (`notReachable`, `dropEvent`).
-  `orchestrator-voice.ts` (331) holds placing calls, holding `submit_answer`
-  answers and post-call confirmation. `orchestrator-texts.ts` (216) holds
+  `orchestrator-voice.ts` holds placing calls, holding `submit_answer`
+  answers and post-call confirmation. `orchestrator-texts.ts` holds
   sending texts with codes and applying the owner's replies; `owner-texts.ts`
   is unchanged.
 - Decision: a fourth file for the text side, beyond the issue's three. Keeping
@@ -1607,5 +1608,5 @@ Template:
   less than or equal to 1767225600010`. It reproduces deterministically with that
   seed and path on this branch, which does not touch `packages/core`, so it is a
   pre-existing queue or test bug that random seeds rarely hit, not this refactor.
-  It is not fixed here (out of lane); the rerun passed. Follow-up: fix it in
-  `lane:core`.
+  It is not fixed here (out of lane); the rerun passed. Tracked in #50
+  (`lane:core`), after the staff review on ff58e6a (P2) asked for an issue.
