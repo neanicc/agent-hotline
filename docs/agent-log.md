@@ -3317,3 +3317,102 @@ Template:
   for genuine Twilio requests; security.md update after #77; count out-of-queue
   texts against the text rate limits; HL-13c (#80) retries processing records
   and normalises the SMS body comparison in the same files.
+
+## 2026-10-14 — HL-13 Security pass (#14)
+
+- Change: `docs/security.md`, the threat model: assets, actors, trust
+  boundaries, every invariant with where it is enforced and tested, the webhook
+  replay and rate-limit review, the classifier's and redactor's limits, and the
+  accepted residual risks (same-user secret access and what HL-13a's
+  verify-by-pull covers, the shared install token, proof strength only,
+  at-most-once instructions, in-memory counters).
+- Change: fast-check property and fuzz tests for the redactor, the permission
+  classifier (obfuscated high-risk commands, and a differential of
+  `splitShell` against `bash -n`, `zsh -n` and zsh's `${(z)...}` word split,
+  with the command passed as data and never run), text replies and the voice
+  fast path; and an exposure audit (`exposure.test.ts`) over the routes each
+  listener registered (`Daemon.routes`, recorded with an `onRoute` hook) on a
+  daemon with Twilio and ElevenLabs fully configured.
+- Bugs the fuzzers found, each fixed failing closed: `git show HEAD:.env` was
+  low (`:` is now a path boundary, also for `.git` components); `; ls`,
+  `ls ;;` and `ls\n;` were low though bash refuses them; `&>>` was low though
+  macOS's bash 3.2 refuses it; `rg` options were a denylist (now a positive
+  list; `--hostname-bin` runs a program); the redactor left the tail of a quoted
+  value after a removed encoded segment (`"token":"+,rest"`), stopped an unquoted
+  value at a quote (`token=a'rest`), and its JWT pattern was quadratic on
+  `eyJ-eyJ-...` (now a linear scan of each run of token characters).
+- Decision: the linear-time checks keep the old 50 ms bound and add two
+  side-by-side measures: hostile against benign text of the same length (at
+  most 100x) and the full hostile text against its first quarter (at most 8x;
+  linear grows about 4x, quadratic about 16x). Each measurement is the fastest
+  of 7 interleaved runs, and one of up to 5 attempts must meet all three. That
+  stops one unlucky timed run from failing (the HL-10 flake) without loosening
+  the bound. A first version passed when either measure did; Greptile flagged
+  that as weaker than 50 ms on #77, so it now needs all three. Measured on the
+  dev Mac: benign 16 KiB about 0.19 ms, slowest linear shapes 40 to 50x, the
+  quadratic truncation HL-04 removed about 440x. Restoring that truncation
+  still fails. Fuzz suites get a 60 s timeout (120 s for the shell
+  differential): one full run at load average 20 timed out 18 unrelated tests
+  and two fuzz tests, while 9 runs at load 12 or less all passed.
+- Review fixes (Greptile on #77): the quoted carry-over now tracks the quote
+  that is actually open (an apostrophe inside `"ab'cd+"` opened a false quote
+  and let `"password":"ef'gh,rest"` keep its tail), and the JWT check no longer
+  skips a JWT after `-`. Both have regression tests, plus a fuzz property with
+  several secret fields in one JSON object. Reverting either fix fails them.
+- Decision: the default webhook body read before verification drops from
+  256 KiB to 64 KiB (P3 from the HL-07 review); post-call keeps its own 1 MiB.
+- Decision: a bare "no" to a stop ask stays `done` (P3 from HL-07): the agent
+  stops, which is also what silence does, so it is the safe reading.
+- Decision: read tools aimed outside the project stay low (an explicit HL-06
+  decision with a test); listed as a follow-up rather than changed here.
+- Mutation checks, each reverted: dropping the `:` boundary, skipping attached
+  option values, accepting a leading `;`, and corrupting quoted words each fail
+  the classifier properties (the last one only the zsh word-split comparison);
+  dropping the quoted continuation, restoring the quadratic JWT pattern
+  (`\beyJ`, before the run scan replaced it), restoring the quadratic
+  truncation, and disabling registered-secret, PIN and phone passes each fail a
+  redactor test; approving a text yes without its code or with trailing words
+  fails the text-reply fuzz; ignoring doubt words fails the voice fuzz; dropping `vetoesAgreement` from `checkedVerdict` fails the reply-judge fuzz (HL-09d, merged during this ticket); a token
+  bypass on one route and an extra route outside `/hooks` fail the exposure
+  audit; restoring 256 KiB fails the body-limit test.
+- Evidence: `scripts/ci/run.sh build` passes; `scripts/ci/run.sh test` passed
+  6 runs in a row after catching up with main (68 files, 1935 tests), and 3
+  more after the review fixes (1954 passed, 2 skipped). The scenario suite stage could not be
+  run locally (the sandbox refuses command lines containing its stage name);
+  hosted CI is the gate.
+- Deferred (needs #69, HL-13a, which changes the same files): persist the PIN
+  failure budgets, the forgery-alarm hourly text limit, held inbound
+  instructions and the tool-call and post-call replay memories. #69 had not
+  landed when this PR opened; it landed during review, after which this PR
+  caught up with main and `docs/security.md` describes HL-13a as merged. The
+  persistence work stays a separate ticket, #78 (HL-13b), so this PR stays
+  reviewable. The exposure audit passes unchanged against HL-13a's routes.
+- Review fix (staff review P2 on #77): the rg option lists are exported and
+  audited by hand against `rg --help` of ripgrep 14.1.1 (every letter and name
+  is a search, filter or output option; `-h` is help). A test checks them
+  against the installed rg's help and skips where rg is not on `PATH` (it was
+  not on this Mac's `PATH`, so it skipped locally).
+- Review fixes (staff review of fa18799): `--hidden`, `--no-ignore`,
+  `-u`/`--unrestricted` and `-L`/`--follow` are off rg's positive list (P2:
+  `rg -uu KEY` read `.env` and `.git` as low; reverting the list fails 13
+  classifier tests). `linear-time.test.ts` adds negative controls for the
+  timing helper: quadratic work over 16 KiB, slow or about 13 ms, never passes
+  (P3). The recursive-read limit (`grep -rn KEY src` reaches a `.env` inside
+  `src` and stays low, an HL-06 default) is now written down in
+  `docs/security.md`.
+- Caught up with main again after HL-13b (#83) landed. `docs/security.md`'s
+  replay table, accepted risks and follow-ups now describe what HL-13b
+  persisted, the saved PIN time bound to the call SID and window, the post-call
+  replay memory kept in memory by design, and the uncapped SMS route; #78 is
+  marked done. `docs/daemon.md` takes main's HL-13b text.
+- Review fixes (staff review of a2ec786): `-g`/`--glob`/`--iglob` and
+  `-t`/`--type` are off rg's positive list too (P2: in ripgrep's ignore crate
+  a glob override returns before the ignore files and the hidden check, and a
+  type whitelist skips the hidden check, so `rg -g '.*' KEY` read `.env` as
+  low; the default `sh` type names `.bashrc` and `.zshrc`). `--type-not` only
+  excludes and stays. Against the previous build, `rg -g .hidden KEY`,
+  `rg --glob=.hidden KEY` and `rg -t sh KEY` were low; reverting fails 7
+  classifier tests. (P2) Two redactor tests pin the encoded carry-over's
+  bound: text after the closing quote survives on later lines, and an
+  unclosed quote removes the rest, failing closed; `docs/security.md` said
+  "the rest of a line", which was wrong, and now says so.

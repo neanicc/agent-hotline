@@ -30,7 +30,13 @@ export const LOOPBACK_HOST = "127.0.0.1";
 export const HOOKS_PREFIX = "/hooks";
 
 const AGENT_API_BODY_LIMIT = 1024 * 1024;
-const WEBHOOK_BODY_LIMIT = 256 * 1024;
+/**
+ * The most a webhook route reads before its verifier runs, unless it sets its own
+ * `bodyLimit`. A Twilio SMS webhook (a 1,600-character body plus a few dozen
+ * parameters) and an ElevenLabs tool call are a few KiB; HL-13 cut this from
+ * 256 KiB so an unsigned sender gets the daemon to read less.
+ */
+export const WEBHOOK_BODY_LIMIT = 64 * 1024;
 /** How long a route with `maxInFlight` waits for a body before dropping the connection. */
 export const DEFAULT_BODY_TIMEOUT_MS = 10_000;
 
@@ -57,7 +63,7 @@ export interface WebhookRoute {
   url: string;
   precheck?: WebhookPrecheck;
   verify: WebhookVerifier;
-  /** Largest body this route reads, when it needs more than the listener's 256 KiB. */
+  /** Largest body this route reads, when it needs more than the listener's `WEBHOOK_BODY_LIMIT`. */
   bodyLimit?: number;
   /**
    * Requests this route reads or handles at once; more get the bare 403 before
@@ -92,6 +98,28 @@ export function parseFormBody(text: string): FormParams {
     const value = equals === -1 ? "" : part.slice(equals + 1);
     return [decodeFormComponent(name), decodeFormComponent(value)];
   });
+}
+
+/** One route a listener serves: its method and full path, as Fastify registered it. */
+export interface ServedRoute {
+  method: string;
+  url: string;
+}
+
+const servedRoutes = new WeakMap<FastifyInstance, ServedRoute[]>();
+
+/** Records every route `app` registers from here on, for `registeredRoutes` (HL-13's exposure audit). */
+function recordRoutes(app: FastifyInstance): void {
+  const routes: ServedRoute[] = [];
+  servedRoutes.set(app, routes);
+  app.addHook("onRoute", (route) => {
+    for (const method of [route.method].flat()) routes.push({ method, url: route.url });
+  });
+}
+
+/** Every route a listener built here serves, in registration order. */
+export function registeredRoutes(app: FastifyInstance): readonly ServedRoute[] {
+  return [...(servedRoutes.get(app) ?? [])];
 }
 
 function boundPort(app: FastifyInstance): number | undefined {
@@ -150,6 +178,7 @@ export function buildAgentApi({ apiToken, log, version, agentRoutes }: AgentApiO
     return503OnClosing: true,
   });
   app.setErrorHandler(errorHandler);
+  recordRoutes(app);
   app.setNotFoundHandler(notFound);
 
   app.addHook("onRequest", async (request, reply) => {
@@ -197,6 +226,7 @@ export function buildWebhookServer({ log, routes = [] }: WebhookServerOptions): 
     return503OnClosing: true,
   });
   app.setErrorHandler(webhookErrorHandler);
+  recordRoutes(app);
   app.setNotFoundHandler(notFound);
   app.addContentTypeParser(
     "application/x-www-form-urlencoded",
@@ -339,6 +369,8 @@ export interface Daemon {
   readonly hooksPort: number;
   /** Every address either listener is bound to; always 127.0.0.1. */
   readonly addresses: readonly AddressInfo[];
+  /** The routes each listener serves, for auditing what is exposed (HL-13). */
+  readonly routes: { readonly api: readonly ServedRoute[]; readonly hooks: readonly ServedRoute[] };
   readonly store: HotlineStore;
   readonly log: FastifyBaseLogger;
   /** Stops accepting requests, lets in-flight ones finish, then closes the store. Idempotent. */
@@ -380,6 +412,7 @@ export async function startDaemon(options: StartDaemonOptions): Promise<Daemon> 
     apiPort,
     hooksPort,
     addresses: [...api.addresses(), ...hooks.addresses()],
+    routes: { api: registeredRoutes(api), hooks: registeredRoutes(hooks) },
     store: options.store,
     log: api.log,
     close() {

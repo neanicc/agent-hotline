@@ -14,6 +14,7 @@ import {
   openStore,
   type StartDaemonOptions,
   startDaemon,
+  WEBHOOK_BODY_LIMIT,
   type WebhookRoute,
 } from "../src/index.js";
 import { send } from "./http.js";
@@ -259,6 +260,23 @@ describe("verified webhook routes", () => {
     expect(response.statusCode).toBe(403);
     const rejected = logEntries().find((entry) => entry.msg === "rejected webhook");
     expect(rejected).toMatchObject({ reason: "verification failed", path: "/hooks/test" });
+    await app.close();
+  });
+
+  it("read at most 64 KiB before verifying, unless the route sets its own limit", async () => {
+    // HL-13 cut this from 256 KiB: an unsigned sender gets the daemon to read less.
+    expect(WEBHOOK_BODY_LIMIT).toBe(64 * 1024);
+    const app = server(() => true);
+    const payload = (size: number) => ({ a: "x".repeat(size - 10) });
+    expect(
+      (await app.inject({ method: "POST", url: `${HOOKS_PREFIX}/test`, payload: payload(1024) })).statusCode,
+    ).toBe(200);
+    const oversized = await app.inject({
+      method: "POST",
+      url: `${HOOKS_PREFIX}/test`,
+      payload: payload(WEBHOOK_BODY_LIMIT + 16),
+    });
+    expect([oversized.statusCode, oversized.body]).toEqual([403, ""]);
     await app.close();
   });
 
