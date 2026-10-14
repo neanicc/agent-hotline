@@ -1636,3 +1636,10 @@ Template:
   as `voice.answer-unconfirmed` with their reason. The docs say plainly
   that the read-back is a prompt rule, not a daemon control, until HL-09c
   (which should also bind the confirming yes to a turn naming the request).
+- Greptile P2 on #49 fixed: the fake's read-back dropped the tool, so two asks
+  differing only by tool (`Read` and `Write` on the same text) read back
+  identically and tied in `readings()`. It now says "Allow <tool> to <text>
+  for <session>? Yes?", with a two-ask test that both read-backs are
+  recognised and both allows confirm. The prompt's read-back rule is
+  unchanged (what it wants to do and the session name); step 1 already
+  lists the tool among an ask's key words. 1326 tests in 54 files pass.

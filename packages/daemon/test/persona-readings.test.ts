@@ -172,7 +172,9 @@ describe("the fake voice agent's readings follow the persona and are recognised"
       step(2, ANSWERS[1] as (typeof ANSWERS)[number]),
     ]);
     const readBack = transcript.findIndex((turn) => turn.message.startsWith("Allow "));
-    expect(transcript[readBack]?.message).toBe("Allow git push origin main for Claude in demo-app? Yes?");
+    expect(transcript[readBack]?.message).toBe(
+      "Allow Bash to git push origin main for Claude in demo-app? Yes?",
+    );
     const read = readings(transcript, asks.map(readAsk));
     // The reading and the read-back both read ask 1, never ask 2.
     expect(read.flatMap((ask, at) => (ask === 0 ? [at] : []))).toEqual([readBack - 2, readBack]);
@@ -195,6 +197,37 @@ describe("the fake voice agent's readings follow the persona and are recognised"
         ownerWords: "the second one, skip Windows",
       }).confirmed,
     ).toBe(true);
+  });
+
+  it("tells apart read-backs of two asks that differ only by tool", async () => {
+    const base = ASKS[0] as VoiceAsk;
+    const asks: VoiceAsk[] = [
+      { ...base, askId: "ask-read", text: "the deploy config", toolName: "Read" },
+      { ...base, askId: "ask-write", text: "the deploy config", toolName: "Write" },
+    ];
+    const transcript = await playCall(asks, [
+      { kind: "read-back", ask: 1, words: "sure", reply: "yes", decision: "allow" },
+      { kind: "read-back", ask: 2, words: "sure", reply: "yep", decision: "allow" },
+    ]);
+    const backs = transcript.flatMap((turn, at) => (turn.message.startsWith("Allow ") ? [at] : []));
+    expect(backs.map((at) => transcript[at]?.message)).toEqual([
+      "Allow Read to the deploy config for Claude in demo-app? Yes?",
+      "Allow Write to the deploy config for Claude in demo-app? Yes?",
+    ]);
+    const read = readings(transcript, asks.map(readAsk));
+    expect(backs.map((at) => read[at])).toEqual([0, 1]);
+    asks.forEach((_, index) => {
+      expect(
+        confirmVoiceDecision({
+          transcript,
+          asks: asks.map(readAsk),
+          index,
+          decision: { type: "allow" },
+          ownerWords: index === 0 ? "yes" : "yep",
+        }),
+        `ask ${index + 1}`,
+      ).toEqual({ confirmed: true, excerpt: index === 0 ? "yes" : "yep" });
+    });
   });
 
   it("recognises the yes-or-no question as the same ask, and the text promise as none", async () => {

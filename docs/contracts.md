@@ -288,7 +288,7 @@ decision it submits or what `owner_words` it sends.
   or `says(...steps)` with `pin`, `answer`, `read-back`, `unsure`, `unclear`, `say`,
   `status`, `instruct`, `silence` and `hang-up` steps) through a `VoiceToolClient`.
   The definition v4 flows (HL-14c): a `read-back` step answers, hears the
-  agent read the request back ("Allow <text> for <session>? Yes?", built from
+  agent read the request back ("Allow <tool> to <text> for <session>? Yes?", built from
   the ask's redacted, fenced text and session name) and replies; the agent then
   submits allow or deny with the reply as `owner_words`. An `unsure` step is
   an unclear reply: the first gets "Sorry, is that a yes or a no?" with that

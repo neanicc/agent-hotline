@@ -205,7 +205,7 @@ describe("FakeVoiceProvider", () => {
     }
     const reading =
       "Ask 1, from Codex in api, permission request to use Bash, low risk: Run rm -rf build with token [REDACTED]";
-    const readBack = "Allow Run rm -rf build with token [REDACTED] for Codex in api? Yes?";
+    const readBack = "Allow Bash to Run rm -rf build with token [REDACTED] for Codex in api? Yes?";
 
     it("answers, hears the read-back of the redacted request, then confirms with the reply as owner_words", async () => {
       const { turns, tools } = await play(scriptedHuman.confirms(1, "yeah, go for it", "yep"));

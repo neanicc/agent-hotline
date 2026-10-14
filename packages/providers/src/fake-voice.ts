@@ -40,7 +40,7 @@ export type HumanStep =
     }
   /**
    * Answers permission ask `ask` with `words`; the agent reads the request back
-   * in one short sentence ("Allow <text> for <session>? Yes?", the definition v4
+   * in one short sentence ("Allow <tool> to <text> for <session>? Yes?", the definition v4
    * protocol) and the owner replies `reply`. The agent then submits `decision`
    * (allow for a yes, deny for a no) with `reply` as `owner_words`.
    */
@@ -337,8 +337,11 @@ export class FakeVoiceProvider implements VoiceProvider {
     const readBack = (ask: number) => {
       const line = placed?.variables.asks.split("\n")[ask - 1] ?? "";
       const fenced = [...line.matchAll(/<agent_text>(.*?)<\/agent_text>/g)].map((m) => m[1] ?? "");
-      const what = fenced[placed?.call.asks[ask - 1]?.toolName === undefined ? 1 : 2] ?? "";
-      return `Allow ${what} for ${fenced[0] ?? ""}? Yes?`;
+      // The tool stays in, so two asks that differ only by tool get different read-backs.
+      const hasTool = placed?.call.asks[ask - 1]?.toolName !== undefined;
+      const what = fenced[hasTool ? 2 : 1] ?? "";
+      const tool = hasTool ? `${fenced[1] ?? ""} to ` : "";
+      return `Allow ${tool}${what} for ${fenced[0] ?? ""}? Yes?`;
     };
     const unclearReplies = new Map<number, number>();
     const tool = async (name: ToolName, body: Record<string, unknown>) => {
