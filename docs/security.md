@@ -136,7 +136,7 @@ gaps, also failing safe (none approves anything), are listed under
 | File | Property | Bugs it found, fixed failing closed |
 | --- | --- | --- |
 | `packages/daemon/test/redact.property.test.ts` | Random registered secrets, values under secret-looking names, PINs and fake phone numbers embedded in JSON, nested JSON, form-encoded, URL query, `.env` (quoted, unquoted, `export`), YAML, HTTP-header and logfmt text never leave a 6-character piece in the output; random 16 KiB hostile shapes are redacted in linear time | A value after an encoded segment that opened a quote (`"token":"+,rest"`) kept its tail; an unquoted value stopped at a quote (`token=a'rest`); the JWT pattern was quadratic on `eyJ-eyJ-...` (now a linear scan of each run of token characters, which still finds a JWT after `-`) |
-| `packages/core/test/permission-risk.property.test.ts` | Obfuscated variants of 50+ high-risk commands (wrappers, quoting, `$'...'`, `${...}`, braces, globs, case, fullwidth and Cyrillic lookalikes, zero-width and no-break spaces, absolute command paths, attached option values, `cd`, environment prefixes, NFD) never classify as low; Codex argv arrays likewise; for random command lines the classifier calls low, `bash -n` and `zsh -n` must accept them and zsh's own word split (`${(z)...}`, the command passed as data, never run) must match `splitShell` | `git show HEAD:.env` was low (a revision's `:` was not a path boundary); `; ls`, `ls ;;` and `ls\n;` were low though bash refuses them; `ls &>>x` was low though macOS's bash 3.2 refuses it; `rg` options were a denylist, so `--hostname-bin` (runs a program) and unknown options were low; the first positive list still held `--hidden`, `--no-ignore`, `-u` and `-L`, so `rg -uu KEY` searched `.env` and `.git` as low (staff review) |
+| `packages/core/test/permission-risk.property.test.ts` | Obfuscated variants of 50+ high-risk commands (wrappers, quoting, `$'...'`, `${...}`, braces, globs, case, fullwidth and Cyrillic lookalikes, zero-width and no-break spaces, absolute command paths, attached option values, `cd`, environment prefixes, NFD) never classify as low; Codex argv arrays likewise; for random command lines the classifier calls low, `bash -n` and `zsh -n` must accept them and zsh's own word split (`${(z)...}`, the command passed as data, never run) must match `splitShell` | `git show HEAD:.env` was low (a revision's `:` was not a path boundary); `; ls`, `ls ;;` and `ls\n;` were low though bash refuses them; `ls &>>x` was low though macOS's bash 3.2 refuses it; `rg` options were a denylist, so `--hostname-bin` (runs a program) and unknown options were low; the first positive list still held `--hidden`, `--no-ignore`, `-u`, `-L`, `-g` and `-t`, so `rg -uu KEY` and `rg -g '.*' KEY` searched `.env` and `.git` as low (staff review) |
 | `packages/core/test/sms-reply.property.test.ts` | Random and word-salad texts approve only as `<yes word> <that request's code>`; nothing approves when no code was sent; conditional, negated, hedged or wrong-code yeses never approve | none |
 | `packages/daemon/test/voice-reply.property.test.ts` | The voice fast path never agrees with a reply holding a refusal, negation, condition or hedge, in one turn or split across turns; a random reply it agrees with has no doubt marker; whatever the model judge says, a reply with a condition, correction or negation is never agreed | none |
 | `packages/daemon/test/exposure.test.ts` | The exposure audit above | none |
@@ -177,8 +177,10 @@ request still needs the owner's own yes, and every failure denies. Its limits:
   inside the project (`grep -rn KEY src`, `find .`) is low even though it reaches
   any `.env` or `.git` under that folder, and `grep -R` follows symlinks. `rg`
   skips hidden and ignored files by default, so its options that undo that
-  (`--hidden`, `--no-ignore`, `-u`) or follow symlinks (`-L`, `--follow`) are
-  left off its positive list and make the command high.
+  (`--hidden`, `--no-ignore`, `-u`, and `-g`/`--glob`/`--iglob` and
+  `-t`/`--type`, since a file a glob or type selects is searched even when
+  hidden) or follow symlinks (`-L`, `--follow`) are left off its positive list
+  and make the command high.
 - The tokenizer refuses anything bash and zsh might expand or read differently.
   The differential test covers the separators, quotes, redirections and file
   descriptors it accepts, against zsh's lexer and bash's parser; it cannot prove
@@ -191,8 +193,10 @@ request still needs the owner's own yes, and every failure denies. Its limits:
 The redactor is a safety net under the logging contract (request logs carry
 method and path only; bodies and headers of webhooks are never logged). It errs
 towards removing too much: once an encoded segment that looks secret is removed
-and leaves a quote open, every segment up to the closing quote goes too, so a
-stray quote after one can blank the rest of a line. Accepted gaps, each found
+and leaves a quote open, every segment up to the closing quote goes too, on
+later lines as well (a quoted `.env` value may span lines). Text after the
+closing quote is kept; if the quote never closes, everything after the segment
+is removed (`redact.test.ts` pins both). Accepted gaps, each found
 by a probe or the fuzzer and none a current leak:
 
 - A registered secret re-encoded another way: base64, upper-cased, or split

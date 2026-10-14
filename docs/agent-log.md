@@ -3405,3 +3405,14 @@ Template:
   persisted, the saved PIN time bound to the call SID and window, the post-call
   replay memory kept in memory by design, and the uncapped SMS route; #78 is
   marked done. `docs/daemon.md` takes main's HL-13b text.
+- Review fixes (staff review of a2ec786): `-g`/`--glob`/`--iglob` and
+  `-t`/`--type` are off rg's positive list too (P2: in ripgrep's ignore crate
+  a glob override returns before the ignore files and the hidden check, and a
+  type whitelist skips the hidden check, so `rg -g '.*' KEY` read `.env` as
+  low; the default `sh` type names `.bashrc` and `.zshrc`). `--type-not` only
+  excludes and stays. Against the previous build, `rg -g .hidden KEY`,
+  `rg --glob=.hidden KEY` and `rg -t sh KEY` were low; reverting fails 7
+  classifier tests. (P2) Two redactor tests pin the encoded carry-over's
+  bound: text after the closing quote survives on later lines, and an
+  unclosed quote removes the rest, failing closed; `docs/security.md` said
+  "the rest of a line", which was wrong, and now says so.

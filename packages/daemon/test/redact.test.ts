@@ -314,6 +314,18 @@ describe("bypasses closed after the security review", () => {
     expect(text('password="qv\\"zw" next')).toBe(`password="${REDACTED}" next`);
   });
 
+  it("stops removing segments after an encoded secret at the closing quote, on any later line", () => {
+    const out = text('{"token":"ab+cd,ef\ngh"}, "note": "kept words"\nnext line kept');
+    expect(out).not.toMatch(/ab|cd|ef|gh/);
+    expect(out).toContain('"note": "kept words"\nnext line kept');
+  });
+
+  it("removes everything after an encoded secret whose quote never closes, failing closed", () => {
+    const out = text('{"token":"ab+cd,ef\nmore text here');
+    expect(out).not.toMatch(/ab|cd|ef|more|text|here/);
+    expect(out).toContain(REDACTED);
+  });
+
   it.each([
     ["From%3D%2B15555550100", "From%3D***0100"],
     ["x15555550100", "x***0100"],
