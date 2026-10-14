@@ -13,6 +13,7 @@ import {
 import type { CliContext, Output } from "./cli.js";
 import { costLines, readUsage } from "./cost.js";
 import { ElevenLabsAdmin } from "./elevenlabs-admin.js";
+import { JUDGE_CHOICES } from "./init.js";
 import { agentConfigFiles, type ConfigLocation, configLocation, readConfigFile } from "./install.js";
 import { fetchFor, lastFour, secretStoreFor } from "./setup.js";
 
@@ -26,20 +27,22 @@ export interface Check {
 
 export function doctorUsage(): string {
   return [
-    "Usage: hotline doctor [--home <dir>] [--command <path>]",
+    "Usage: hotline doctor [--home <dir>] [--command <path>] [--check-judge]",
     "",
     "Checks the config, secrets (set or not, never their values), the daemon and its",
-    "token, the Claude Code and Codex installs and their timeouts, the deployed",
-    "ElevenLabs agent and the webhook URL. Exits 1 if any check fails. Then prints",
-    "an estimated monthly cost from the last 30 days in the local store, priced with",
-    "the config's costs.* rate assumptions; it makes no network call for that.",
+    "token, the reply judge, the Claude Code and Codex installs and their timeouts,",
+    "the deployed ElevenLabs agent and the webhook URL. Exits 1 if any check fails.",
+    "Then prints an estimated monthly cost from the last 30 days in the local store,",
+    "priced with the config's costs.* rate assumptions; it makes no network call for that.",
     "",
     "  --home <dir>       Look for agent configs under <dir> instead of your home folder",
     "  --command <path>   The --command the hooks were installed with, if any",
+    "  --check-judge      Also ask the reply judge one tiny fixed question (one model call)",
   ].join("\n");
 }
 
 const SECRET_LABELS: Record<SecretName, string> = {
+  "anthropic.apiKey": "Anthropic API key",
   "daemon.apiToken": "daemon API token",
   "elevenlabs.apiKey": "ElevenLabs API key",
   "elevenlabs.toolSecret": "ElevenLabs tool secret",
@@ -344,6 +347,80 @@ async function elevenLabsChecks(
   return checks;
 }
 
+/** The fixed reply `--check-judge` sends: no owner words, a clear yes the judge must agree to. */
+export const JUDGE_CHECK_REPLY = "yes, go ahead";
+
+/**
+ * Which reply judge the daemon would use (HL-09d), found the way the daemon
+ * finds it: a CLI on the PATH or a stored key, with no model call. With
+ * `--check-judge`, one tiny call with a fixed reply that must come back agreed.
+ */
+async function judgeCheck(
+  context: CliContext,
+  config: Config,
+  apiKey: string | undefined,
+  callJudge: boolean,
+): Promise<Check[]> {
+  const name = "judge";
+  const { nodeJudgeHost, selectReplyJudge } = await import("@hotline/daemon");
+  const searchPath = context.env.PATH;
+  const selection = await selectReplyJudge({
+    choice: config.judge.backend,
+    host: context.judgeHost ?? nodeJudgeHost(context.env),
+    ...(searchPath === undefined ? {} : { searchPath }),
+    ...(apiKey === undefined ? {} : { apiKey }),
+    // Only the API backend uses it, and only for --check-judge.
+    fetch: (url, init) => fetchFor(context)(url, init),
+  });
+  if (selection.backend === "none") {
+    if (config.judge.backend === undefined) {
+      return [
+        {
+          status: "warn",
+          name,
+          detail: `not chosen: nothing is sent, and a reply that is not a plain yes or no is texted; choose with hotline init --force --non-interactive --judge <${JUDGE_CHOICES}> (see docs/install.md)`,
+        },
+      ];
+    }
+    if (config.judge.backend === "off") {
+      return [
+        {
+          status: "pass",
+          name,
+          detail: "off (judge.backend): a reply that is not a plain yes or no is texted",
+        },
+      ];
+    }
+    return [
+      {
+        status: "warn",
+        name,
+        detail: `none: ${selection.detail}; a spoken reply that is not a plain yes or no is texted instead (install Claude Code or Codex, see docs/install.md)`,
+      },
+    ];
+  }
+  const checks: Check[] = [
+    {
+      status: "pass",
+      name,
+      detail: `${selection.backend}: ${selection.detail}; only your short spoken reply is sent to it`,
+    },
+  ];
+  if (callJudge) {
+    const verdict = await selection.judge.judge([JUDGE_CHECK_REPLY]).catch(() => "failed");
+    checks.push(
+      verdict === "agreed"
+        ? { status: "pass", name, detail: `a test question ("${JUDGE_CHECK_REPLY}") came back agreed` }
+        : {
+            status: "fail",
+            name,
+            detail: `a test question ("${JUDGE_CHECK_REPLY}") came back ${verdict}, not agreed; check the CLI's login (claude or codex) or the API key`,
+          },
+    );
+  }
+  return checks;
+}
+
 function webhookCheck(config: Config): Check {
   const needed = config.voice.provider === "elevenlabs" || config.sms.provider === "twilio";
   const url = config.tunnel.publicUrl;
@@ -361,6 +438,7 @@ export async function runChecks(
   context: CliContext,
   home: string | undefined,
   launcher = "hotline",
+  callJudge = false,
 ): Promise<Check[]> {
   const { hotlinePaths, loadConfig, readAwayState } = await import("@hotline/daemon");
   const checks: Check[] = [];
@@ -387,6 +465,7 @@ export async function runChecks(
     checks.push({ status: "fail", name: "secret", detail: (error as Error).message });
   }
   checks.push(await daemonCheck(context, config, values.get("daemon.apiToken")));
+  checks.push(...(await judgeCheck(context, config, values.get("anthropic.apiKey"), callJudge)));
   const away = await readAwayState(paths.away);
   checks.push(
     away.problem === undefined
@@ -425,11 +504,16 @@ export async function doctorCommand(
 ): Promise<number> {
   let home: string | undefined;
   let launcher = "hotline";
+  let callJudge = false;
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
     if (arg === "--help" || arg === "-h") {
       out.stdout(doctorUsage());
       return 0;
+    }
+    if (arg === "--check-judge") {
+      callJudge = true;
+      continue;
     }
     if (arg === "--home" && args[index + 1]) {
       home = args[++index];
@@ -442,7 +526,7 @@ export async function doctorCommand(
     out.stderr(`hotline doctor: unexpected "${arg}"\n\n${doctorUsage()}`);
     return 2;
   }
-  const checks = await runChecks(context, home, launcher);
+  const checks = await runChecks(context, home, launcher, callJudge);
   const width = Math.max(...checks.map((check) => check.name.length));
   for (const check of checks) {
     out.stdout(`${check.status.toUpperCase().padEnd(4)}  ${check.name.padEnd(width)}  ${check.detail}`);
