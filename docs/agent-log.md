@@ -1782,3 +1782,87 @@ Template:
     PermissionRequest `tool_input`. Then the blanket Codex rule could narrow to
     the field rules. Worth raising upstream.
   - Parser-differential and allowlist-escape classes stay with HL-13 (#14).
+
+## 2026-10-14 — HL-09c Voice approvals confirmed by read-back (#42)
+
+- Owner direction (autopilot session, on #42): approving by voice must be as
+  natural as a conversation, with the least friction for the owner: "u can
+  confirm any chill way possible that isn't ambiguous". No keyword list may
+  reject a natural yes. When the voice agent is unsure it asks "is that a yes
+  or a no?" and never goes quiet; after two unclear replies it texts instead.
+- Decision / change (`packages/daemon/src/voice-confirm.ts`): `YES_WORDS` is
+  gone. An `allow` is confirmed by the read-back exchange: the ask's reading,
+  a later agent turn recognised as reading the same ask that asks for a yes (a
+  `?`, "yes" or "confirm"; "Sorry, is that a yes or a no?" plus the read-back
+  counts), and the owner's reply in the window right after it. The reply and
+  every later owner turn about the ask must not sound doubtful (refusal,
+  hedge, doubt, any `n't`, a question back). Doubt before the read-back does
+  not block a clear reply after it. No read-back, a read-back of another ask,
+  the first reading on its own, or a statement repeating the request is not
+  confirmed (the ask is texted). Deny, options, free text, `done` and the
+  high-risk PIN rule are unchanged.
+- Decisions (no human available):
+  - A read-back needs an earlier reading of the same ask anywhere on the call,
+    not necessarily the last ask read. Going back to ask 1 after answering
+    ask 2 with "And the first one: allow ...? Yes?" is natural and still binds
+    to ask 1, since the turn must be recognised as reading that ask and no
+    other. Stricter ordering would text these asks for no safety gain.
+  - Long asks: a turn also reads an ask whose text has more than 8 key words
+    when it names at least 4 of them (`LONG_ASK_KEY_WORDS`); the session name
+    and tool alone never do. To keep ties from turning into matches, a
+    candidate whose matched words are a strict subset of another candidate's
+    drops out, candidates matched on the same words fall back to the larger
+    share of their own key words (equal share reads none), and candidates
+    matched on different words (a turn reading two asks) read none.
+  - Doubt words added, all fail closed: `hm`, `hmmm`, `kinda`, `sorta`,
+    `whatever`, `meh`, `suppose`, `nuh`, `huh`, `pardon`, `hello`, `repeat`,
+    and the phrases "uh uh" and "uh oh". "Mm-hmm" and "uh-huh" are treated as
+    a yes. Not added: fillers "um" and "uh" (they precede many natural
+    yeses). Not allowed: idioms with a negation word ("no problem", "why
+    not"), since a transcript without commas cannot tell "no problem" from
+    "no, problem is ...".
+  - "Owner stayed unclear" without a contract break: when the queue's result
+    is `dropped` and every ask left open was read and replied to, the
+    `call.ended` audit `result` is `owner-unclear` and each such ask gets a
+    `voice.ask-unclear` entry. The queue still gets `dropped` (so the ask is
+    texted at once), the stored `CallRecord.outcome` stays `answered`, and the
+    agent's no-answer reason stays `dropped`. A distinct agent-facing reason
+    needs `CallEnd` and `NoAnswerReason` in `packages/core`: follow-up.
+- Changed test expectations, each following the owner-directed rule only:
+  - `voice-confirm.test.ts`: approvals that passed on a yes right after the
+    reading ("confirms the owner's words ...", "joins consecutive owner
+    turns", ask 2 in "never takes a yes said after a different ask") now say
+    the yes after a read-back, with the same excerpts. "Never takes an early
+    yes" now expects the reason "the request was not read back for a yes".
+    "Needs a yes word for an approval" became "needs no yes word after a
+    read-back, but a hedge still blocks" (same results). The doubt, hedge,
+    retraction and question tests now put the doubtful words after a
+    read-back so they test doubt, not the missing read-back; all still fail.
+    One expectation flipped: "no", a read-back, then "okay yes" now approves
+    (it was "is strict about a change of mind"), because doubt before the
+    read-back no longer blocks; without the read-back, or with doubt after
+    it, it still does not.
+  - `persona-readings.test.ts`: the 1/2/4-ask test plays the allow with the
+    v4 read-back, so ask 1 is read twice (reading, then read-back).
+  - `orchestration.test.ts`: four voice allows ("covers several agents'
+    asks", "a low-risk request is allowed and denied", the PIN call in
+    "refuses a high-risk allow without the PIN", ask 2 in "a yes said after a
+    different ask") are played as read-back steps; their results are
+    unchanged.
+- Evidence: see the PR's Validation section. Mutation checks, each reverted:
+  no read-back required (76 tests fail), the first reading counted as a
+  read-back (9), no ask-for-yes cue (1), no doubt check after the read-back
+  (67), doubt before the read-back counted (5), no long-ask rule (3), no
+  subset rule (9), no "mm-hmm" handling (4).
+- Risk, accepted by the owner's direction: with no yes word, a voice model
+  that reads the request back and then submits allow on a neutral reply
+  ("I'm driving") would be confirmed; so would a refusal in another language
+  ("nein"). The read-back, the doubt markers and the model's own judgement
+  are what remain; high-risk requests still need the PIN. Real transcripts
+  are a live-check item (`docs/live-check.md`).
+- Open issues or follow-ups:
+  - Add an "owner stayed unclear" `CallEnd` and `NoAnswerReason` in
+    `packages/core` so the agent sees it (lane:core).
+  - The fake voice provider's `allows()` still plays a v3 model (no
+    read-back), which the daemon now refuses; tests that want an approval use
+    `confirms()` or a `read-back` step.

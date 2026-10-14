@@ -4,9 +4,10 @@
 //
 // A voice answer is never taken on the model's word: it is held until the
 // post-call transcript confirms it (`confirmVoiceDecision`: the owner's own
-// turns, after the ask was read and before the next one). Only confirmed
-// answers and `unclear` reports become queue events; everything else (no
-// pickup, a dropped call, a conflict, an unconfirmed answer) is no answer.
+// turns, after the ask was read and before the next one; an allow, the owner's
+// reply to the read-back). Only confirmed answers and `unclear` reports become
+// queue events; everything else (no pickup, a dropped call, a conflict, an
+// unconfirmed answer, an owner who stayed unclear) is no answer.
 import { Answer, type Ask, type QueueAction, type QueueEvent } from "@hotline/core";
 import type { PostCallEvent, VoiceAsk, VoiceProvider } from "@hotline/providers";
 import type { SubmitAnswerResult, VoiceAnswer } from "./elevenlabs-webhook.js";
@@ -19,10 +20,19 @@ import {
   type PendingVoiceAnswer,
 } from "./orchestrator-state.js";
 import type { HotlineStore } from "./store.js";
-import { confirmVoiceDecision, type ReadAsk } from "./voice-confirm.js";
+import { answerWindows, confirmVoiceDecision, type ReadAsk } from "./voice-confirm.js";
 
 /** Rough cost of a call minute in US cents (Twilio voice plus ElevenLabs Agents), for `hotline doctor`. */
 export const CALL_CENTS_PER_MINUTE = 12;
+
+/**
+ * How a call ended, as the call log and audit record it: the queue's result, or
+ * `owner-unclear` for a call the queue sees as `dropped` where every ask left
+ * open was read and replied to, but no decision for it was confirmed (the owner
+ * stayed unclear and the voice agent moved on, or the answer could not be
+ * confirmed). The queue still gets `dropped`, which texts those asks.
+ */
+type CallResult = "answered" | "no-pickup" | "dropped" | "failed" | "owner-unclear";
 
 export interface VoiceCallsOptions {
   store: HotlineStore;
@@ -214,11 +224,13 @@ export class VoiceCalls {
     }
     const events: QueueEvent[] = [];
     let result: "answered" | "no-pickup" | "dropped" | "failed";
+    let logged: CallResult;
     if (event.type === "initiation-failure") {
       result = event.reason === "unknown" ? "failed" : "no-pickup";
+      logged = result;
     } else {
       const asks = call.askIds.map((askId) => this.#readAsk(askId));
-      let settled = 0;
+      const settledIds = new Set<string>();
       call.askIds.forEach((askId, index) => {
         const held = call.answers[askId];
         if (held === undefined) return;
@@ -228,7 +240,7 @@ export class VoiceCalls {
         }
         if (held.decision === "unclear") {
           events.push({ type: "unclear", askId });
-          settled += 1;
+          settledIds.add(askId);
           return;
         }
         const check = confirmVoiceDecision({
@@ -248,7 +260,7 @@ export class VoiceCalls {
             // owner's words, but the request ends now as no answer (a deny), and is
             // never sent out again for approval.
             events.push({ type: "unclear", askId });
-            settled += 1;
+            settledIds.add(askId);
           }
           return;
         }
@@ -264,10 +276,24 @@ export class VoiceCalls {
             answeredAt: held.answeredAt,
           },
         });
-        settled += 1;
+        settledIds.add(askId);
       });
       const ownerSpoke = event.transcript.some((turn) => turn.role === "owner");
-      result = !ownerSpoke ? "no-pickup" : settled === call.askIds.length ? "answered" : "dropped";
+      const open = call.askIds.flatMap((askId, index) => (settledIds.has(askId) ? [] : [{ askId, index }]));
+      result = !ownerSpoke ? "no-pickup" : open.length === 0 ? "answered" : "dropped";
+      // An open ask the owner replied to after it was read stayed unclear: it
+      // was heard, not cut off. It is texted all the same.
+      const unclear = open.filter(({ index }) =>
+        (answerWindows(event.transcript, asks, index) ?? []).some((window) =>
+          window.some((turn) => turn.role === "owner"),
+        ),
+      );
+      if (result === "dropped") {
+        for (const { askId } of unclear) {
+          this.#store.appendAudit("voice.ask-unclear", {}, receivedAt, { askId, callId: call.callId });
+        }
+      }
+      logged = result === "dropped" && unclear.length === open.length ? "owner-unclear" : result;
     }
     events.push({ type: "call-ended", callId: call.callId, result });
     // The call stays live (with its held answers) until every event is applied:
@@ -276,7 +302,7 @@ export class VoiceCalls {
     for (const next of events) await this.#options.process(next);
     this.#state.data.calls = this.#state.data.calls.filter((other) => other !== call);
     this.#state.save();
-    this.#recordCall(call, event, result, receivedAt);
+    this.#recordCall(call, event, logged, receivedAt);
   }
 
   #readAsk(askId: string): ReadAsk {
@@ -293,7 +319,7 @@ export class VoiceCalls {
   #recordCall(
     call: LiveCall,
     event: Exclude<PostCallEvent, { type: "other" }>,
-    result: string,
+    result: CallResult,
     endedAt: Date,
   ): void {
     const duration = event.type === "transcription" ? (event.durationSeconds ?? 0) : 0;
@@ -309,7 +335,7 @@ export class VoiceCalls {
         },
         askIds: call.askIds,
         outcome:
-          result === "answered" || result === "dropped"
+          result === "answered" || result === "dropped" || result === "owner-unclear"
             ? "answered"
             : result === "failed"
               ? "failed"

@@ -46,9 +46,11 @@ It sounds like a calm, friendly teammate with a quick heads-up:
   records nothing for that ask and moves on; the daemon then texts you the ask
   as soon as the call ends, and an unanswered text is "no answer", which denies
   a permission request. It asks for your PIN at most once per call, and it never
-  goes quiet on you. The read-back is a rule for the voice model: until HL-09c
-  the daemon does not require it in the transcript, and still checks every
-  answer against your own words as described below.
+  goes quiet on you. The daemon also requires the read-back in the call's
+  transcript (HL-09c): an approval counts only as your reply to it. Any
+  natural yes works there ("of course", "go for it", "send it", "mm-hmm"),
+  with no special words; a "no", "wait", "hmm", "if ..." or a question back
+  in or after your reply means it is not approved and you get a text instead.
 - If you say you are busy, it says goodbye without recording anything; Hotline then
   texts you the open asks, and an ask nobody answers goes back to its agent as
   "no answer" when it expires.

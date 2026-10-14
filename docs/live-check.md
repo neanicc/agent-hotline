@@ -29,7 +29,12 @@ Never fabricate an entry; "not tested" is a valid result.
   denied at once with no read-back. Mumble twice to a third: it asks "is that a
   yes or a no?", then says it will text you, and the text arrives when the call
   ends. Check the daemon log has no `voice.answer-unconfirmed` for the
-  confirmed yes.
+  confirmed yes, and that the third call's `call.ended` says `owner-unclear`.
+  Then answer a read-back with "of course" (no yes word): it is approved. Say
+  "hmm" to a fourth, then "yeah go ahead" to "is that a yes or a no?": it is
+  approved. If a real read-back of a long request is not recognised
+  (`voice.answer-unconfirmed`, "the request was not read back for a yes"),
+  note the read-back's words.
 - Claude Code: ask it to "use ask_human to ask me which color to use, then
   continue". Answer by voice; check the session continues with your answer.
 - Codex: `hotline away on`, give it a task that needs a command approval. Approve

@@ -335,9 +335,19 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
   (`voice.answer-conflict`). Accepted answers are held (`recorded` tells the
   voice agent they arrived) until the post-call transcript. There each held
   answer must pass `confirmVoiceDecision` (`voice-confirm.ts`):
-  - the agent turns that read the ask are found by their key words (at least
-    half, best match, ties read nothing; the call's first agent turn, the fixed
-    greeting, never counts). The ask's windows are the person's turns right
+  - the agent turns that read the ask are found by their key words (the
+    ask's text, session name and tool, minus very common words; the call's
+    first agent turn, the fixed greeting, never counts). A turn is a candidate
+    for an ask when it holds at least half of that ask's key words, or, for a
+    long ask (more than 8 key words in its text), at least 4 of its text's key
+    words, so a one-sentence read-back of a long ask is still recognised; the
+    session name and tool alone never make a long ask's reading. A candidate
+    whose matched words are all matched by another candidate that matches more
+    drops out (a read-back naming `Read` reads the `Read` ask, not the `Write`
+    one on the same file). One candidate left is read. Several left that the
+    turn matched on exactly the same words: the one with the larger share of
+    its own key words is read, and an equal share reads none. Several left on
+    different words (a turn reading two asks at once) read none. The ask's windows are the person's turns right
     after each such reading, up to the next agent turn of any kind: an agent
     turn not recognised as reading this ask (a paraphrase, a tie, another ask,
     small talk) always closes the window, and a re-reading opens a new one. The
@@ -354,23 +364,44 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
   - an answer is taken back by anything the owner said about the ask after it
     that sounds doubtful (below), such as "no", "wait", "never mind",
     "actually";
-  - an `allow` must be unambiguous: the matched words hold a yes word (`yes`,
-    `okay`, `go`, ...), nothing the owner said in any of the ask's windows
-    sounds doubtful, and the owner's last words about the ask (in its last
-    window) are a yes or close the matched yes. "No... okay, yes" is not an
-    approval; the owner can approve by text or on another call.
+  - an `allow` is confirmed by the read-back exchange, not by a list of yes
+    words (HL-09c, the owner's direction: approving by voice is as natural as
+    a conversation, and no keyword list may reject a natural yes). There must
+    be a read-back of this ask: an agent turn recognised as reading it, after
+    an earlier turn that read it (the first reading is never its own
+    read-back), that asks for a yes (a `?`, "yes" or "confirm"), such as
+    "Allow pnpm test in demo-app? Yes?" or "Sorry, is that a yes or a no?"
+    followed by that read-back. The owner's words must be found in the window
+    right after a read-back, and nothing the owner said in that window or any
+    later window of the ask may sound doubtful (below) or ask a question back.
+    No yes word is needed: "of course", "absolutely", "do it", "go for it",
+    "send it", "for sure" and "mm-hmm" all approve after a read-back. Doubt
+    before the read-back does not count against a clear reply after it, so
+    "hmm", then "Sorry, is that a yes or a no? Allow ...? Yes?", then "yeah go
+    ahead" approves, and so does "no", a read-back, then "okay yes" (a deny the
+    voice agent submitted for the "no" still wins, see above). No read-back, a
+    read-back of a different ask, a read-back with no reply, or a statement
+    repeating the request ("Okay, it will run pnpm test.") is no approval: the
+    ask stays open and is texted. The voice model's own judgement still
+    decides whether to submit the allow; the daemon only refuses one the
+    transcript does not back.
   "Sounds doubtful" (`soundsDoubtful`) means refusal, negation, hesitation,
   delay or correction: words such as `no`, `not`, `never`, `wait`, `hold`,
   `later`, `maybe`, `but`, `cancel`, `abort`, `negative`, `cannot`, `actually`,
   any `n't` (apostrophe look-alikes such as `’`, `ʼ`, `` ` ``, `´` and `′` are
   normalised first) and the same forms typed without it (`dont`, `wouldnt`,
   `cant`, ...), hedges and conditions (`unsure`, `whether`, `if`, `probably`,
-  `think`, `hmm`, ...), refusals without a "no" (`skip`, `decline`, `pass`,
-  `block`, `veto`, `rather`, ...), the phrases "hang on", "hold on", "not yet",
-  "no way" and "never mind", and questions (a `?`, or `what`, `why`, `how`,
-  `which`, ..., since speech recognition often drops the question mark). A
-  question asked before the owner's answer ("what does it push?") does not
-  count against a later yes; one in the answer itself or after it does.
+  `think`, `suppose`, `hmm`, `hm`, `kinda`, `whatever`, `meh`, ...), not having
+  heard (`huh`, `pardon`, `hello`, `repeat`), refusals without a "no" (`skip`,
+  `decline`, `pass`, `block`, `veto`, `rather`, ...), the phrases "hang on",
+  "hold on", "not yet", "no way", "never mind", "uh uh" and "uh oh", and
+  questions (a `?`, or `what`, `why`, `how`, `which`, ..., since speech
+  recognition often drops the question mark). "Mm-hmm" and "uh-huh" are a yes,
+  not a "hmm" or "huh". A question asked before the owner's answer ("what does
+  it push?") does not count against a later yes; one in the answer itself or
+  after it does. Idioms that carry a negation word ("no problem", "why not")
+  still sound doubtful: a transcript without commas cannot tell "no problem"
+  from "no, problem is ...", so these fail closed and the ask is texted.
   A `deny` needs only the owner's words in a window; nothing else can block a
   refusal. The stored `ownerExcerpt` is the matching owner turns, verbatim, not
   the model's `owner_words`. An unconfirmed answer is dropped
@@ -382,15 +413,30 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
   Confirmed answers and `unclear` reports reach the queue before the call's
   `call-ended`.
   Known limits: the word lists are English, so other languages never confirm
-  an approval, an option or `done` (fail closed: the ask is texted). A doubtful
+  an option or `done` (fail closed: the ask is texted), and a refusal or hedge
+  in another language ("nein") is not recognised as doubt in a reply to a
+  read-back, so only the voice model's judgement keeps it from being
+  submitted as an allow. A doubtful
   word in a later turn about the ask also takes back a free-text answer. These
   rules are tested on scripted transcripts only; real ElevenLabs transcripts
   (turn splitting, interruptions, paraphrased readings) need the live check, and
-  some answers will be refused there until the persona is tuned.
+  some answers will be refused there until the persona is tuned. Without a yes
+  word, the read-back and the doubt markers are what stand between a voice
+  model that submits an allow on its own and an approval: a model that reads
+  the request back and then submits allow on a neutral reply ("I'm driving")
+  would be confirmed. High-risk requests still need the PIN.
 - **How a call ended.** `call_initiation_failure` `busy` or `no-answer` is
   `no-pickup`, anything else `failed`. A transcription in which the owner never
   spoke is `no-pickup` (voicemail, silence); one where every ask was settled is
-  `answered`; otherwise `dropped`. A call whose post-call event never arrives is
+  `answered`; otherwise `dropped`. The call log (`call.ended` audit `result`)
+  says `owner-unclear` instead of `dropped` when every ask left open was read
+  and the owner replied to it, but no decision for it was confirmed (the owner
+  stayed unclear and the voice agent moved on to a text, or the answer was not
+  confirmed); each such ask gets a `voice.ask-unclear` audit entry. The queue
+  still gets `dropped`, so those asks are texted at once, and an unanswered
+  text still expires with reason `dropped`: the core contract has no reason for
+  an owner who stayed unclear yet. Its `CallRecord.outcome` is `answered`
+  (the owner picked up). A call whose post-call event never arrives is
   given up on after 15 minutes, its held answers discarded: no answer. Each
   ended call is stored as a `CallRecord` with its duration and a rough cost
   estimate (12 US cents a minute).

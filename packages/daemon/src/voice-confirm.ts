@@ -10,14 +10,21 @@
 //   agent turn that cannot be told apart (a paraphrase, a tie) never confirms it.
 // - `ownerSaid` (providers) does the matching: case and punctuation ignored,
 //   whole words, owner turns only.
+// - An approval (`allow`) is confirmed by the read-back exchange (HL-09c, the
+//   owner's direction: approving by voice is as natural as a conversation). The
+//   ask is read; later the agent reads it back as a question asking for a yes ("Allow pnpm test in demo-app? Yes?",
+//   or "Sorry, is that a yes or a no?" with the read-back); the owner's words
+//   are their reply to that read-back. No yes word is needed ("of course", "do
+//   it", "send it" all approve), but the reply and everything the owner says
+//   about the ask after the read-back must hold no refusal, hedge or doubt and
+//   no question back. Doubt before the read-back ("hmm") does not count against
+//   a clear reply after it. No read-back, or a read-back of another ask, is no
+//   approval.
 // - A free-text decision (a question's answer, a stop's next instruction) must
 //   itself be words the owner said, since it becomes the agent's next input.
 // - Anything the owner said about the ask after those words may take it back:
 //   a later turn with refusal, negation, hesitation or a correction ("no",
 //   "wait", "never mind", "actually", any "n't") means not confirmed.
-// - An approval must be unambiguous: the matched words and the owner's last
-//   words about the ask hold a yes word, and nothing the owner said about the
-//   ask, before or after, sounds doubtful. "No... okay, yes" is not a yes.
 // - An option must be named in the owner's words (its number, ordinal, number
 //   word or most of its text), and no other offered option may be. `done` needs
 //   a word for it ("done", "that's it", "nothing").
@@ -40,6 +47,12 @@ export interface ReadAsk {
 
 /** Share of an ask's key words an agent turn must contain to count as reading it. */
 export const READING_MIN_SHARE = 0.5;
+/**
+ * An ask whose text has more key words than this is long: a turn that names
+ * half this many of its text's key words also reads it, so a one-sentence
+ * read-back of a long ask is still recognised.
+ */
+export const LONG_ASK_KEY_WORDS = 8;
 /** Ask text the voice agent was given is cut to this many characters (`callVariables`). */
 const READ_TEXT_LENGTH = 300;
 /** Owner turns kept as the stored excerpt, at most. The contract allows 2000 characters. */
@@ -51,10 +64,6 @@ const wordSet = (words: string): ReadonlySet<string> => new Set(words.split(" ")
 const COMMON = wordSet(
   "the and for you your are can this that with from want wants should would will use run ask agent",
 );
-/** Words that make an approval clear. */
-const YES_WORDS = wordSet(
-  "yes yeah yep yup yea sure ok okay approve approved allow allowed go proceed fine absolutely definitely",
-);
 /**
  * Words that make an approval doubtful or take an answer back: refusal,
  * negation, hesitation, delay, correction. Includes the not-forms people type or
@@ -62,16 +71,21 @@ const YES_WORDS = wordSet(
  */
 const DOUBT_WORDS = wordSet(
   [
-    "no nope nah not never negative deny denied reject refuse stop cancel abort wait hold later maybe",
+    "no nope nah nuh not never negative deny denied reject refuse stop cancel abort wait hold later maybe",
     "unless but cannot nevermind scratch forget actually instead",
     // Hedges and conditions: "I'm unsure whether to approve", "yes if the tests pass".
-    "unsure uncertain doubt dunno idk whether if perhaps probably possibly might guess think hmm",
+    "unsure uncertain doubt dunno idk whether if perhaps probably possibly might guess suppose think",
+    "hmm hm hmmm kinda sorta whatever meh",
+    // Not heard or not followed: "huh", "pardon", "hello", "repeat that".
+    "huh pardon hello repeat",
     // Refusals without a "no": "fine, skip it", "go ahead and decline it".
     "decline declined skip pass block disallow veto rather away",
     "dont doesnt didnt wont wouldnt cant couldnt shouldnt isnt arent wasnt werent",
     "havent hasnt hadnt aint mustnt neednt mightnt shant",
   ].join(" "),
 );
+/** Spoken yeses that contain a doubt word on their own ("mm-hmm", "uh-huh"). */
+const AFFIRMING_SOUNDS = ["mm hmm", "mm hm", "m hmm", "uh huh"];
 /** How the owner may name option N (index N - 1). "one" is too common ("the second one") to name option 1 against another. */
 const NUMBER_WORDS = "one two three four five six seven eight nine".split(" ");
 const ORDINALS = "first second third fourth fifth sixth seventh eighth ninth".split(" ");
@@ -89,9 +103,12 @@ const DONE_PHRASES = [
 /** Words that make a turn a question. */
 const QUESTION_WORDS = wordSet("what why how which when where who whose explain wonder curious question");
 /** Doubt that only shows as a phrase. */
-const DOUBT_PHRASES = ["hang on", "hold on", "not yet", "no way", "never mind", "dont do"];
+const DOUBT_PHRASES = ["hang on", "hold on", "not yet", "no way", "never mind", "dont do", "uh uh", "uh oh"];
+/** Words in an agent turn that ask the owner for a yes, besides a question mark. */
+const ASKS_FOR_YES = wordSet("yes confirm");
 /** Apostrophe look-alikes a transcript may use for "don't". */
 const APOSTROPHES = /[’‘ʼ`´′]/g;
+const QUESTION_MARK = /[?？¿]/u;
 
 function normalized(text: string): string {
   return text.toLowerCase().normalize("NFKC").replace(APOSTROPHES, "'");
@@ -111,29 +128,79 @@ function tokens(text: string): string[] {
 export function soundsDoubtful(text: string, questions = true): boolean {
   const plain = normalized(text);
   if (plain.includes("n't")) return true;
-  const words = tokens(text);
+  const all = tokens(text);
+  // "Mm-hmm" and "uh-huh" are a yes, though "hmm" and "huh" alone are not.
+  let joined = ` ${all.join(" ")} `;
+  for (const sound of AFFIRMING_SOUNDS) joined = joined.replaceAll(` ${sound} `, " ");
+  const words = joined.split(" ").filter((word) => word.length > 0);
   if (words.some((word) => word === "t" || DOUBT_WORDS.has(word))) return true;
   // A question is never an approval ("okay, what does it do"; speech recognition
   // often drops the question mark). `questions: false` is for turns before the
   // owner's answer, where asking what something does is not a refusal.
-  if (questions && (/[?？¿]/u.test(plain) || words.some((word) => QUESTION_WORDS.has(word)))) return true;
-  const joined = ` ${words.join(" ")} `;
+  if (questions && (QUESTION_MARK.test(plain) || words.some((word) => QUESTION_WORDS.has(word)))) return true;
   return DOUBT_PHRASES.some((phrase) => joined.includes(` ${phrase} `));
 }
 
+const isKey = (word: string) => word.length >= 3 && !COMMON.has(word);
+
+interface AskKeys {
+  /** Every word that identifies the ask: its text, session name and tool. */
+  all: ReadonlySet<string>;
+  /** The ones from its text alone. */
+  text: ReadonlySet<string>;
+}
+
 /** The words that identify an ask when the agent reads it out. */
-function keyWords(ask: ReadAsk): Set<string> {
-  const all = [ask.text.slice(0, READ_TEXT_LENGTH), ask.nickname, ask.toolName ?? ""].flatMap(tokens);
-  const key = new Set(all.filter((word) => word.length >= 3 && !COMMON.has(word)));
-  return key.size > 0 ? key : new Set(all);
+function keyWords(ask: ReadAsk): AskKeys {
+  const fromText = tokens(ask.text.slice(0, READ_TEXT_LENGTH));
+  const every = [...fromText, ...[ask.nickname, ask.toolName ?? ""].flatMap(tokens)];
+  const all = new Set(every.filter(isKey));
+  return { all: all.size > 0 ? all : new Set(every), text: new Set(fromText.filter(isKey)) };
+}
+
+const subset = (a: ReadonlySet<string>, b: ReadonlySet<string>) => [...a].every((word) => b.has(word));
+
+/**
+ * Which ask one agent turn reads, or undefined. An ask is a candidate when the
+ * turn holds at least `READING_MIN_SHARE` of its key words, or, for a long ask,
+ * half of `LONG_ASK_KEY_WORDS` of its text's key words. Of the candidates, one
+ * whose matched words are all matched by another, which matches more, drops out
+ * (the turn says nothing that is only that ask's). If one is left it is read. If
+ * several are left and the turn matched the same words of each, the one with
+ * the larger share of its own key words is read; otherwise (a turn reading two
+ * asks, or a tie) none is.
+ */
+function readingOf(said: ReadonlySet<string>, keys: readonly AskKeys[]): number | undefined {
+  const candidates = keys.flatMap((key, ask) => {
+    if (key.all.size === 0) return [];
+    const matched = new Set([...key.all].filter((word) => said.has(word)));
+    const textMatched = [...key.text].filter((word) => said.has(word)).length;
+    const share = matched.size / key.all.size;
+    const long =
+      key.text.size > LONG_ASK_KEY_WORDS && textMatched >= Math.ceil(LONG_ASK_KEY_WORDS * READING_MIN_SHARE);
+    return share >= READING_MIN_SHARE || long ? [{ ask, matched, share }] : [];
+  });
+  const left = candidates.filter(
+    (c) =>
+      !candidates.some((other) => other.matched.size > c.matched.size && subset(c.matched, other.matched)),
+  );
+  const [first, ...rest] = left;
+  if (first === undefined) return undefined;
+  if (rest.length === 0) return first.ask;
+  const sameWords = rest.every(
+    (c) => c.matched.size === first.matched.size && subset(c.matched, first.matched),
+  );
+  if (!sameWords) return undefined;
+  const best = Math.max(...left.map((c) => c.share));
+  const top = left.filter((c) => c.share === best);
+  return top.length === 1 ? top[0]?.ask : undefined;
 }
 
 /**
- * For each transcript turn, the index of the ask it reads out, or undefined. A
- * turn reads the ask whose key words it covers best, with at least
- * `READING_MIN_SHARE` of them; a tie reads none. The call's first agent turn is
- * the fixed greeting and never reads an ask, so an ask written to look like the
- * greeting cannot pull the owner's reply to it into its window.
+ * For each transcript turn, the index of the ask it reads out, or undefined
+ * (see `readingOf`; a tie reads none). The call's first agent turn is the fixed
+ * greeting and never reads an ask, so an ask written to look like the greeting
+ * cannot pull the owner's reply to it into its window.
  */
 export function readings(
   transcript: readonly TranscriptTurn[],
@@ -143,23 +210,32 @@ export function readings(
   const firstAgent = transcript.findIndex((turn) => turn.role === "agent");
   return transcript.map((turn, index) => {
     if (turn.role !== "agent" || index === firstAgent) return undefined;
-    const said = new Set(tokens(turn.message));
-    let best: number | undefined;
-    let bestShare = 0;
-    let tie = false;
-    keys.forEach((key, ask) => {
-      if (key.size === 0) return;
-      const share = [...key].filter((word) => said.has(word)).length / key.size;
-      if (share > bestShare) {
-        best = ask;
-        bestShare = share;
-        tie = false;
-      } else if (share === bestShare && share > 0) {
-        tie = true;
-      }
-    });
-    return best !== undefined && !tie && bestShare >= READING_MIN_SHARE ? best : undefined;
+    return readingOf(new Set(tokens(turn.message)), keys);
   });
+}
+
+/** One agent turn that reads an ask (`at`) and the person's turns right after it. */
+interface ReadingWindow {
+  at: number;
+  turns: readonly TranscriptTurn[];
+}
+
+function readingWindows(
+  transcript: readonly TranscriptTurn[],
+  read: readonly (number | undefined)[],
+  index: number,
+): ReadingWindow[] {
+  const windows: ReadingWindow[] = [];
+  transcript.forEach((turn, at) => {
+    if (turn.role !== "agent" || read[at] !== index) return;
+    const turns: TranscriptTurn[] = [];
+    for (let next = at + 1; next < transcript.length && transcript[next]?.role !== "agent"; next++) {
+      const said = transcript[next];
+      if (said !== undefined) turns.push(said);
+    }
+    windows.push({ at, turns });
+  });
+  return windows;
 }
 
 /**
@@ -175,18 +251,27 @@ export function answerWindows(
   asks: readonly ReadAsk[],
   index: number,
 ): readonly (readonly TranscriptTurn[])[] | undefined {
-  const read = readings(transcript, asks);
-  const windows: TranscriptTurn[][] = [];
-  transcript.forEach((turn, at) => {
-    if (turn.role !== "agent" || read[at] !== index) return;
-    const window: TranscriptTurn[] = [];
-    for (let next = at + 1; next < transcript.length && transcript[next]?.role !== "agent"; next++) {
-      const said = transcript[next];
-      if (said !== undefined) window.push(said);
-    }
-    windows.push(window);
-  });
-  return windows.length > 0 ? windows : undefined;
+  const windows = readingWindows(transcript, readings(transcript, asks), index);
+  return windows.length > 0 ? windows.map((window) => window.turns) : undefined;
+}
+
+/**
+ * Whether the agent turn at `at` is a read-back of ask `index`: it reads that
+ * ask, an earlier agent turn on the call read it too (the first reading is
+ * never its own read-back), and it asks for a yes (a question mark, "yes" or
+ * "confirm"). The ask need not be the last one read: going back to an ask after
+ * answering another one is still a read-back of it, since the turn must be
+ * recognised as reading this ask and no other.
+ */
+function isReadBack(
+  transcript: readonly TranscriptTurn[],
+  read: readonly (number | undefined)[],
+  index: number,
+  at: number,
+): boolean {
+  if (read[at] !== index || !read.slice(0, at).includes(index)) return false;
+  const message = transcript[at]?.message ?? "";
+  return QUESTION_MARK.test(message) || tokens(message).some((word) => ASKS_FOR_YES.has(word));
 }
 
 /** Where `excerpt` was said: the shortest run of consecutive owner turns containing it, verbatim. */
@@ -224,7 +309,7 @@ function namesOption(
   if (said.includes(String(n)) || said.includes(ORDINALS[n - 1] ?? "")) return true;
   if (said.includes(NUMBER_WORDS[n - 1] ?? "") && !(strict && n === 1)) return true;
   if (option === undefined) return false;
-  const key = tokens(option).filter((word) => word.length >= 3 && !COMMON.has(word));
+  const key = tokens(option).filter(isKey);
   return key.length > 0 && key.filter((word) => said.includes(word)).length / key.length >= READING_MIN_SHARE;
 }
 
@@ -243,6 +328,35 @@ export interface ConfirmInput {
   ownerWords: string;
 }
 
+/**
+ * An `allow`: the owner's words are their reply to a read-back of this ask, and
+ * nothing the owner said about the ask from that read-back on sounds doubtful
+ * or asks a question back.
+ */
+function confirmAllow(
+  transcript: readonly TranscriptTurn[],
+  read: readonly (number | undefined)[],
+  index: number,
+  windows: readonly ReadingWindow[],
+  ownerWords: string,
+): VoiceConfirmation {
+  const backs = windows.filter((window) => isReadBack(transcript, read, index, window.at));
+  if (backs.length === 0) return { confirmed: false, reason: "the request was not read back for a yes" };
+  const match = matchingTurns(
+    ownerWords,
+    backs.map((window) => window.turns),
+  );
+  if (match === undefined) {
+    return { confirmed: false, reason: "the owner did not say these words in reply to the read-back" };
+  }
+  const from = backs[match.window]?.at ?? Number.POSITIVE_INFINITY;
+  const after = windows.filter((window) => window.at >= from).flatMap((window) => ownerTurns(window.turns));
+  if (after.some((turn) => soundsDoubtful(turn.message))) {
+    return { confirmed: false, reason: "the owner's reply to the read-back is not a clear yes" };
+  }
+  return { confirmed: true, excerpt: match.text.slice(0, MAX_EXCERPT) };
+}
+
 /** Whether the post-call transcript backs a voice decision; see the top of this file. */
 export function confirmVoiceDecision({
   transcript,
@@ -251,9 +365,11 @@ export function confirmVoiceDecision({
   decision,
   ownerWords,
 }: ConfirmInput): VoiceConfirmation {
-  const windows = answerWindows(transcript, asks, index);
-  if (windows === undefined)
-    return { confirmed: false, reason: "the ask's reading is not in the transcript" };
+  const read = readings(transcript, asks);
+  const opened = readingWindows(transcript, read, index);
+  if (opened.length === 0) return { confirmed: false, reason: "the ask's reading is not in the transcript" };
+  if (decision.type === "allow") return confirmAllow(transcript, read, index, opened, ownerWords);
+  const windows = opened.map((window) => window.turns);
   const match = matchingTurns(ownerWords, windows);
   if (match === undefined) {
     return { confirmed: false, reason: "the owner did not say these words after the ask was read" };
@@ -271,29 +387,6 @@ export function confirmVoiceDecision({
   ];
   if (later.some((turn) => soundsDoubtful(turn.message))) {
     return { confirmed: false, reason: "the owner took the answer back" };
-  }
-  if (decision.type === "allow") {
-    // Strict on purpose: any doubt anywhere about this ask, even "no... okay, yes",
-    // and the owner's last words about it must be a yes.
-    // Before the answer, a refusal or hesitation counts against it; a question
-    // ("what does it push?") does not, since the owner may then say yes.
-    const earlier = [
-      ...windows.slice(0, match.window).flatMap(ownerTurns),
-      ...ownerTurns((windows[match.window] ?? []).slice(0, match.start)),
-    ];
-    const last = ownerTurns(windows[windows.length - 1] ?? []).at(-1);
-    const clearYes = (text: string) =>
-      tokens(text).some((word) => YES_WORDS.has(word)) && !soundsDoubtful(text);
-    // The last words are a yes when they hold one, or when they close the matched yes ("yes", "push it").
-    const endsMatch = last !== undefined && last === windows[match.window]?.[match.end];
-    if (
-      earlier.some((turn) => soundsDoubtful(turn.message, false)) ||
-      !clearYes(match.text) ||
-      last === undefined ||
-      !(endsMatch || clearYes(last.message))
-    ) {
-      return { confirmed: false, reason: "the owner's words are not a clear yes" };
-    }
   }
   if (decision.type === "option") {
     // The owner must name this option and no other one the ask offered.
