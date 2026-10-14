@@ -129,7 +129,7 @@ users can read or write (it holds the PIN hash), so it must be mode `0600`.
 | `policy.askTimeoutMinutes` | 30 | Then "no answer" |
 | `policy.maxConsecutiveContinuations` | 5 | Away-mode Stop continuations in a row (1–20) |
 | `voice.provider` | `elevenlabs` | or `fake` |
-| `voice.voiceId`, `agentId`, `agentPhoneNumberId` | unset | ElevenLabs ids: `voiceId` from `hotline voice set`, `agentId` from `hotline voice apply`, `agentPhoneNumberId` from `hotline init` |
+| `voice.voiceId`, `agentId`, `agentPhoneNumberId` | unset | ElevenLabs ids: `voiceId` from `hotline voice set`, `agentId` from `hotline voice apply`, `agentPhoneNumberId` from `hotline init`. Calling and all voice routes need `agentId` and `agentPhoneNumberId` (every pulled call record must be on that number); without either the daemon logs `voice webhooks off` and `hotline doctor` reports it |
 | `voice.toolSecretId`, `voice.toolIds` | unset | Ids (never values) of the ElevenLabs workspace secret and the four server tools, written by `hotline voice apply` so a re-apply updates them instead of creating new ones |
 | `sms.provider` | `twilio` | or `fake` |
 | `sms.fromNumber` | unset | The Twilio number |
@@ -199,7 +199,9 @@ owner says yes, and post it to the local listener. Since HL-13a a signed webhook
 is only a trigger: before a text or a call decides anything, the daemon pulls
 the message from Twilio or the conversation from ElevenLabs by id and uses that
 record ([daemon](daemon.md#twilio-sms-post-hookstwiliosms)). Confirmation codes
-are stored only as salted hashes. A process that reads the secrets can still
+are stored only as salted hashes; that keeps them out of plain sight, but a
+6-digit code's hash can be brute-forced offline in hours, so the hash is
+defence in depth and the pull is the protection. A process that reads the secrets can still
 sign webhooks, but a forged one finds no matching record, confirms nothing, and
 is audited as a possible forgery; the owner gets a text about it.
 

@@ -62,7 +62,12 @@ Never fabricate an entry; "not tested" is a valid result.
   unanswered: it should end as no pickup and be retried. If it waits until the
   ask times out instead, note the audit `reason` for its initiation failure:
   ElevenLabs' record of a failed call lacks something the check needs (status
-  `failed`, outbound phone metadata).
+  `failed`, outbound phone metadata). If the forgery text arrives after every
+  real call with `the webhook differs from the provider's record`, the
+  webhook and API transcripts differ in form, not a forgery: answers still
+  come from the API's record, so record it as a finding and stop counting the
+  alarm until the comparison is fixed. If it arrives when you made no call or
+  text, treat it as real: stop the daemon and check what runs as your user.
 
 ## Record
 

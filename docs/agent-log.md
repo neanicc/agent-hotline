@@ -2719,6 +2719,11 @@ Template:
     the configured ElevenLabs number, so without it the voice routes are off
     with that reason logged (doctor already reports it) instead of serving
     and refusing every PIN.
+  - Staff review of a89dfce (P2, same as Greptile's P1): `voice.agentPhoneNumberId`
+    is now documented as required for calling and the voice routes
+    (contracts' config table), with a run test for the config without it;
+    the code-hash comment and contracts no longer read as a guarantee against
+    offline brute force; live-check says what to do about a repeating alarm.
   - After catching up with HL-12's scenario suite, its harness got the same
     backing as the daemon's: the config sets `voice.agentPhoneNumberId`, and
     `text()` records each owner text in the fake Twilio's log (timed by the

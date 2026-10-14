@@ -1,10 +1,10 @@
 // SMS confirmation codes at rest (HL-13a). The daemon keeps only a salted
 // scrypt hash of each code, with a fresh salt per code, so the plaintext code
 // cannot be read from the store by a process that opens the database. Codes
-// are compared in constant time. Short codes can still be brute-forced from a
-// hash given enough time; the cost below makes that take hours per code on one
-// core, longer than an ask waits, and Twilio's own record of the owner's reply
-// (`provider-pull.ts`) is what stops a forged `YES <code>` in the first place.
+// are compared in constant time. This is defence in depth, not a guarantee: a
+// 6-digit code has only 10^6 candidates, so a same-user process can brute-force
+// a hash offline in hours, sooner on several cores. Twilio's own record of the
+// owner's reply (`provider-pull.ts`) is what stops a forged `YES <code>`.
 //
 // Each hash costs tens of milliseconds, so the text paths hash and compare
 // asynchronously (libuv's thread pool): the daemon keeps serving webhooks and

@@ -367,6 +367,41 @@ describe("runDaemon", () => {
     expect(off?.reason).toMatch(/API key .*no call can be confirmed/);
   });
 
+  it("serves no voice route without voice.agentPhoneNumberId, and says why", async () => {
+    const toolSecret = "fake-elevenlabs-tool-secret-nophone";
+    await writeConfig({
+      ...CONFIG,
+      owner: { phoneNumber: OWNER, pinHash: await hashPin("4821") },
+      voice: { agentId: "agent_fake" },
+      tunnel: { publicUrl: "https://hotline.example.test" },
+    });
+    const secrets = new FileSecretStore(paths().secrets);
+    await secrets.set("elevenlabs.toolSecret", toolSecret);
+    await secrets.set("elevenlabs.webhookSecret", "fake-elevenlabs-webhook-secret-nophone");
+    await secrets.set("elevenlabs.apiKey", "fake-elevenlabs-api-key-nophone");
+    const { daemon, exit } = await launch({ fetch: fakeApi({}) });
+    const response = await send({
+      port: daemon.hooksPort,
+      method: "POST",
+      path: "/hooks/el/tools/verify_pin",
+      headers: { "content-type": "application/json", "x-hotline-tool-secret": toolSecret },
+      body: JSON.stringify({
+        conversation_id: "conv_nophone",
+        call_sid: `CA${"0".repeat(32)}`,
+        caller_id: OWNER,
+        called_number: "+15555550101",
+        pin: "4821",
+      }),
+    });
+    expect([response.status, response.body]).toEqual([403, ""]);
+    signals.emit("SIGTERM");
+    expect(await exit).toBe(0);
+    const off = lines
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .find((e) => e.msg === "voice webhooks off");
+    expect(off?.reason).toMatch(/voice\.agentPhoneNumberId is not set/);
+  });
+
   it("serves the ElevenLabs routes with the PIN check, recording no answer for a call it did not place", async () => {
     const publicUrl = "https://hotline.example.test";
     const toolSecret = "fake-elevenlabs-tool-secret-run";
