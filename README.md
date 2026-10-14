@@ -166,12 +166,18 @@ listed), not quotes; check current pricing before you sign up.
 | Twilio call leg to a Canadian number | $0.014 / min | $0.84 |
 | Twilio texts (Canada), plus carrier fees | $0.0083 + about $0.007 / segment | about $3 |
 | ElevenLabs Starter (Agents, voice cloning) | $6 / month, 75 call minutes included, then $0.08 / min | $6 |
-| LLM for the voice agent (billed by ElevenLabs) | depends on the model | about $1–3 |
+| LLM for the voice agent (billed by ElevenLabs) | depends on the model; `doctor` assumes $0.03 / min | about $1–3 |
 | **Total** | | **about $12–14** |
 
 Calls you place to the hotline add Twilio's inbound rate. Rate limits (4 calls an
-hour and 20 a day by default) cap the worst case. `hotline doctor` does not show a
-cost estimate yet (HL-11b).
+hour and 20 a day by default) cap the worst case.
+
+`hotline doctor` ends with an estimated monthly cost: it reads the last 30 days of
+calls, call minutes and texts from the local store and prices them with these
+rates, without any network call. The rates above are its defaults, defined once
+in code as `DEFAULT_COST_RATES` ([packages/core/src/config.ts](packages/core/src/config.ts));
+set your own under `costs` in `config.json`
+([contracts](docs/contracts.md#config-configts), [install guide](docs/install.md#hotline-doctor)).
 
 ## Development
 

@@ -1,11 +1,12 @@
 // `hotline doctor` against temporary directories and a fake HTTP layer for the
 // daemon's health check and ElevenLabs. Secrets are never printed.
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { FileSecretStore, writePrivateFile } from "@hotline/daemon";
+import { FileSecretStore, openStore, writePrivateFile } from "@hotline/daemon";
 import { AGENT_DEFINITION_VERSION } from "@hotline/providers";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { CliFetch } from "../src/setup.js";
+import { seedTypicalUsage } from "./cost-helpers.js";
 import {
   cli,
   fakeFetch,
@@ -267,5 +268,87 @@ describe("hotline doctor", () => {
     const result = await cli(["doctor", "--home", setup.home], context());
     expect(result.code).toBe(1);
     expect(result.stdout).toContain("FAIL  config  No hotline config at");
+  });
+});
+
+describe("hotline doctor cost estimate", () => {
+  const costInfo = (stdout: string) => lines(stdout, "INFO").filter((line) => /^INFO\s+cost\s/.test(line));
+  const dbPath = () => join(setup.hotlineHome, "hotline.db");
+  // Fake providers and a stopped daemon; records every URL doctor tries to reach.
+  const offline = () => {
+    const urls: string[] = [];
+    return Object.assign(
+      async (url: string) => {
+        urls.push(url);
+        throw new TypeError("fetch failed");
+      },
+      { requests: [] as Recorded[], urls },
+    );
+  };
+  const fakeProviders = { voice: { provider: "fake" }, sms: { provider: "fake" } };
+
+  it("prints info lines that never count as pass or fail, without a store", async () => {
+    await writeSetup(fakeProviders);
+    const result = await cli(["doctor", "--home", setup.home], context(offline()));
+    const info = costInfo(result.stdout);
+    expect(info[0]).toContain(`estimate: about $7.15 a month, with no usage: no store at ${dbPath()} yet`);
+    expect(info[0]).toContain("(assumed rates, not a bill; computed locally)");
+    expect(info.join("\n")).toContain("Twilio: number $1.15 (monthly)");
+    expect(info.join("\n")).toContain("ElevenLabs: plan $6.00 (monthly, 75 min included)");
+    // The summary counts checks only, and reading usage never creates the store.
+    const counts = ["PASS", "WARN", "FAIL"].map((status) => lines(result.stdout, status).length);
+    expect(result.stdout).toContain(`doctor: ${counts[0]} pass, ${counts[1]} warn, ${counts[2]} fail`);
+    expect(result.code).toBe(0);
+    await expect(stat(dbPath())).rejects.toThrow(/ENOENT/);
+  });
+
+  it("prices an empty store as no usage", async () => {
+    await writeSetup(fakeProviders);
+    (await openStore(dbPath())).close();
+    const result = await cli(["doctor", "--home", setup.home], context(offline()));
+    const info = costInfo(result.stdout);
+    expect(info[0]).toContain(`estimate: about $7.15 a month, from the last 30 days in ${dbPath()}`);
+    expect(info[1]).toContain(
+      "usage: 0 calls (0 placed, 0 received), 0 billed min, 0 texts sent (including 0 replies)",
+    );
+  });
+
+  it("estimates typical usage from the store with the default rates", async () => {
+    await writeSetup(fakeProviders);
+    await seedTypicalUsage(dbPath());
+    const fetch = offline();
+    const result = await cli(["doctor", "--home", setup.home], context(fetch));
+    const info = costInfo(result.stdout).join("\n");
+    expect(info).toContain("estimate: about $7.55 a month, from the last 30 days");
+    expect(info).toContain(
+      "usage: 3 calls (2 placed, 1 received), 6 billed min, 6 texts sent (including 2 replies), 3 received",
+    );
+    expect(info).toContain("calls $0.08 (6 min x $0.014)");
+    expect(info).toContain("LLM $0.18 (6 min x $0.03)");
+    // Only the daemon health check tried to connect, to 127.0.0.1.
+    expect(fetch.urls).toEqual(["http://127.0.0.1:7341/v1/health"]);
+  });
+
+  it("uses the config's rate overrides and rejects a negative rate", async () => {
+    await writeSetup({
+      ...fakeProviders,
+      costs: {
+        twilioNumberPerMonth: 0,
+        elevenLabsPlanPerMonth: 22,
+        elevenLabsIncludedMinutes: 5,
+        elevenLabsPerMinute: 0.1,
+        llmPerMinute: 0,
+      },
+    });
+    await seedTypicalUsage(dbPath());
+    const result = await cli(["doctor", "--home", setup.home], context(offline()));
+    const info = costInfo(result.stdout).join("\n");
+    expect(info).toContain("estimate: about $22.32 a month");
+    expect(info).toContain("extra minutes $0.10 (1 min x $0.1)");
+    await writeSetup({ ...fakeProviders, costs: { llmPerMinute: -1 } });
+    const refused = await cli(["doctor", "--home", setup.home], context(offline()));
+    expect(refused.code).toBe(1);
+    expect(refused.stdout).toContain("FAIL  config  Invalid hotline config:");
+    expect(refused.stdout).toMatch(/costs\.llmPerMinute: .*>=0/);
   });
 });

@@ -1,6 +1,7 @@
 // `hotline doctor`: checks the setup and prints one PASS, WARN or FAIL line per
-// check. Exits 1 when anything fails. It never prints a secret's value, only
-// whether it is set, and shows the owner's number as its last four digits.
+// check, then INFO lines with the monthly cost estimate. Exits 1 when anything
+// fails. It never prints a secret's value, only whether it is set, and shows the
+// owner's number as its last four digits.
 import { type Config, type SecretName, SecretName as SecretNames, type SecretStore } from "@hotline/core";
 import {
   type AgentFlag,
@@ -10,11 +11,13 @@ import {
   readHooks,
 } from "./agent-config.js";
 import type { CliContext, Output } from "./cli.js";
+import { costLines, readUsage } from "./cost.js";
 import { ElevenLabsAdmin } from "./elevenlabs-admin.js";
 import { agentConfigFiles, type ConfigLocation, configLocation, readConfigFile } from "./install.js";
 import { fetchFor, lastFour, secretStoreFor } from "./setup.js";
 
-export type CheckStatus = "pass" | "warn" | "fail";
+/** `info` lines report, they never pass or fail: the cost estimate. */
+export type CheckStatus = "pass" | "warn" | "fail" | "info";
 export interface Check {
   status: CheckStatus;
   name: string;
@@ -27,7 +30,9 @@ export function doctorUsage(): string {
     "",
     "Checks the config, secrets (set or not, never their values), the daemon and its",
     "token, the Claude Code and Codex installs and their timeouts, the deployed",
-    "ElevenLabs agent and the webhook URL. Exits 1 if any check fails.",
+    "ElevenLabs agent and the webhook URL. Exits 1 if any check fails. Then prints",
+    "an estimated monthly cost from the last 30 days in the local store, priced with",
+    "the config's costs.* rate assumptions; it makes no network call for that.",
     "",
     "  --home <dir>       Look for agent configs under <dir> instead of your home folder",
     "  --command <path>   The --command the hooks were installed with, if any",
@@ -406,6 +411,10 @@ export async function runChecks(
   checks.push(claudeIdleCheck(context, config));
   checks.push(...(await elevenLabsChecks(context, config, values.get("elevenlabs.apiKey"))));
   checks.push(webhookCheck(config));
+  const reading = await readUsage(paths.database, context.now?.() ?? new Date());
+  for (const detail of costLines(reading, config.costs, paths.database)) {
+    checks.push({ status: "info", name: "cost", detail });
+  }
   return checks;
 }
 

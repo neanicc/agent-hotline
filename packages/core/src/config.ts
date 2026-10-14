@@ -92,6 +92,34 @@ export type SmsProviderName = z.infer<typeof SmsProviderName>;
 export const SecretStoreChoice = z.enum(["auto", "keychain", "file"]);
 export type SecretStoreChoice = z.infer<typeof SecretStoreChoice>;
 
+/**
+ * Rate assumptions for `hotline doctor`'s monthly cost estimate, in dollars as
+ * listed on the public Twilio (Canada) and ElevenLabs pricing pages on
+ * 2026-10-14. Assumptions, not quotes: the owner overrides them under `costs`
+ * in the config. The README's cost table quotes these values; a test keeps the
+ * two in step.
+ */
+export const DEFAULT_COST_RATES = {
+  /** Twilio Canadian local number, per month. */
+  twilioNumberPerMonth: 1.15,
+  /** Twilio call leg to a Canadian number, per billed minute. */
+  twilioCallPerMinute: 0.014,
+  /** Twilio text (Canada), per segment, sent or received. */
+  twilioTextPerSegment: 0.0083,
+  /** Carrier fees on top of each text segment (approximate). */
+  twilioCarrierFeePerSegment: 0.007,
+  /** ElevenLabs Starter plan (Agents, voice cloning), per month. */
+  elevenLabsPlanPerMonth: 6,
+  /** Call minutes the ElevenLabs plan includes each month. */
+  elevenLabsIncludedMinutes: 75,
+  /** ElevenLabs call minutes beyond the included ones. */
+  elevenLabsPerMinute: 0.08,
+  /** The voice agent's LLM, billed by ElevenLabs; depends on the model. */
+  llmPerMinute: 0.03,
+} as const;
+
+const rate = (fallback: number) => z.number().min(0).default(fallback);
+
 export const Config = z.strictObject({
   version: z.literal(1),
   owner: z.strictObject({
@@ -153,11 +181,26 @@ export const Config = z.strictObject({
     .prefault({}),
   daemon: z.strictObject({ port: count(1024, 65535, 7341) }).prefault({}),
   secrets: z.strictObject({ store: SecretStoreChoice.default("auto") }).prefault({}),
+  /** Rate assumptions for `hotline doctor`'s cost estimate; each a non-negative number. */
+  costs: z
+    .strictObject({
+      twilioNumberPerMonth: rate(DEFAULT_COST_RATES.twilioNumberPerMonth),
+      twilioCallPerMinute: rate(DEFAULT_COST_RATES.twilioCallPerMinute),
+      twilioTextPerSegment: rate(DEFAULT_COST_RATES.twilioTextPerSegment),
+      twilioCarrierFeePerSegment: rate(DEFAULT_COST_RATES.twilioCarrierFeePerSegment),
+      elevenLabsPlanPerMonth: rate(DEFAULT_COST_RATES.elevenLabsPlanPerMonth),
+      elevenLabsIncludedMinutes: rate(DEFAULT_COST_RATES.elevenLabsIncludedMinutes),
+      elevenLabsPerMinute: rate(DEFAULT_COST_RATES.elevenLabsPerMinute),
+      llmPerMinute: rate(DEFAULT_COST_RATES.llmPerMinute),
+    })
+    .prefault({}),
   /** Spoken session names keyed by repository folder name, overriding "<agent> in <folder>". */
   nicknames: z.record(z.string().min(1).max(255), z.string().min(1).max(60)).default({}),
 });
 /** A parsed config with every default filled in. */
 export type Config = z.infer<typeof Config>;
+/** The cost-estimate rate assumptions, defaults filled in. */
+export type CostRates = Config["costs"];
 /** What a config file may contain: everything with a default is optional. */
 export type ConfigInput = z.input<typeof Config>;
 
