@@ -130,6 +130,7 @@ users can read or write (it holds the PIN hash), so it must be mode `0600`.
 | `policy.maxConsecutiveContinuations` | 5 | Away-mode Stop continuations in a row (1–20) |
 | `voice.provider` | `elevenlabs` | or `fake` |
 | `voice.voiceId`, `agentId`, `agentPhoneNumberId` | unset | ElevenLabs ids: `voiceId` from `hotline voice set`, `agentId` from `hotline voice apply`, `agentPhoneNumberId` from `hotline init` |
+| `voice.llm` | unset (`claude-haiku-4-5`) | The voice agent's LLM, one of `VOICE_LLMS`: `claude-haiku-4-5`, `claude-sonnet-4-6`, `claude-sonnet-5-5`. Anything else is refused. Sent by `hotline voice apply` ([voice.md](voice.md#the-model)) |
 | `voice.toolSecretId`, `voice.toolIds` | unset | Ids (never values) of the ElevenLabs workspace secret and the four server tools, written by `hotline voice apply` so a re-apply updates them instead of creating new ones |
 | `sms.provider` | `twilio` | or `fake` |
 | `sms.fromNumber` | unset | The Twilio number |
@@ -359,6 +360,12 @@ without it is not confirmed and the ask is texted
 ([daemon.md](daemon.md#call-orchestration)). `submit_answer` no longer
 offers the model `unclear`; the daemon still parses it from an agent on an
 older definition, and it still ends the ask as no answer.
+Version 6 (HL-14d) sets the model explicitly: `prompt.llm` is `voice.llm` or
+`DEFAULT_VOICE_LLM` (`claude-haiku-4-5`), with `thinking_budget: 0` and
+`backup_llm_config: {preference: "default"}`, and the read-back example names
+the tool and the whole command ("Allow Bash: pnpm test, for Claude in demo-app?
+Yes?"), since the daemon refuses a permission read-back that leaves either out
+([voice.md](voice.md#the-model)).
 `SAFETY_RULES` in the providers tests checks each rule word for word, and a
 snapshot covers the whole prompt, first message and agent body. See
 [voice.md](voice.md#the-persona). `hotlineAgentConfig` refuses a voice id that

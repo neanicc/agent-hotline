@@ -85,7 +85,8 @@ users can open is made private.
 - `hotline voice apply` creates, or updates on later runs, the ElevenLabs
   workspace secret holding the tool secret, the four server tools
   (`hotlineToolConfigs`, pointing at `<public URL>/hooks/el/tools/*`) and the agent
-  (`hotlineAgentConfig`, tagged `definition-v<AGENT_DEFINITION_VERSION>`). The ids
+  (`hotlineAgentConfig`, tagged `definition-v<AGENT_DEFINITION_VERSION>`, on the
+  LLM `voice.llm` or `claude-haiku-4-5`; see [voice.md](voice.md#the-model)). The ids
   go into the config (`voice.toolSecretId`, `voice.toolIds`, `voice.agentId`) as
   each is created, so a failure part way leaves nothing unrecorded; if
   recording an id itself fails, the error names the id so you can add it to
@@ -170,7 +171,7 @@ lines never pass, warn or fail.
 | away mode | | the state file is unusable (it then reads as off) |
 | Claude Code and Codex installs (user, and the current project) | a hook's `--wait-seconds` is not below its `timeout`; Codex `tool_timeout_sec` is not above `policy.askTimeoutMinutes`; a Claude per-server `timeout` shorter than that | not installed; a hook or the MCP server is missing; less than 30 s between wait and timeout; a wait shorter than the ask timeout |
 | Claude Code idle timeout | `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` is not above the ask timeout | it is not set in this shell |
-| ElevenLabs agent | no phone number id or agent; the deployed agent's `definition-v<n>` tag is not `AGENT_DEFINITION_VERSION`; it lacks one of the four tools, or their ids are not recorded; a tool calls another URL than `<tunnel.publicUrl>/hooks/el/tools/<name>` or uses another secret id than `voice.toolSecretId` | its voice differs from the config |
+| ElevenLabs agent | no phone number id or agent; the deployed agent's `definition-v<n>` tag is not `AGENT_DEFINITION_VERSION`; it lacks one of the four tools, or their ids are not recorded; a tool calls another URL than `<tunnel.publicUrl>/hooks/el/tools/<name>` or uses another secret id than `voice.toolSecretId` | its voice differs from the config; its LLM is not `voice.llm` (default `claude-haiku-4-5`), which the pass line names |
 | webhooks | `tunnel.publicUrl` is unset while a real provider needs it | |
 
 ### Monthly cost estimate

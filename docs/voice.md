@@ -12,7 +12,7 @@ audio, and the repository never contains voice samples or recordings.
 The voice agent is an ElevenLabs Agents conversational agent whose prompt, first
 message and tools live in code:
 [`packages/providers/src/elevenlabs-agent.ts`](../packages/providers/src/elevenlabs-agent.ts)
-(`AGENT_PROMPT`, `AGENT_FIRST_MESSAGE`, `AGENT_DEFINITION_VERSION`, currently 4).
+(`AGENT_PROMPT`, `AGENT_FIRST_MESSAGE`, `AGENT_DEFINITION_VERSION`, currently 6).
 
 It sounds like a calm, friendly teammate with a quick heads-up:
 
@@ -36,8 +36,9 @@ It sounds like a calm, friendly teammate with a quick heads-up:
   ids, file paths, URLs or long ids.
 - Approving is a short, natural exchange (definition v4, HL-14c). Answer however
   you like: "yeah", "sure, go for it", "nope". Before it approves anything it
-  reads the request back in one short sentence with the ask's key words and asks
-  for a yes ("Allow pnpm test in demo-app? Yes?"); it approves only on your yes
+  reads the request back in one short sentence that names the tool and the
+  whole command and asks for a yes ("Allow Bash: pnpm test, for Claude in
+  demo-app? Yes?", definition v6); it approves only on your yes
   to that, and sends that reply as your words. A no is never read back: it is
   taken at once. If it can't tell, it asks once ("Sorry, is that a yes or a
   no?", with the same short read-back for a permission request, or the ask
@@ -96,6 +97,66 @@ review the snapshot diff and update it (`pnpm exec vitest run --project
 providers -u`), then re-apply the agent definition (`hotline voice apply`). A
 changed safety sentence fails the rule test on purpose; changing one is a
 security change.
+
+## The model
+
+Definition v6 (HL-14d) names the voice agent's LLM explicitly:
+`conversation_config.agent.prompt.llm` is `claude-haiku-4-5` unless you set
+`voice.llm`. Before that Hotline sent no `llm`, so the agent ran on whatever
+ElevenLabs' default was.
+
+**Why the cheapest model.** The voice agent only talks and calls the four
+tools; it decides nothing. The daemon checks every answer against the call's
+transcript (the owner's own words, the read-back for an allow, `verify_pin`
+for a high-risk one, the read-back for an instruction), and anything it cannot
+confirm fails closed: the ask goes back as no answer or is texted. So a weaker
+model can cost friction (a reworded ask, a missed read-back, a text instead of
+a voice approval), never safety. That makes the cheapest documented Claude
+model the right default.
+
+**What it costs.** ElevenLabs bills the LLM per token at the provider's
+published rate with no markup (some Claude models follow Vertex AI regional
+pricing, 10% higher in the US and EU), on top of the call minutes. Anthropic's
+list prices per million input / output tokens, checked 2026-10-14:
+
+| `voice.llm` | Input | Output | Rough cost a minute |
+| --- | --- | --- | --- |
+| `claude-haiku-4-5` (default) | $1 | $5 | about $0.03 |
+| `claude-sonnet-5-5` | $2 | $10 | about $0.06 |
+| `claude-sonnet-4-6` | $3 | $15 | about $0.09 |
+
+Each agent turn resends the prompt (about 1,800 tokens), the tool schemas and
+the call so far, so a minute of talk is roughly 20,000 to 30,000 input tokens
+and a few hundred output tokens. The per-minute figures are that estimate, not
+a measurement; `hotline doctor`'s cost estimate assumes the Haiku figure
+(`costs.llmPerMinute`, [README](../README.md#costs)). If you switch models, set
+`costs.llmPerMinute` to match.
+
+**Thinking and backups.** The agent body sends `thinking_budget: 0` (the API
+reference: "Use 0 to turn off if supported by the model"): a phone turn needs a
+quick reply, not reasoning. It does not send `reasoning_effort`, which the
+reference says only some models take. It sends `backup_llm_config:
+{"preference": "default"}`, ElevenLabs' recommended fallback sequence, so an
+outage at one provider switches models instead of dropping the call. Hotline
+never disables the backups; a backup model answers under the same daemon
+checks.
+
+**Switching.** Put one of the allowed ids in `config.json` and re-apply:
+
+```json
+{ "voice": { "llm": "claude-sonnet-5-5" } }
+```
+
+then `hotline voice apply`. The allowed ids (`VOICE_LLMS` in
+[`packages/core/src/config.ts`](../packages/core/src/config.ts)) are the ones
+on both ElevenLabs' LLM page and its create-agent API reference:
+`claude-haiku-4-5`, `claude-sonnet-4-6` and `claude-sonnet-5-5`. Anything else
+is refused when the config loads, before anything is sent. `claude-haiku-5-5` is
+in the API's enum but not on the documented list, so it is not allowed until it
+is verified. `hotline doctor` names the model the deployed agent runs on and
+warns when it is not the one the config wants. Consider a larger model if the
+[live check](live-check.md) shows the agent often rewording asks or missing
+read-backs, so that clear answers end up texted.
 
 ## Session names
 
@@ -220,3 +281,8 @@ steps are the same in spirit.
   https://elevenlabs.io/docs/eleven-agents/customization/voice.md
 - Plans (Instant cloning from Starter, Professional cloning from Creator):
   https://elevenlabs.io/pricing
+- Agent LLMs, backup LLMs, thinking budget and pass-through billing:
+  https://elevenlabs.io/docs/agents-platform/customization/llm
+- The agent body's `llm`, `thinking_budget`, `reasoning_effort` and
+  `backup_llm_config` fields: https://elevenlabs.io/docs/api-reference/agents/create
+- Claude token prices: https://www.anthropic.com/pricing

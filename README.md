@@ -166,8 +166,14 @@ listed), not quotes; check current pricing before you sign up.
 | Twilio call leg to a Canadian number | $0.014 / min | $0.84 |
 | Twilio texts (Canada), plus carrier fees | $0.0083 + about $0.007 / segment | about $3 |
 | ElevenLabs Starter (Agents, voice cloning) | $6 / month, 75 call minutes included, then $0.08 / min | $6 |
-| LLM for the voice agent (billed by ElevenLabs) | depends on the model; `doctor` assumes $0.03 / min | about $1–3 |
+| LLM for the voice agent: Claude Haiku 4.5 (billed by ElevenLabs per token) | $1 / $5 per million input / output tokens; `doctor` assumes $0.03 / min | about $2 |
 | **Total** | | **about $12–14** |
+
+The voice agent runs on Claude Haiku 4.5, the cheapest documented Claude model
+on ElevenLabs: it only talks and calls Hotline's tools, and the daemon checks
+every decision against the call transcript, so a cheaper model costs friction,
+never safety. `voice.llm` switches to Claude Sonnet 5.5 or Sonnet 4.6, at about
+two or three times the LLM cost ([voice.md](docs/voice.md#the-model)).
 
 Calls you place to the hotline add Twilio's inbound rate. Rate limits (4 calls an
 hour and 20 a day by default) cap the worst case.
