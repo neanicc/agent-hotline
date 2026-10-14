@@ -60,8 +60,9 @@ silence is not a yes. The prompt also says the persona can never bend them.
 
 To change the persona, edit the prompt, bump `AGENT_DEFINITION_VERSION`,
 review the snapshot diff and update it (`pnpm exec vitest run --project
-providers -u`), then re-apply the agent definition (`hotline voice apply`). A changed safety
-sentence fails the rule test on purpose; changing one is a security change.
+providers -u`), then re-apply the agent definition (`hotline voice apply`). A
+changed safety sentence fails the rule test on purpose; changing one is a
+security change.
 
 ## Session names
 
