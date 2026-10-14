@@ -4,6 +4,7 @@ import { lstat, mkdir, readdir, readFile, symlink, writeFile } from "node:fs/pro
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { redactConfigLine } from "../src/install.js";
 import { cli, type TempSetup, tempSetup, testContext } from "./setup-helpers.js";
 
 let setup: TempSetup;
@@ -122,6 +123,20 @@ describe("hotline install claude", () => {
     await expect(lstat(join(setup.home, ".claude.json"))).rejects.toThrow();
   });
 
+  it("never prints other servers' tokens in the diff, even when it reformats the file", async () => {
+    // Claude Code's own file, written compactly: the diff shows every line.
+    const other = {
+      mcpServers: { github: { command: "gh-mcp", env: { GITHUB_TOKEN: "ghp_fakeToken0123456789" } } },
+    };
+    await writeFile(join(setup.home, ".claude.json"), JSON.stringify(other));
+    const result = await install("claude");
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('"GITHUB_TOKEN": "[redacted]"');
+    expect(result.stdout).not.toContain("ghp_fakeToken0123456789");
+    // Only the printed diff is masked; the file keeps the token.
+    expect(await readFile(join(setup.home, ".claude.json"), "utf8")).toContain("ghp_fakeToken0123456789");
+  });
+
   it("prints a diff and writes nothing with --dry-run", async () => {
     const result = await install("claude", "--dry-run");
     expect(result.code).toBe(0);
@@ -183,5 +198,21 @@ describe("hotline install codex", () => {
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("written by hand");
     expect(await readFile(join(setup.home, ".codex", "config.toml"), "utf8")).toBe(hand);
+  });
+});
+
+describe("redactConfigLine", () => {
+  it("masks credential-looking JSON and TOML values and bearer tokens, and nothing else", () => {
+    expect(redactConfigLine('+      "API_KEY": "sk-abc",')).toBe('+      "API_KEY": "[redacted]",');
+    expect(redactConfigLine('-  "authorization": "Bearer xyz"')).toBe('-  "authorization": "[redacted]"');
+    expect(redactConfigLine('+ "headers": {"X-Token": "t1", "Accept": "json"}')).toBe(
+      '+ "headers": {"X-Token": "[redacted]", "Accept": "json"}',
+    );
+    expect(redactConfigLine('+bearer_token_env_var = "abc"')).toBe('+bearer_token_env_var = "[redacted]"');
+    expect(redactConfigLine('+args = ["--header", "Bearer abc123"]')).toBe(
+      '+args = ["--header", "Bearer [redacted]"]',
+    );
+    expect(redactConfigLine('+      "command": "hotline",')).toBe('+      "command": "hotline",');
+    expect(redactConfigLine("+tool_timeout_sec = 2100")).toBe("+tool_timeout_sec = 2100");
   });
 });

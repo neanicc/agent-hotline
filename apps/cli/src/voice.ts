@@ -162,17 +162,25 @@ export async function voiceCommand(
 /** Shortest time between two real test calls. */
 export const TEST_CALL_COOLDOWN_MS = 2 * 60 * 1000;
 
-/** When the last real test call was placed (ms), or undefined. An unreadable stamp counts as none. */
+/**
+ * When the last real test call was placed (ms), or undefined when none was. A
+ * stamp that exists but cannot be trusted or read refuses the call (fails closed).
+ */
 async function lastTestCall(path: string): Promise<number | undefined> {
   const { privatePathProblem } = await import("@hotline/daemon");
-  if ((await privatePathProblem(path)) !== undefined) return undefined;
+  const problem = await privatePathProblem(path);
+  if (problem === "missing") return undefined;
+  const unusable = new SetupError(`${path} cannot be trusted or read; remove it to place a test call`);
+  if (problem !== undefined) throw unusable;
+  let at: unknown;
   try {
-    const at = (JSON.parse(await readFile(path, "utf8")) as { at?: unknown }).at;
-    const time = typeof at === "string" ? Date.parse(at) : Number.NaN;
-    return Number.isNaN(time) ? undefined : time;
+    at = (JSON.parse(await readFile(path, "utf8")) as { at?: unknown }).at;
   } catch {
-    return undefined;
+    throw unusable;
   }
+  const time = typeof at === "string" ? Date.parse(at) : Number.NaN;
+  if (Number.isNaN(time)) throw unusable;
+  return time;
 }
 
 /** The one ask a test call reads out. Fixed words only. */

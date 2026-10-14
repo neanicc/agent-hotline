@@ -72,7 +72,13 @@ function diffLines(before: readonly string[], after: readonly string[]): Array<[
  * A unified-style diff of two texts with a little context around each change,
  * or "" when they are equal. `label` names the file in the header.
  */
-export function lineDiff(label: string, before: string, after: string): string {
+export function lineDiff(
+  label: string,
+  before: string,
+  after: string,
+  /** Applied to every printed line, such as a redactor. */
+  show: (line: string) => string = (line) => line,
+): string {
   if (before === after) return "";
   const lines = diffLines(splitLines(before), splitLines(after));
   const keep = lines.map(() => false);
@@ -95,7 +101,7 @@ export function lineDiff(label: string, before: string, after: string): string {
       return;
     }
     skipped = false;
-    out.push(`${mark}${line}`);
+    out.push(show(`${mark}${line}`));
   });
   return out.join("\n");
 }

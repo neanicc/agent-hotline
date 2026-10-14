@@ -96,11 +96,20 @@ Writes the entries from [mcp.md](mcp.md#config-snippets) and
   MCP: no per-server `timeout` (it is a hard limit).
 - Every file that changes is copied to `<file>.hotline-backup-<UTC time>`
   (`0600`) first, and the change is printed as a diff. `--dry-run` prints the
-  diff only.
+  diff only. The printed diff masks values under credential-looking keys
+  (`token`, `secret`, `key`, `auth`, ...) and anything after `Bearer`, since
+  other MCP servers keep tokens in the same files. The files themselves keep
+  them.
+- The file is read again just before it is replaced; if something else (a
+  running Claude Code) wrote it in between, nothing is written and `install`
+  asks you to run it again. Quitting Claude Code first avoids that.
 - Running it again changes nothing. An older Hotline hook (another launcher, a
   different wait) is replaced, not duplicated. A hook counts as Hotline's when
-  its command is `hotline`, an absolute path or `node <file>.js`, then exactly
-  `hook <agent> <event>` and only `--wait-seconds` or `--port`.
+  its command starts with `hotline`, an absolute path whose file name contains
+  `hotline`, this run's `--command`, or `node <file>.js`, followed by exactly
+  `hook <agent> <event>` and only `--wait-seconds` or `--port`. A `--command`
+  whose file name lacks `hotline` is recognised only when the same `--command`
+  is given again, including for `--uninstall`.
 - A Codex config that already defines `mcp_servers.hotline` in any TOML form
   (a table, a quoted name, `hotline = {...}` under `[mcp_servers]`, dotted or
   inline keys) is refused, never edited.
@@ -151,7 +160,8 @@ the call.
 A test call goes straight to the voice provider, not through the daemon's call
 policy, so quiet hours and the call rate limits do not apply to it. Instead it
 keeps its own cooldown: two minutes between real test calls (`test-call.json` in
-the hotline home). If its post-call webhook reaches the daemon, the daemon does
+the hotline home). A stamp file that is not private or not readable refuses the
+call until it is removed. If its post-call webhook reaches the daemon, the daemon does
 not know the conversation, records `voice.post-call-ignored` in the audit log
 and changes nothing. Tests use the fake provider or a fake HTTP layer only; a real test
 call is part of the [live check](live-check.md), done by a human.

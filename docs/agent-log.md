@@ -1527,6 +1527,18 @@ Template:
   - Not changed: `doctor` still sends the token to whatever holds the
     daemon's port on 127.0.0.1, the same trust the MCP server and hooks
     already place in that port (docs/mcp.md).
+- Staff review fixes on PR #45 (head 0c7d791):
+  - The printed install diff masks credential-looking values (JSON and TOML
+    keys like `token`, `secret`, `key`, `auth`; anything after `Bearer`), so
+    a reformatted `~/.claude.json` never shows other servers' tokens.
+  - `install` re-reads each file just before replacing it and aborts that
+    file if it changed (Claude Code rewrites `~/.claude.json` while running).
+    No automated test covers the race itself: there is no seam between the
+    two reads, and adding one only for a test was not worth it.
+  - An absolute-path launcher is Hotline's only when its file name contains
+    `hotline` or it is this run's `--command`.
+  - The test-call cooldown fails closed on an untrusted or unreadable stamp.
+  - 1304 tests in 53 files pass (`scripts/ci/run.sh build` and `test`).
 - Open issues or follow-ups:
   - `doctor` does not show the monthly cost estimate from plan section 8 yet.
   - Move the ElevenLabs management client into `packages/providers` once

@@ -118,6 +118,26 @@ async function writeAtomically(path: string, text: string, mode: number): Promis
   }
 }
 
+/** Key names whose values the printed diff hides (other servers' env tokens, API keys). */
+const SECRET_KEY = /token|secret|passw|api[-_]?key|auth|credential|cookie|session|private|bearer/i;
+
+/**
+ * One diff line with secret-looking values masked: JSON `"key": "value"` and
+ * TOML `key = "value"` where the key looks like a credential, and anything after
+ * `Bearer `. The diff stays local, but terminals get logged and screen-shared.
+ */
+export function redactConfigLine(line: string): string {
+  return line
+    .replace(/("([^"\\]*)"\s*:\s*)"(?:[^"\\]|\\.)*"/g, (match, prefix: string, key: string) =>
+      SECRET_KEY.test(key) ? `${prefix}"[redacted]"` : match,
+    )
+    .replace(
+      /^([+\- ]\s*([A-Za-z0-9_.-]+)\s*=\s*)(["'])(?:(?!\3).)*\3/,
+      (match, prefix: string, key: string) => (SECRET_KEY.test(key) ? `${prefix}"[redacted]"` : match),
+    )
+    .replace(/(Bearer\s+)[^\s"']+/gi, "$1[redacted]");
+}
+
 function within(child: string, parent: string): boolean {
   const path = relative(parent, child);
   return path === "" || (!path.startsWith("..") && !isAbsolute(path));
@@ -201,7 +221,7 @@ export async function installCommand(
         continue;
       }
       changed++;
-      out.stdout(lineDiff(path, current?.text ?? "", next));
+      out.stdout(lineDiff(path, current?.text ?? "", next, redactConfigLine));
       if (dryRun) continue;
       if (current !== undefined) {
         const backup = `${path}.hotline-backup-${stamp(now)}`;
@@ -211,6 +231,13 @@ export async function installCommand(
         out.stdout(`backup: ${backup}`);
       } else {
         await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+      }
+      // Claude Code rewrites ~/.claude.json while it runs: never replace a newer write.
+      const latest = await readConfigFile(path);
+      if (latest?.text !== current?.text) {
+        throw new AgentConfigError(
+          `${path} changed while installing; nothing was written to it, run this again`,
+        );
       }
       await writeAtomically(path, next, current?.mode ?? 0o600);
       out.stdout(`${remove ? "removed Hotline from" : "wrote"}: ${path}`);

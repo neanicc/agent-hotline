@@ -1,6 +1,6 @@
 // `hotline voice` and `hotline test-call` through a fake HTTP layer: nothing
 // reaches ElevenLabs and no phone rings.
-import { readFile } from "node:fs/promises";
+import { chmod, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseConfigText } from "@hotline/core";
 import { FileSecretStore, writePrivateFile } from "@hotline/daemon";
@@ -334,6 +334,18 @@ describe("hotline test-call", () => {
     expect(soon.stderr).toContain("try again in 60s");
     expect((await cli(["test-call", "--yes"], at("2026-10-14T12:02:01.000Z"))).code).toBe(0);
     expect(fetch.requests).toHaveLength(2);
+  });
+
+  it("fails closed when the cooldown stamp cannot be trusted", async () => {
+    await writeSetup({ agentId: "agent_fake_1" });
+    const stamp = join(setup.hotlineHome, "test-call.json");
+    await writeFile(stamp, '{"at": "2026-10-14T12:00:00.000Z"}', { mode: 0o644 });
+    await chmod(stamp, 0o644);
+    const fetch = fakeFetch();
+    const result = await cli(["test-call", "--yes"], testContext(setup, { fetch }));
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("cannot be trusted or read");
+    expect(fetch.requests).toEqual([]);
   });
 
   it("refuses without a config, an agent or the API key", async () => {

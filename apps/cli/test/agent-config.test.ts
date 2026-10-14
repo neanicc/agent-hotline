@@ -136,6 +136,14 @@ describe("editHooks", () => {
       },
     });
     expect(readHooks(lookalikes, "s", "claude")).toEqual([]);
+    // An absolute path counts when its file name says hotline, or when it is this run's --command.
+    const custom = editHooks(undefined, "s", "claude", "/opt/bin/agent-phone", false);
+    expect(readHooks(custom, "s", "claude")).toEqual([]);
+    expect(editHooks(custom, "s", "claude", "/opt/bin/agent-phone", true)).toBe("{}\n");
+    const userGuard = JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: "command", command: "/usr/local/bin/myguard hook claude stop" }] }] },
+    });
+    expect(editHooks(userGuard, "s", "claude", "hotline", true)).toBe(userGuard);
     expect(editHooks(lookalikes, "s", "claude", "hotline", true)).toBe(lookalikes);
     expect(editHooks(notOurs, "s", "claude", "hotline", true)).toBe(notOurs);
   });
