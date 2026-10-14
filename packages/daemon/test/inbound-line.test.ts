@@ -361,16 +361,36 @@ describe("send_instruction", () => {
     expect(sms.sent).toHaveLength(1);
   });
 
-  it("keeps a call's session numbers across a restart", async () => {
+  it("keeps the session numbers of a call holding an instruction across a restart", async () => {
     session("s-1", "Claude in demo-app");
     session("s-2", "Codex in api");
     line.getStatus(call());
+    expect(instruct(1, "run the tests")).toBe("queued");
     const next = await restart();
     // No new status on this call: the numbers it already heard still hold.
-    expect(instruct(2, "run the tests")).toBe("queued");
-    expect(instruct(3, "run the tests")).toBe("unknown-session");
-    await next.postCall(transcript("conv-1", "session 2, run the tests"), now, false);
-    expect(store.listInstructions().map((i) => i.sessionId)).toEqual(["s-2"]);
+    expect(instruct(2, "rebase on main")).toBe("queued");
+    expect(instruct(3, "rebase on main")).toBe("unknown-session");
+    await next.postCall(
+      transcript("conv-1", "session 1, run the tests", "session 2, rebase on main"),
+      now,
+      false,
+    );
+    expect(
+      store
+        .listInstructions()
+        .map((i) => i.sessionId)
+        .sort(),
+    ).toEqual(["s-1", "s-2"]);
+  });
+
+  it("saves nothing for a call that only heard the status; after a restart it hears it again", async () => {
+    session("s-1", "Claude in demo-app");
+    line.getStatus(call());
+    expect(store.listInboundCalls()).toEqual([]);
+    await restart();
+    expect(instruct(1)).toBe("unknown-session");
+    line.getStatus(call());
+    expect(instruct(1)).toBe("queued");
   });
 
   it("still holds the caps for instructions held before a restart", async () => {

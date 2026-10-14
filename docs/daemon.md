@@ -186,8 +186,8 @@ records it in the audit log as `sms.received` with its SID and reply type
 
 **What a restart keeps (HL-13b).** The PinGate's hourly and daily budgets of
 wrong PINs (`pin_failures`), the server-tool delivery memory
-(`tool_deliveries`), the held instructions and session numbers of inbound
-calls (`inbound_calls`), and when the forgery alarm and each direction's
+(`tool_deliveries`), the held instructions of inbound calls with their
+session numbers (`inbound_calls`), and when the forgery alarm and each direction's
 lockout text last went out (`daemon_state`) are in SQLite, so a restart hands
 a PIN guesser no fresh budget, does not run a replayed tool call again, and
 allows no early second text. Two things stay in memory on purpose, both
@@ -924,9 +924,12 @@ anyone else's text the generic SMS reply.
   gets one text either way, with counts only: that it was queued, or that it
   was not passed on (and how many others were queued), since the voice agent
   said `queued` before the transcript was checked. The held instructions and the call's
-  numbering are kept for an hour, in memory and in the store (`inbound_calls`,
-  HL-13b; the instruction and the owner's words redacted before they are
-  saved). Past that without a post-call event they are dropped, audited
+  numbering are kept for an hour in memory. A call is also saved in the
+  store (`inbound_calls`, HL-13b) once it holds an instruction, with its
+  numbering, the instruction and the owner's words redacted first. A call
+  that only heard the status is not saved (a write per status was too
+  costly for what it keeps): after a restart it gets `unknown-session` until
+  the status is read again. Past that without a post-call event they are dropped, audited
   (`no post-call event`) and the owner gets the same "not passed on" text.
   A restart keeps them: the next run loads them before any route serves, and
   the post-call event confirms them against the pulled transcript as usual
@@ -1015,8 +1018,9 @@ session's queued ones (dropping expired ones in the same transaction), and
 status changes. Migration 5 (HL-13b) adds what must survive a restart:
 `pin_failures` (each wrong PIN's direction and time, for the PinGate's hourly
 and daily budgets; older than a day is pruned), `inbound_calls` (the inbound
-line's memory of a call: the session numbers its status read out and the
-instructions it holds until the post-call event, the words redacted; deleted
+line's memory of a call that holds an instruction: the session numbers its
+status read out and the instructions it holds until the post-call event, the
+words redacted; deleted
 once the event is handled or the call is forgotten) and `tool_deliveries`
 (state-changing server-tool deliveries by hash, with the response each got,
 for two hours). Times in these three are epoch milliseconds. The forgery

@@ -345,13 +345,17 @@ export class InboundLine {
     const head = `${count(live.length, ["live session", "live sessions"])}.`;
     const { text, included } = this.#status(sessions, now, true, head, numberOf);
     // Only sessions this call heard read out get a number its instructions may use.
+    let numbered = false;
     for (const session of included) {
       if (known(session) >= 0) continue;
       memory.sessionIds.push(session.id);
       memory.nicknames.push(speakableName(this.#options.redact(session.nickname)));
+      numbered = true;
     }
-    // Saved so the numbers still hold for this call after a restart.
-    this.#save(call.conversationId, memory);
+    // A call is saved only once it holds an instruction (`#hold`); after that,
+    // new numbers are saved with it. A call that holds none is not worth a
+    // write per status: after a restart it hears the status again (fails closed).
+    if (numbered && memory.held.length > 0) this.#save(call.conversationId, memory);
     return text;
   }
 
@@ -453,7 +457,8 @@ export class InboundLine {
       const spare = id === keep || this.#calls.size <= MAX_CALLS;
       if (memory.expires > now.getTime() && spare) continue;
       this.#calls.delete(id);
-      this.#store.deleteInboundCall(id);
+      // Only a call that held an instruction was saved.
+      if (memory.held.length > 0) this.#store.deleteInboundCall(id);
       // The voice agent told the owner these were queued: say they were not.
       for (const held of memory.held.filter((h) => !h.done)) {
         this.#store.appendAudit("voice.instruction-unconfirmed", { reason: "no post-call event" }, now, {
@@ -483,8 +488,8 @@ export class InboundLine {
     }
     const memory = this.#calls.get(event.conversationId);
     if (memory === undefined || memory.held.length === 0) {
+      // Never saved: a call is saved only once it holds an instruction.
       this.#calls.delete(event.conversationId);
-      this.#store.deleteInboundCall(event.conversationId);
       return;
     }
     let notQueued = 0;

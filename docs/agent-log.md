@@ -3165,8 +3165,8 @@ Template:
   time are in `daemon_state` (`security.forgery-texted-at`,
   `inbound.lockout-texted-at`), merged with the run's own record so a store
   error never allows extra texts.
-- Decision: held inbound instructions and each call's session numbering are
-  saved per call (`inbound_calls`) on every change, the instruction and the
+- Decision: a call that holds an instruction is saved (`inbound_calls`)
+  with its session numbering whenever either changes, the instruction and the
   owner's words redacted first, and loaded in the `InboundLine` constructor,
   before any route serves. The post-call event confirms them against the
   pulled transcript as usual; after a restart that is the redacted copy, so
@@ -3216,6 +3216,11 @@ Template:
   the store (1 each), the in-flight caps removed (4). The scenario suite
   could not be run locally (the sandbox refuses commands containing its
   stage name); hosted CI runs it. No real call, text or credential was used.
+- CI fix: the first push also saved every call that only heard the status.
+  That doubled the writes per `get_status`, and on the Ubuntu runner the
+  1001-call cap test went from 1.3 s to past its 5 s timeout. Such calls are
+  no longer saved; after a restart they get `unknown-session` until the
+  status is read again (fails closed). The timeout was not changed.
 - Open issues or follow-ups: security.md update after #77; count out-of-queue
   texts against the text rate limits; HL-13c (#80) retries processing records
   and normalises the SMS body comparison in the same files.
