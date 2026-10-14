@@ -12,6 +12,8 @@
       "test/**",
       "*.json",
       "*.ts",
+      "scripts/*.mjs",
+      "scripts/ci/*.mjs",
       "!**/dist",
       "!packages/agents/test/fixtures/hooks/codex/schema"
     ]

@@ -2,12 +2,32 @@
 
 The setup commands (`apps/cli`, HL-11): `hotline init`, `hotline voice`,
 `hotline install`, `hotline away`, `hotline doctor` and `hotline test-call`.
-Until packaging (HL-15) puts `hotline` on your `PATH`, run them as
-`pnpm run hotline <command>` from the repository, and give `hotline install` a
-`--command` path: an executable wrapper script such as
-`#!/bin/sh` / `exec node /absolute/path/to/apps/cli/dist/main.js "$@"`.
 
-In order:
+## Getting the `hotline` command
+
+Hotline is not published. `pnpm run package` (after `pnpm install`) bundles the
+CLI into `dist/hotline/`, which runs with plain Node 22 and no `node_modules`:
+
+| Path | Holds |
+| --- | --- |
+| `bin/hotline` | The launcher. Link it onto your `PATH`, or pass its absolute path to `install --command` |
+| `lib/*.mjs` | The CLI; each command's code loads only when that command runs |
+| `package.json` | Name and version (`hotline --version` reads it) |
+| `LICENSE`, `THIRD_PARTY_LICENSES.txt` | This project's license and those of the bundled packages |
+
+```sh
+pnpm run package
+ln -s "$PWD/dist/hotline/bin/hotline" ~/.local/bin/hotline   # any folder on your PATH
+```
+
+The link survives a rebuild. You can also copy `dist/hotline` anywhere and link
+its `bin/hotline`. The agents run `hotline` with the `PATH` they start with; if
+it is not on that `PATH`, install with `--command /absolute/path/to/bin/hotline`
+(a file named `hotline`, so `install`, `--uninstall` and `doctor` recognise the
+hooks as Hotline's). From a checkout without packaging, `pnpm run hotline
+<command>` runs the unbundled build.
+
+## Order
 
 ```sh
 hotline init                    # config, PIN and credentials
