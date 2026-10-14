@@ -2567,3 +2567,9 @@ Template:
   `claude-haiku-5-5` could be added to `VOICE_LLMS` once ElevenLabs documents
   it. Doctor's cost estimate does not yet derive `llmPerMinute` from
   `voice.llm`.
+- Bot staff review on #70 (approve with nits, no P0 or P1). P2 answered in
+  docs/voice.md: ElevenLabs' default backup models may come from another LLM
+  vendor, so while one answers the same redacted prompt, asks and transcript
+  go to that vendor. Backups stay on by the owner's direction on #57. P3
+  (doctor's `llmPerMinute` does not follow `voice.llm`) is the follow-up
+  already listed above.

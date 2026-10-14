@@ -139,7 +139,13 @@ reference says only some models take. It sends `backup_llm_config:
 {"preference": "default"}`, ElevenLabs' recommended fallback sequence, so an
 outage at one provider switches models instead of dropping the call. Hotline
 never disables the backups; a backup model answers under the same daemon
-checks.
+checks. The cost is privacy, not safety: ElevenLabs chooses the backup models,
+and they may come from another LLM vendor, so while a backup answers, the
+prompt, the asks (already redacted and summarised) and the call's transcript
+so far go to that vendor too, never more than the primary model gets. The
+owner chose to keep the backups on (#57); `{"preference": "disabled"}` would
+keep everything on the primary model, at the price of a dropped call when that
+model is down, and is not offered as a setting.
 
 **Switching.** Put one of the allowed ids in `config.json` and re-apply:
 
