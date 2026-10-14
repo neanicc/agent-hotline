@@ -39,6 +39,11 @@ const answer = (askId: string, decision: Decision, confirmation: "none" | "pin" 
     answeredAt: T0,
   });
 
+/** A clock reading between T0 and T1, while the asks are open. */
+const DURING = new Date("2026-10-13T22:00:00.000Z");
+
+const problem = (ask: Ask, given: Answer, receivedAt: Date = DURING) => answerProblem(ask, given, receivedAt);
+
 describe("Session", () => {
   it("accepts a registered session and rejects unknown agents or relative paths", () => {
     const session = {
@@ -92,6 +97,16 @@ describe("Answer", () => {
     ).toBe(false);
   });
 
+  it("rejects a blank excerpt or free-text decision but stores real text untrimmed", () => {
+    const base = answer("ask-1", { type: "option", option: 2 });
+    for (const blank of [" ", "   ", "\t", "\n", " \t\r\n "]) {
+      expect(Answer.safeParse({ ...base, ownerExcerpt: blank }).success, JSON.stringify(blank)).toBe(false);
+      expect(Decision.safeParse({ type: "text", text: blank }).success, JSON.stringify(blank)).toBe(false);
+    }
+    expect(Answer.parse({ ...base, ownerExcerpt: "  two \n" }).ownerExcerpt).toBe("  two \n");
+    expect(Decision.parse({ type: "text", text: " skip it " })).toEqual({ type: "text", text: " skip it " });
+  });
+
   it("has no decision that stands for silence or an assumption", () => {
     for (const type of ["approve-by-default", "timeout", "assumed", "no-answer"]) {
       expect(Decision.safeParse({ type }).success, type).toBe(false);
@@ -101,38 +116,87 @@ describe("Answer", () => {
 
 describe("answerProblem", () => {
   it("accepts a decision that fits the ask", () => {
-    expect(answerProblem(question, answer("ask-1", { type: "option", option: 2 }))).toBeUndefined();
-    expect(answerProblem(question, answer("ask-1", { type: "text", text: "neither" }))).toBeUndefined();
-    expect(answerProblem(permission("low"), answer("ask-2", { type: "allow" }))).toBeUndefined();
-    expect(answerProblem(permission("high"), answer("ask-2", { type: "deny" }))).toBeUndefined();
+    expect(problem(question, answer("ask-1", { type: "option", option: 2 }))).toBeUndefined();
+    expect(problem(question, answer("ask-1", { type: "text", text: "neither" }))).toBeUndefined();
+    expect(problem(permission("low"), answer("ask-2", { type: "allow" }))).toBeUndefined();
+    expect(problem(permission("high"), answer("ask-2", { type: "deny" }))).toBeUndefined();
   });
 
   it("rejects an option the ask did not offer or a decision of the wrong kind", () => {
-    expect(answerProblem(question, answer("ask-1", { type: "option", option: 3 }))).toMatch(
+    expect(problem(question, answer("ask-1", { type: "option", option: 3 }))).toMatch(
       /not one the ask offered/,
     );
-    expect(answerProblem(question, answer("ask-1", { type: "allow" }))).toMatch(/cannot be answered/);
-    expect(answerProblem(permission("low"), answer("ask-2", { type: "text", text: "sure" }))).toMatch(
+    expect(problem(question, answer("ask-1", { type: "allow" }))).toMatch(/cannot be answered/);
+    expect(problem(permission("low"), answer("ask-2", { type: "text", text: "sure" }))).toMatch(
       /cannot be answered/,
     );
-    expect(answerProblem(question, answer("ask-2", { type: "option", option: 1 }))).toMatch(/different ask/);
+    expect(problem(question, answer("ask-2", { type: "option", option: 1 }))).toMatch(/different ask/);
   });
 
   it("needs the PIN or a confirming text for a high-risk approval", () => {
-    expect(answerProblem(permission("high"), answer("ask-2", { type: "allow" }))).toMatch(/PIN/);
-    expect(answerProblem(permission("high"), answer("ask-2", { type: "allow" }, "pin"))).toBeUndefined();
-    expect(answerProblem(permission("high"), answer("ask-2", { type: "allow" }, "text"))).toBeUndefined();
+    expect(problem(permission("high"), answer("ask-2", { type: "allow" }))).toMatch(/PIN/);
+    expect(problem(permission("high"), answer("ask-2", { type: "allow" }, "pin"))).toBeUndefined();
+    expect(problem(permission("high"), answer("ask-2", { type: "allow" }, "text"))).toBeUndefined();
   });
 
   it("lets a stop continue with an instruction or finish, and takes no answer for a notification", () => {
     const stop = Ask.parse({ ...question, id: "ask-3", kind: "stop", options: [] });
-    expect(
-      answerProblem(stop, answer("ask-3", { type: "text", text: "now write the tests" })),
-    ).toBeUndefined();
-    expect(answerProblem(stop, answer("ask-3", { type: "done" }))).toBeUndefined();
-    expect(answerProblem(stop, answer("ask-3", { type: "allow" }))).toMatch(/cannot be answered/);
+    expect(problem(stop, answer("ask-3", { type: "text", text: "now write the tests" }))).toBeUndefined();
+    expect(problem(stop, answer("ask-3", { type: "done" }))).toBeUndefined();
+    expect(problem(stop, answer("ask-3", { type: "allow" }))).toMatch(/cannot be answered/);
     const notify = Ask.parse({ ...question, id: "ask-4", kind: "notify", options: [] });
-    expect(answerProblem(notify, answer("ask-4", { type: "done" }))).toMatch(/no answer/);
+    expect(problem(notify, answer("ask-4", { type: "done" }))).toMatch(/no answer/);
+  });
+
+  it("accepts an answer for a pending or in-flight ask given and received before it expires", () => {
+    const allow = answer("ask-2", { type: "allow" });
+    const justBefore = new Date(Date.parse(T1) - 1);
+    for (const status of ["pending", "in-flight"] as const) {
+      const ask = { ...permission("low"), status };
+      expect(problem(ask, allow), status).toBeUndefined();
+      expect(problem(ask, allow, justBefore), status).toBeUndefined();
+      expect(
+        problem(ask, { ...allow, answeredAt: justBefore.toISOString() }, justBefore),
+        status,
+      ).toBeUndefined();
+    }
+  });
+
+  it("rejects an answer for an ask that is no longer waiting", () => {
+    for (const status of ["answered", "expired", "cancelled"] as const) {
+      const ask = { ...permission("low"), status };
+      expect(problem(ask, answer("ask-2", { type: "allow" })), status).toMatch(/not waiting for an answer/);
+      expect(problem(ask, answer("ask-2", { type: "deny" })), status).toMatch(/not waiting for an answer/);
+      const stale = { ...question, status };
+      expect(problem(stale, answer("ask-1", { type: "option", option: 1 })), status).toMatch(
+        /not waiting for an answer/,
+      );
+    }
+  });
+
+  it("rejects an answer received at or after the ask expired, even if the ask still looks open", () => {
+    const allow = answer("ask-2", { type: "allow" });
+    const ask = permission("low");
+    expect(problem(ask, allow, new Date(T1))).toMatch(/arrived after the ask expired/);
+    expect(problem(ask, allow, new Date(Date.parse(T1) + 60_000))).toMatch(/arrived after the ask expired/);
+    expect(problem(question, answer("ask-1", { type: "text", text: "late" }), new Date(T1))).toMatch(
+      /arrived after the ask expired/,
+    );
+  });
+
+  it("rejects an answer given at or after the ask expired", () => {
+    const ask = permission("low");
+    for (const answeredAt of [T1, "2026-10-13T23:00:00.000Z"]) {
+      expect(problem(ask, { ...answer("ask-2", { type: "allow" }), answeredAt }), answeredAt).toMatch(
+        /given after the ask expired/,
+      );
+    }
+  });
+
+  it("fails closed on an invalid clock reading", () => {
+    expect(problem(permission("low"), answer("ask-2", { type: "allow" }), new Date(Number.NaN))).toMatch(
+      /arrived is unknown/,
+    );
   });
 });
 

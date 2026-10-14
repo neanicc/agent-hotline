@@ -11,6 +11,14 @@ export const PhoneNumber = z.e164();
 /** Opaque identifier the daemon or a provider assigned. */
 export const Id = z.string().min(1).max(128);
 
+/** Text with at least one non-whitespace character. Stored as given, never trimmed. */
+const notBlank = (max: number) =>
+  z
+    .string()
+    .min(1)
+    .max(max)
+    .refine((text) => text.trim().length > 0, "must not be blank");
+
 export const AgentKind = z.enum(["claude-code", "codex"]);
 export type AgentKind = z.infer<typeof AgentKind>;
 
@@ -87,7 +95,7 @@ export const Decision = z.discriminatedUnion("type", [
   /** Refused a permission request. */
   z.strictObject({ type: z.literal("deny") }),
   /** Free-text answer to a question, or the next instruction after a stop. */
-  z.strictObject({ type: z.literal("text"), text: z.string().min(1).max(2000) }),
+  z.strictObject({ type: z.literal("text"), text: notBlank(2000) }),
   /** After a stop: nothing more, let the agent finish. */
   z.strictObject({ type: z.literal("done") }),
 ]);
@@ -96,7 +104,12 @@ export type Decision = z.infer<typeof Decision>;
 export const Channel = z.enum(["voice", "sms"]);
 export type Channel = z.infer<typeof Channel>;
 
-/** How the owner proved it was them beyond caller ID, required for high-risk approvals. */
+/**
+ * How the owner proved it was them beyond caller ID, required for high-risk approvals.
+ * The contract cannot prove the claim, so the daemon sets `pin` or `text` only from its
+ * own server-side check (a PIN it verified against the stored hash, or a confirming text
+ * from the owner's number on a verified webhook), never from model, tool or agent output.
+ */
 export const Confirmation = z.enum(["none", "pin", "text"]);
 export type Confirmation = z.infer<typeof Confirmation>;
 
@@ -105,9 +118,10 @@ export const Answer = z.strictObject({
   decision: Decision,
   channel: Channel,
   /** The owner's own words or keypresses that produced the decision, verbatim. */
-  ownerExcerpt: z.string().min(1).max(2000),
+  ownerExcerpt: notBlank(2000),
   /** Provider id of the call (conversation or call SID) or text message that carried it. */
   sourceId: Id,
+  /** Set only from the daemon's own verification; see `Confirmation`. */
   confirmation: Confirmation.default("none"),
   answeredAt: Timestamp,
 });
@@ -158,13 +172,27 @@ export const CallRecord = z
   });
 export type CallRecord = z.infer<typeof CallRecord>;
 
+/** Statuses in which an ask still waits for the owner. Any other status is final. */
+const OPEN_STATUSES: ReadonlySet<AskStatus> = new Set<AskStatus>(["pending", "in-flight"]);
+
 /**
  * Why `answer` cannot resolve `ask`, or undefined when it can. Callers treat any
- * problem as "no answer": a decision of the wrong kind, an option the ask did not
- * offer, or a high-risk approval without a PIN or confirming text never counts.
+ * problem as "no answer": an ask that is no longer open (already answered, expired
+ * or cancelled), an answer given or received at or after `expiresAt`, a decision of
+ * the wrong kind, an option the ask did not offer, or a high-risk approval without
+ * a PIN or confirming text never counts.
+ *
+ * `receivedAt` is the daemon's clock reading when the answer arrived. Core never
+ * reads the wall clock itself; an invalid reading is a problem, not a pass.
  */
-export function answerProblem(ask: Ask, answer: Answer): string | undefined {
+export function answerProblem(ask: Ask, answer: Answer, receivedAt: Date): string | undefined {
   if (answer.askId !== ask.id) return "answer belongs to a different ask";
+  if (!OPEN_STATUSES.has(ask.status)) return `the ask is ${ask.status}, not waiting for an answer`;
+  const expiresAt = Date.parse(ask.expiresAt);
+  const received = receivedAt.getTime();
+  if (Number.isNaN(received)) return "the time the answer arrived is unknown";
+  if (received >= expiresAt) return "the answer arrived after the ask expired";
+  if (Date.parse(answer.answeredAt) >= expiresAt) return "the answer was given after the ask expired";
   const { decision } = answer;
   switch (ask.kind) {
     case "question":
