@@ -344,9 +344,14 @@ submitted at once, never read back; when unsure the agent asks once ("Sorry, is
 that a yes or a no?" with the read-back for a permission request); after a
 second unclear reply it says it will text, submits nothing for that ask and
 moves on, replacing the HL-08 sentence that submitted `unclear`; it asks for
-the PIN at most once per call and never goes quiet. These are prompt rules:
-the daemon does not require the read-back exchange in the transcript until
-HL-09c. `submit_answer` no longer
+the PIN at most once per call and never goes quiet. Since HL-09c the daemon
+requires the read-back exchange in the transcript for every voice allow: the
+ask's reading, a later agent turn reading the same ask back as a question for
+a yes, and the owner's reply to it, which a fast path of common clear replies
+or, for anything else, a pluggable `ReplyJudge` must find agreed (the judge
+sees only the owner's reply turns; the default judge fails closed). An allow
+without it is not confirmed and the ask is texted
+([daemon.md](daemon.md#call-orchestration)). `submit_answer` no longer
 offers the model `unclear`; the daemon still parses it from an agent on an
 older definition, and it still ends the ask as no answer.
 `SAFETY_RULES` in the providers tests checks each rule word for word, and a
@@ -369,8 +374,8 @@ nickname again before fencing it.
 checks it against the owner's turns of the post-call transcript (case and
 punctuation ignored, whole words, never agent or caller turns). Call
 orchestration confirms every voice decision with it, only within the owner
-turns between the reading of that ask and the reading of the next one
-([daemon.md](daemon.md#call-orchestration)).
+turns right after an agent turn that read that ask, and for an allow only
+right after its read-back ([daemon.md](daemon.md#call-orchestration)).
 `parsePostCallEvent(body, {ownerNumber, pinVerifiedAt})` labels the person's
 turns `owner` only on an outbound call to the owner's number, or for turns
 spoken after the PIN was verified on an inbound call from it (the call's
@@ -546,7 +551,8 @@ Rules:
   call, or a call that ended with the ask still open, it is texted at once. That
   is also how an ask ends that the voice agent left without a decision after
   two unclear replies (definition v4): the call is `dropped` and the ask is
-  texted. An `unclear` report (from an agent on an older definition) ends the
+  texted (the daemon's call log says `owner-unclear`; the queue's `CallEnd`
+  and the agent's no-answer reason stay `dropped`). An `unclear` report (from an agent on an older definition) ends the
   ask; it is not retried by text.
 - **Notifications** (`notify`) only ever go by text and need no answer. They end
   with `delivered` once the daemon reports `text-sent`, or as `no-answer`
