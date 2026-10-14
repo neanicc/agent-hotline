@@ -46,17 +46,26 @@ export function judgeStatus(choice: JudgeBackendChoice | undefined): string {
 }
 /** The `--judge` values: `judge.backend`'s choices. */
 export const JUDGE_CHOICES = JudgeBackendChoice.options.join("|");
-export const JUDGE_QUESTION =
-  "Use the reply judge (sends only your short spoken reply, on your own account)? [Y/n]: ";
+/**
+ * The judge question. Enter answers it with the default shown: yes, unless the
+ * owner turned the judge off before, when Enter keeps it off (`[y/N]`).
+ */
+export function judgeQuestion(earlier: unknown): string {
+  const wasOff = earlier === "off";
+  return `Use the reply judge (sends only your short spoken reply, on your own account)? ${wasOff ? "[y/N]" : "[Y/n]"}: `;
+}
 /** How many unrecognized answers to the judge question before `init` gives up. */
 const JUDGE_ASKS = 3;
 
 /**
- * The owner's answer to `JUDGE_QUESTION`: Enter or yes keeps a backend chosen
- * earlier, else `auto`; no is `off`. Undefined for anything else.
+ * The owner's answer to `judgeQuestion`: yes keeps a backend chosen earlier,
+ * else `auto`; no is `off`; Enter is yes, except that it keeps an earlier
+ * `off`, so a recorded refusal never turns into sending. Undefined for
+ * anything else.
  */
 function judgeAnswer(answer: string, earlier: unknown): JudgeBackendChoice | undefined {
   const said = answer.trim().toLowerCase();
+  if (said === "" && earlier === "off") return "off";
   if (said === "" || said === "y" || said === "yes") {
     const kept = JudgeBackendChoice.safeParse(earlier);
     return kept.success && kept.data !== "off" ? kept.data : "auto";
@@ -236,7 +245,7 @@ export async function initCommand(
       const earlier = (raw.judge as { backend?: unknown } | undefined)?.backend;
       let choice: JudgeBackendChoice | undefined;
       for (let attempt = 0; attempt < JUDGE_ASKS && choice === undefined; attempt++) {
-        choice = judgeAnswer(await prompt.ask(JUDGE_QUESTION), earlier);
+        choice = judgeAnswer(await prompt.ask(judgeQuestion(earlier)), earlier);
       }
       if (choice === undefined) throw new InitError("answer y or n for the reply judge; nothing was changed");
       section(raw, "judge").backend = choice;

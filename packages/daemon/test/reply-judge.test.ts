@@ -127,6 +127,10 @@ describe("parseJudgeOutput and the post-check", () => {
     "sure, don't",
     "fine, only on staging",
     "yes, hold on",
+    // An agreeing idiom never spans a clause break.
+    "No. Problem is it's prod",
+    "no, problem is the tests fail",
+    "yeah. Why? Not sure",
   ])("vetoes an agreement to %j", (said) => {
     expect(vetoesAgreement([said])).toBe(true);
     expect(checkedVerdict(agreed, [said])).toBe("unclear");

@@ -2693,3 +2693,16 @@ Template:
   inside the step fails it). HL-10's inbound instruction confirmation
   (`instruction-confirm.ts`) keeps its own checks and does not use the reply
   judge; wiring it in is a follow-up that needs its own scenarios.
+- Catch-up with main after HL-12 (#68): only the agent log conflicted (HL-12
+  entry kept before this one, in landing order). Staff review at ca74cba
+  (88, 0 P0/P1, 1 P2, 3 P3), fixed in the same push:
+  - P2: Enter at `init --force` turned an earlier `off` into `auto`. Now an
+    earlier `off` is asked as `[y/N]` and Enter keeps it; only an explicit
+    yes turns the judge on.
+  - P3: the agreeing-idiom exception spanned sentences ("No. Problem is
+    it's prod" lost its "no"). Idioms now count only within one turn and
+    clause.
+  - P3: the Codex run's residual risk (shell tool in a read-only, offline
+    sandbox; phone audio as input) is written down in docs/daemon.md.
+  - P3 (AGENTS.md should name the judge's provider): human-owned, not
+    edited.

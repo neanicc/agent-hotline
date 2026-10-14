@@ -148,6 +148,38 @@ describe("hotline init", () => {
       }
     });
 
+    it("keeps an earlier off on Enter, showing [y/N]: a refusal never turns into sending", async () => {
+      expect(
+        (await cli(["init", ...FLAGS, "--judge", "off"], testContext(setup, { env: env(SECRETS) }))).code,
+      ).toBe(0);
+      const prompt = scriptedPrompter("");
+      const kept = await cli(
+        ["init", ...interactiveFlags, "--force"],
+        testContext(setup, { env: env(SECRETS), prompt }),
+      );
+      expect(kept.code).toBe(0);
+      expect(prompt.questions).toEqual([expect.stringMatching(/\[y\/N\]: $/)]);
+      expect(await recorded()).toBe("off");
+      // Only an explicit yes turns it back on.
+      const yes = scriptedPrompter("y");
+      expect(
+        (
+          await cli(
+            ["init", ...interactiveFlags, "--force"],
+            testContext(setup, { env: env(SECRETS), prompt: yes }),
+          )
+        ).code,
+      ).toBe(0);
+      expect(await recorded()).toBe("auto");
+      const again = scriptedPrompter("");
+      await cli(
+        ["init", ...interactiveFlags, "--force"],
+        testContext(setup, { env: env(SECRETS), prompt: again }),
+      );
+      expect(again.questions).toEqual([expect.stringMatching(/\[Y\/n\]: $/)]);
+      expect(await recorded()).toBe("auto");
+    });
+
     it("keeps a backend chosen earlier on Enter, and gives up on an answer that is neither", async () => {
       expect(
         (await cli(["init", ...FLAGS, "--judge", "codex"], testContext(setup, { env: env(SECRETS) }))).code,

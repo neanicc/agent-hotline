@@ -368,16 +368,23 @@ function words(text: string): string[] {
 /**
  * Whether the reply must not be taken as an agreement whatever the model
  * said: it holds a condition or correction word or phrase, or a negation once
- * agreeing idioms ("no problem", "why not") are taken out.
+ * agreeing idioms ("no problem", "why not") are taken out. An idiom counts
+ * only within one turn and one clause, so "No. Problem is it's prod" keeps
+ * its "no".
  */
 export function vetoesAgreement(reply: readonly string[]): boolean {
   const said = words(reply.join(" "));
   const joined = ` ${said.join(" ")} `;
   if (said.some((word) => CONDITION_WORDS.has(word))) return true;
   if (CONDITION_PHRASES.some((phrase) => joined.includes(` ${phrase} `))) return true;
-  const rest = words(said.join(" ").replace(AGREEING_IDIOMS, " "));
-  return rest.some((word) => NEGATIONS.has(word));
+  const clauses = reply.flatMap((turn) => turn.split(CLAUSE_BREAKS));
+  return clauses.some((clause) => {
+    const rest = words(words(clause).join(" ").replace(AGREEING_IDIOMS, " "));
+    return rest.some((word) => NEGATIONS.has(word));
+  });
 }
+/** Punctuation that ends a clause; an agreeing idiom never spans one. */
+const CLAUSE_BREAKS = /[.!?;:,…—–]+/u;
 
 /** The verdict that stands: the model's, with an `agreed` vetoed by its own flags or the post-check. */
 export function checkedVerdict(output: JudgeOutput | undefined, reply: readonly string[]): ReplyVerdict {

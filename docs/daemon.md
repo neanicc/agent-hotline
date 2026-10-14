@@ -486,7 +486,14 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
     The answer must have exactly the three fields asked for (a strict
     schema); any other field makes it `unclear`. Codex's answer is read
     only from its `--output-last-message` file; no file is `unclear`. A CLI
-    not found names the `PATH` searched in the selection's detail. `HOTLINE_JUDGE=1` makes
+    not found names the `PATH` searched in the selection's detail. Residual
+    risk: unlike `claude --tools ""`, `codex exec` keeps its shell tool, in
+    a read-only sandbox without network, and sees `HOME` and `CODEX_HOME`.
+    Its input is speech from a phone line, so what reaches it (other voices,
+    ambient audio) is not fully the owner's choice; the damage stays small
+    because the run cannot write or reach the network, and its answer is
+    validated strictly and can only confirm an allow the voice agent
+    already held for the owner, or leave it unconfirmed. `HOTLINE_JUDGE=1` makes
     `hotline hook` and `hotline mcp` do nothing (exit 0, no output, no daemon
     contact): a second guard, after hooks and MCP servers are switched off for
     the run, so the judge's own session can never phone the owner. Each reply
