@@ -1561,7 +1561,7 @@ Template:
   - Clearing `voice.voiceId` does not reset the deployed agent's voice: the
     agent body omits `tts` when no voice is set.
 
-## 2026-10-14 — HL-14c Conversational approval in the voice persona
+## 2026-10-14 — HL-14c Conversational approval in the voice persona (#49)
 
 - Owner direction (autopilot session, quoted on #44): approving should be "as
   natural as possible"; when the voice agent thinks it heard a yes it confirms
