@@ -52,6 +52,7 @@ import { OwnerTexts } from "./orchestrator-texts.js";
 import { VoiceCalls } from "./orchestrator-voice.js";
 import type { OwnerSms } from "./sms-webhook.js";
 import type { HotlineStore } from "./store.js";
+import type { ReplyJudge } from "./voice-confirm.js";
 
 export { ORCHESTRATOR_STATE_KEY, type OrchestratorLog, RATE_STATE_KEY } from "./orchestrator-state.js";
 export { CALL_CENTS_PER_MINUTE } from "./orchestrator-voice.js";
@@ -83,6 +84,13 @@ export interface CallOrchestratorOptions {
   newCode?: () => string;
   /** How long `stop` waits for the step in progress; default `STOP_WAIT_MS`. */
   stopWaitMs?: number;
+  /**
+   * Judges an owner's reply to a read-back that the fast path could not
+   * decide (HL-09d: `selectReplyJudge` in run.ts). Default `FailClosedJudge`.
+   */
+  judge?: ReplyJudge;
+  /** How long to wait for `judge`; default `JUDGE_TIMEOUT_MS`. */
+  judgeTimeoutMs?: number;
 }
 
 export class CallOrchestrator {
@@ -113,6 +121,8 @@ export class CallOrchestrator {
       ...(options.voice === undefined ? {} : { voice: options.voice }),
       log,
       process: processEvent,
+      ...(options.judge === undefined ? {} : { judge: options.judge }),
+      ...(options.judgeTimeoutMs === undefined ? {} : { judgeTimeoutMs: options.judgeTimeoutMs }),
     });
     this.#texts = new OwnerTexts({
       store: options.store,

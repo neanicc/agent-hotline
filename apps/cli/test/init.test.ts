@@ -76,6 +76,30 @@ describe("hotline init", () => {
     expect(result.stdout).toContain("…0100");
   });
 
+  it("explains the reply judge, and stores an Anthropic API key only from its variable (HL-09d)", async () => {
+    const plain = await cli(["init", ...FLAGS], testContext(setup, { env: env(SECRETS) }));
+    expect(plain.code).toBe(0);
+    expect(plain.stdout).toContain("Reply judge:");
+    expect(plain.stdout).toContain("your own Claude Code login");
+    expect(plain.stdout).toContain("Only your short spoken reply is sent");
+    expect(plain.stdout).toContain('"yes if the tests pass"');
+    const store = new FileSecretStore(join(setup.hotlineHome, "secrets.json"));
+    expect(await store.get("anthropic.apiKey")).toBeUndefined();
+
+    const key = "sk-ant-fake-judge-key-0001";
+    const prompter = scriptedPrompter();
+    const withKey = await cli(
+      ["init", ...FLAGS, "--force"],
+      testContext(setup, { env: env({ ...SECRETS, HOTLINE_ANTHROPIC_API_KEY: key }), prompt: prompter }),
+    );
+    expect(withKey.code).toBe(0);
+    expect(await store.get("anthropic.apiKey")).toBe(key);
+    expect(withKey.stdout).toContain("stored: Anthropic API key (reply judge)");
+    expect(withKey.stdout + withKey.stderr).not.toContain(key);
+    // Never asked for: the owner's agent login comes first.
+    expect(prompter.questions.join("\n")).not.toMatch(/anthropic/i);
+  });
+
   it("uses the Keychain through an injected security, never the real one", async () => {
     const security = fakeSecurity();
     const flags = FLAGS.filter((flag) => flag !== "file" && flag !== "--secret-store");

@@ -58,6 +58,7 @@ users can open is made private.
 | ElevenLabs API key | never | yes, no echo | `HOTLINE_ELEVENLABS_API_KEY` |
 | ElevenLabs post-call webhook secret | never | yes, no echo | `HOTLINE_ELEVENLABS_WEBHOOK_SECRET` |
 | Twilio account SID and auth token | never | yes, no echo | `HOTLINE_TWILIO_ACCOUNT_SID`, `HOTLINE_TWILIO_AUTH_TOKEN` |
+| Anthropic API key for the reply judge (optional) | never | no | `HOTLINE_ANTHROPIC_API_KEY` |
 
 - The PIN and credentials are never accepted as flags: other users on the Mac
   can see a process's arguments, and shells keep them in history. The
@@ -79,6 +80,36 @@ users can open is made private.
   A config `init` cannot read is refused, never replaced: it may hold the
   ElevenLabs ids, and dropping them would orphan the deployed agent.
 - Output shows the owner number as its last four digits and never a secret.
+- `init` ends by explaining the reply judge (below).
+
+### The reply judge
+
+When you answer a read-back with something other than a plain yes or no
+("yeah, let's ship that one", "sure, no problem"), the daemon asks a small model
+what you meant, on the plan you already have (HL-09d). It uses the first of
+these it finds, with nothing to set up:
+
+1. **Claude Code** (`claude` on the `PATH`): `claude -p` on your login, model
+   `haiku`. Log in once with `claude` if you have not.
+2. **Codex** (`codex` on the `PATH`): `codex exec` on your login, Codex's
+   default model at low reasoning effort.
+3. **An Anthropic API key**, stored as `anthropic.apiKey` when `init` runs with
+   `HOTLINE_ANTHROPIC_API_KEY` set. It is never asked for.
+
+Only your short spoken reply is sent, redacted, never the request or anything an
+agent wrote. Each run is isolated: an empty temporary folder, hooks off, no MCP
+servers, no tools, no saved session, and `HOTLINE_JUDGE=1`, under which `hotline
+hook` and `hotline mcp` do nothing. A yes with a condition ("yes if the tests
+pass", "sure, but not on main") or taken back ("yes... actually no") is never an
+approval. If the judge errs, takes longer than 20 seconds, or none is available,
+the reply is unclear and the request is texted to you. High-risk requests still
+need your PIN or a confirming text.
+
+`config.json` `judge.backend` picks one: `"auto"` (the default, the order
+above), `"claude-code"`, `"codex"`, `"anthropic-api"`, or `"off"` to send
+nothing anywhere. The daemon picks the judge when it starts; restart it after
+installing Claude Code or Codex, or after changing this setting. The daemon must
+find `claude` or `codex` on the `PATH` it is started with.
 
 ## `hotline voice`
 
@@ -160,13 +191,17 @@ Switches away mode, which lets the permission and Stop hooks phone you
 
 One `PASS`, `WARN` or `FAIL` line per check, then `INFO` lines with the monthly
 cost estimate, then a count of the checks. Exits 1 if anything fails; `INFO`
-lines never pass, warn or fail.
+lines never pass, warn or fail. The `judge` line names the reply judge the
+daemon would use, found the way the daemon finds it (a CLI on the `PATH`, or the
+stored key) without any model call. `--check-judge` also asks it one tiny fixed
+question, which is one model call on your login or key.
 
 | Check | Fails when | Warns when |
 | --- | --- | --- |
 | config | missing, unsafe or invalid | |
 | secrets (set or not, never values) | a credential the configured providers need is missing | the daemon has not created its API token yet |
 | daemon | it refuses the token, or something else answers on its port | it is not running |
+| reply judge | with `--check-judge`, its answer to the fixed reply "yes, go ahead" is not `agreed` (not logged in, no network, a bad key) | no backend is available, so unclear replies are texted (`judge.backend: "off"` passes) |
 | away mode | | the state file is unusable (it then reads as off) |
 | Claude Code and Codex installs (user, and the current project) | a hook's `--wait-seconds` is not below its `timeout`; Codex `tool_timeout_sec` is not above `policy.askTimeoutMinutes`; a Claude per-server `timeout` shorter than that | not installed; a hook or the MCP server is missing; less than 30 s between wait and timeout; a wait shorter than the ask timeout |
 | Claude Code idle timeout | `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` is not above the ask timeout | it is not set in this shell |

@@ -126,6 +126,8 @@ describe("runDaemon", () => {
           version: "0.0.0-test",
           apiPort: daemon.apiPort,
           hooksPort: daemon.hooksPort,
+          // Test mode: the default judge host finds no agent CLI, and no key is stored.
+          judge: "none",
         }),
       },
       { at: NOW.toISOString(), event: "daemon.stopping", detail: JSON.stringify({ signal }) },

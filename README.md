@@ -120,6 +120,18 @@ so the rules are strict:
 - **Redaction.** Only short summaries go to Twilio and ElevenLabs, with API keys,
   tokens, private keys, `.env` values and passwords redacted first. Logs show
   phone numbers as their last four digits.
+- **Your own agent judges unclear replies.** When you answer a read-back with
+  something other than a plain yes or no ("yeah, let's ship that one"), Hotline
+  sends your short spoken reply, and only that (redacted; never the request or
+  anything an agent wrote), to your own agent provider to ask whether you
+  clearly agreed: the Claude Code CLI on your login (a small model), else the
+  Codex CLI on your login, else an optional Anthropic API key. Each run is
+  isolated: an empty temporary folder, no hooks, no MCP servers, no tools,
+  nothing saved. A yes with a condition ("yes if the tests pass") or taken back
+  is never an approval, and an error or timeout counts as unclear. Set
+  `judge.backend` to `"off"` to send nothing; such replies are then texted to
+  you. `hotline doctor` shows which one is used
+  ([daemon.md](docs/daemon.md), [install.md](docs/install.md)).
 - **Local first.** Config, the PIN (stored only as a scrypt hash), transcripts and
   the audit log stay on your Mac. Credentials live in the macOS Keychain or a
   `0600` file, never in the config or the repository.

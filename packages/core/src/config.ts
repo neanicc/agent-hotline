@@ -118,6 +118,10 @@ export const DEFAULT_COST_RATES = {
   llmPerMinute: 0.03,
 } as const;
 
+/** Which reply judge backend to use; see `Config.judge`. */
+export const JudgeBackendChoice = z.enum(["auto", "claude-code", "codex", "anthropic-api", "off"]);
+export type JudgeBackendChoice = z.infer<typeof JudgeBackendChoice>;
+
 const rate = (fallback: number) => z.number().min(0).default(fallback);
 
 export const Config = z.strictObject({
@@ -181,6 +185,14 @@ export const Config = z.strictObject({
     .prefault({}),
   daemon: z.strictObject({ port: count(1024, 65535, 7341) }).prefault({}),
   secrets: z.strictObject({ store: SecretStoreChoice.default("auto") }).prefault({}),
+  /**
+   * The reply judge (HL-09d): which of the owner's own agent logins decides
+   * what a spoken reply to an approval read-back means when the fast path
+   * cannot. `auto` takes the first available: the Claude Code CLI, the Codex
+   * CLI, then the `anthropic.apiKey` secret. `off` sends nothing anywhere:
+   * such replies are never approvals and the ask is texted.
+   */
+  judge: z.strictObject({ backend: JudgeBackendChoice.default("auto") }).prefault({}),
   /** Rate assumptions for `hotline doctor`'s cost estimate; each a non-negative number. */
   costs: z
     .strictObject({

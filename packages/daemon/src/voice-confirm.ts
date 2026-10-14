@@ -21,9 +21,10 @@
 //   (nothing said, fillers, "[inaudible]", a long ramble, the read-back said
 //   back). The fast path never agrees with a reply that holds a doubt or
 //   negation marker. Anything else goes to a `ReplyJudge`, which sees only the
-//   owner's own reply turns, never agent-written text. The default judge
-//   (`FailClosedJudge`) finds everything unclear, so such a reply is not
-//   confirmed and the ask is texted; a judge error or timeout is the same.
+//   owner's own reply turns, never agent-written text: a model on the owner's
+//   own Claude Code or Codex login, or an API key (reply-judge.ts, HL-09d).
+//   Without one (`FailClosedJudge`) everything is unclear, so such a reply is
+//   not confirmed and the ask is texted; a judge error or timeout is the same.
 //   Doubt before the read-back ("hmm") does not count against a clear reply
 //   after it. No read-back, or a read-back of another ask, is no approval.
 // - Which ask a turn reads is attributed strictly (`readingOf`): with several
@@ -70,8 +71,12 @@ export const READING_MIN_SHARE = 0.5;
 export const LONG_ASK_KEY_WORDS = 8;
 /** A reply to a read-back longer than this many words is unclear, never judged a yes. */
 export const MAX_REPLY_WORDS = 8;
-/** How long `judgeVoiceDecision` waits for the judge; then the reply is not confirmed. */
-export const JUDGE_TIMEOUT_MS = 8_000;
+/**
+ * How long `judgeVoiceDecision` waits for the judge; then the reply is not
+ * confirmed. An agent CLI (`claude -p`, `codex exec`) takes several seconds to
+ * start, so this leaves room for one (HL-09d).
+ */
+export const JUDGE_TIMEOUT_MS = 20_000;
 /** Ask text the voice agent was given is cut to this many characters (`callVariables`). */
 const READ_TEXT_LENGTH = MAX_SPOKEN_ASK_LENGTH;
 /** Owner turns kept as the stored excerpt, at most. The contract allows 2000 characters. */
@@ -544,18 +549,18 @@ export type ReplyVerdict = "agreed" | "declined" | "unclear";
  * `agreed` is final: `judgeVoiceDecision` does not screen it again for doubt
  * or negation markers, since those replies are why the judge is asked. A
  * judge therefore owns that judgement and must answer `agreed` only for a
- * clear yes ("yes, if the tests pass" is not one).
+ * clear yes ("yes, if the tests pass" is not one). The model-backed judges
+ * (reply-judge.ts, HL-09d) do so in their prompt and with their own post-check.
  */
 export interface ReplyJudge {
   judge(reply: readonly string[]): Promise<ReplyVerdict>;
 }
 
 /**
- * The default judge until a real one is approved: every reply is unclear, so
- * a reply the fast path cannot decide is never an approval and the ask is
- * texted. A model-backed judge would send the owner's words to a hosted
- * service, so it needs the owner's approval and a plan change first; it would
- * also have to be wired in through the orchestrator's `VoiceCalls` options.
+ * The judge when no model-backed one is available or `judge.backend` is
+ * `off` (reply-judge.ts `selectReplyJudge`): every reply is unclear, so a
+ * reply the fast path cannot decide is never an approval and the ask is
+ * texted.
  */
 export class FailClosedJudge implements ReplyJudge {
   async judge(): Promise<ReplyVerdict> {

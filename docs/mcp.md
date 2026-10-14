@@ -46,6 +46,10 @@ decides anything itself.
   `127.0.0.1:<port>` and refuses redirects, so a process squatting on the port
   cannot forward the token or the unredacted text to another host. After a
   response that is not the daemon's, it looks the port up again.
+- **Not inside the reply judge.** With `HOTLINE_JUDGE=1` in its environment,
+  `hotline mcp` exits 0 at once without serving or contacting the daemon. The
+  daemon sets it on the agent CLI run behind the reply judge (HL-09d), which
+  also loads no MCP servers.
 
 ## Session registration
 

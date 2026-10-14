@@ -2,9 +2,10 @@
 // daemon's health check and ElevenLabs. Secrets are never printed.
 import { mkdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { FileSecretStore, openStore, writePrivateFile } from "@hotline/daemon";
+import { FileSecretStore, type JudgeHost, openStore, writePrivateFile } from "@hotline/daemon";
 import { AGENT_DEFINITION_VERSION } from "@hotline/providers";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { FakeJudgeHost } from "../../../packages/daemon/test/fake-judge.js";
 import type { CliFetch } from "../src/setup.js";
 import { seedTypicalUsage } from "./cost-helpers.js";
 import {
@@ -89,10 +90,18 @@ function healthy(version = AGENT_DEFINITION_VERSION, toolOrigin = "https://hotli
   );
 }
 
-function context(fetch: CliFetch = healthy(), env: Record<string, string> = {}) {
+/** A complete setup has the Claude Code CLI for the reply judge (a fake one: nothing runs). */
+const CLAUDE_PATH = "/fake/bin/claude";
+
+function context(
+  fetch: CliFetch = healthy(),
+  env: Record<string, string> = {},
+  judgeHost: JudgeHost = new FakeJudgeHost({ claude: CLAUDE_PATH }),
+) {
   return testContext(setup, {
     fetch,
     env: { HOTLINE_HOME: setup.hotlineHome, CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: "2400000", ...env },
+    judgeHost,
   });
 }
 
@@ -268,6 +277,73 @@ describe("hotline doctor", () => {
     const result = await cli(["doctor", "--home", setup.home], context());
     expect(result.code).toBe(1);
     expect(result.stdout).toContain("FAIL  config  No hotline config at");
+  });
+});
+
+describe("hotline doctor reply judge (HL-09d)", () => {
+  const judgeLines = (stdout: string) => stdout.split("\n").filter((line) => /^\w+\s+judge\s/.test(line));
+  const agreed = { verdict: "agreed", conditional: false, retracted: false } as const;
+
+  it("reports the active backend without running anything or calling a model", async () => {
+    await writeSetup();
+    const host = new FakeJudgeHost({ claude: CLAUDE_PATH, codex: "/fake/bin/codex" }, () => agreed);
+    const result = await cli(["doctor", "--home", setup.home], context(healthy(), {}, host));
+    expect(judgeLines(result.stdout)).toEqual([
+      expect.stringMatching(
+        /^PASS\s+judge\s+claude-code: Claude Code CLI \(\/fake\/bin\/claude\) on your login/,
+      ),
+    ]);
+    expect(host.runs).toEqual([]);
+  });
+
+  it("falls back to Codex, then the stored API key, and warns when there is none", async () => {
+    await writeSetup();
+    const codex = await cli(
+      ["doctor", "--home", setup.home],
+      context(healthy(), {}, new FakeJudgeHost({ codex: "/fake/bin/codex" })),
+    );
+    expect(judgeLines(codex.stdout)).toEqual([expect.stringMatching(/^PASS\s+judge\s+codex: Codex CLI/)]);
+    const none = await cli(["doctor", "--home", setup.home], context(healthy(), {}, new FakeJudgeHost({})));
+    expect(judgeLines(none.stdout)).toEqual([
+      expect.stringMatching(/^WARN\s+judge\s+none: neither claude nor codex is on the PATH/),
+    ]);
+    const key = "sk-ant-fake-judge-key-0001";
+    await new FileSecretStore(join(setup.hotlineHome, "secrets.json")).set("anthropic.apiKey", key);
+    const api = await cli(["doctor", "--home", setup.home], context(healthy(), {}, new FakeJudgeHost({})));
+    expect(judgeLines(api.stdout)).toEqual([expect.stringMatching(/^PASS\s+judge\s+anthropic-api: /)]);
+    expect(api.stdout + api.stderr).not.toContain(key);
+  });
+
+  it("passes when judge.backend is off, and sends nothing anywhere", async () => {
+    await writeSetup({ judge: { backend: "off" } });
+    const host = new FakeJudgeHost({ claude: CLAUDE_PATH });
+    const result = await cli(["doctor", "--home", setup.home, "--check-judge"], context(healthy(), {}, host));
+    expect(judgeLines(result.stdout)).toEqual([
+      expect.stringMatching(/^PASS\s+judge\s+off \(judge\.backend\)/),
+    ]);
+    expect(host.found).toEqual([]);
+    expect(host.runs).toEqual([]);
+  });
+
+  it("with --check-judge, asks one fixed question and passes only on agreed", async () => {
+    await writeSetup();
+    const good = new FakeJudgeHost({ claude: CLAUDE_PATH }, () => agreed);
+    const passed = await cli(["doctor", "--home", setup.home, "--check-judge"], context(healthy(), {}, good));
+    expect(judgeLines(passed.stdout)[1]).toMatch(
+      /^PASS\s+judge\s+a test question \("yes, go ahead"\) came back agreed/,
+    );
+    expect(good.runs.map((run) => run.reply)).toEqual([["yes, go ahead"]]);
+    const loggedOut = new FakeJudgeHost({ claude: CLAUDE_PATH }, () => ({
+      raw: { exitCode: 1, stdout: "", stderr: "Invalid API key · Please run /login" },
+    }));
+    const failed = await cli(
+      ["doctor", "--home", setup.home, "--check-judge"],
+      context(healthy(), {}, loggedOut),
+    );
+    expect(judgeLines(failed.stdout)[1]).toMatch(
+      /^FAIL\s+judge\s+a test question .* came back unclear, not agreed/,
+    );
+    expect(failed.code).toBe(1);
   });
 });
 

@@ -2259,3 +2259,73 @@ Template:
   - P3 (entry length and relayed quotes): kept. The dispatcher required this
     entry to record the owner's direction, and the quotes are what the
     decisions rest on.
+
+## 2026-10-14 — HL-09d Model-backed reply judge on the owner's agent login (#56)
+
+- Owner direction (autopilot session, recorded on #1 and #56): approvals are
+  interpreted naturally ("let Claude decide what they mean... it should
+  definitely not be limited like a regex"), with the least friction and the
+  lowest cost, and on the plan the owner already has: "Is there no way for
+  them to use just the Claude code plan in this?" Plan change (plan section 8):
+  the owner's short reply goes to the owner's own agent provider.
+- Change: `packages/daemon/src/reply-judge.ts` adds `ClaudeCodeJudge`
+  (`claude -p` on the owner's login), `CodexJudge` (`codex exec` on the
+  owner's login), `AnthropicApiJudge` (optional `anthropic.apiKey` secret,
+  raw `fetch`, no new dependency) and `selectReplyJudge`, which `runDaemon`
+  calls once at start and passes through `CallOrchestrator` to `VoiceCalls`.
+  The running daemon no longer always fails closed. Config `judge.backend`
+  (`auto` default, `claude-code`, `codex`, `anthropic-api`, `off`). `hotline
+  doctor` reports the backend with no model call, `--check-judge` makes one
+  tiny call with the fixed reply "yes, go ahead". `hotline init` explains the
+  judge. `HOTLINE_JUDGE=1` makes `hotline hook` and `hotline mcp` do nothing.
+- Decisions (no human available):
+  - Detection: a CLI is available when it is an executable on the daemon's
+    `PATH`. Nothing is run to find out (not even `--version`), so the daemon,
+    `doctor` and the package smoke check never start a real agent CLI. A CLI
+    that is installed but logged out is selected and fails closed per call;
+    `doctor --check-judge` finds that.
+  - One backend, picked at start; no fallback chain per call. Simpler, one
+    timeout per call, and a failing CLI is visible in `doctor`.
+  - Models: `--model haiku` for Claude Code (the CLI resolves the alias),
+    `claude-haiku-5-5` at low effort for the API, Codex's default model at
+    `model_reasoning_effort="low"` (a wrong model name would make every call
+    fail closed, and which models a ChatGPT login offers varies). Cost
+    priority per the owner.
+  - Claude Code isolation: `--settings {"disableAllHooks":true}`,
+    `--strict-mcp-config --mcp-config {"mcpServers":{}}`, `--tools ""` (all
+    tools off), `--no-session-persistence`, `--system-prompt` replacing the
+    default one, empty temporary cwd. No `--json-schema`: its output field
+    name is not documented in `claude --help`, so the answer JSON is asked for
+    in the prompt and validated strictly. `--bare` is not usable (no OAuth).
+    All flags checked present in `claude --help` (2.1.299) and `codex exec
+    --help` (0.146.0) on the dev Mac; neither CLI was run against a model.
+  - Prompt on stdin, never in argv, so the owner's words are not visible in
+    the process list. Each reply turn goes through the daemon's redactor.
+  - Output `{"verdict", "conditional", "retracted"}`; the two flags make the
+    model state a condition or a retraction explicitly, and either one turns
+    an `agreed` into `unclear`.
+  - Post-check (`vetoesAgreement`): a short list of condition and correction
+    words, and any negation, veto an `agreed`. It only takes approvals away.
+    The idioms "no problem", "no worries", "not a problem" and "why not" are
+    excepted from the negation rule, reversing HL-09c's "not allowed" for
+    them: there the fast path decided alone, here the model judges the whole
+    reply first ("no, problem is the tests fail" should come back unclear or
+    declined), and these are among the commonest natural yeses.
+  - `JUDGE_TIMEOUT_MS` 8 s to 20 s (about 20 s per #56): an agent CLI takes
+    several seconds to start. The post-call webhook response waits for it;
+    if ElevenLabs times the webhook out first it retries, and the in-flight
+    map makes the retry wait for the same attempt.
+  - The doubt tables stay: they decide what reaches the judge, and retiring
+    them is a separate change (follow-up).
+  - `HOTLINE_ANTHROPIC_API_KEY` is read by `init` from the environment only and
+    never prompted, so the default setup asks nothing new.
+- Tests: `reply-judge.test.ts` (prompt, parsing, post-check, each backend's
+  exact arguments, isolation, failure modes, selection order, redaction, the
+  conditional-yes and negation scenarios through `judgeVoiceDecision` with a
+  scripted model, including a model that wrongly agrees), `reply-judge-host.test.ts`
+  (with `node:child_process` mocked: the default host and a daemon without an
+  injected host never spawn under test mode), `judge-wiring.test.ts` (the
+  running daemon judges a natural yes, refuses a conditional one, ends on a
+  judged no, and texts without a judge), CLI tests for doctor, init, and the
+  hook and MCP guards. Mutation checks: no post-check (16 tests fail), the
+  judge not passed in `runDaemon` (3 fail).

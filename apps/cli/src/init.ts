@@ -15,7 +15,27 @@ export const SECRET_ENV: ReadonlyArray<readonly [SecretName, string, string]> = 
   ["twilio.accountSid", "HOTLINE_TWILIO_ACCOUNT_SID", "Twilio account SID"],
   ["twilio.authToken", "HOTLINE_TWILIO_AUTH_TOKEN", "Twilio auth token"],
 ];
+/**
+ * The optional Anthropic API key for the reply judge, read only from the
+ * environment and never asked for: most owners use their Claude Code or Codex
+ * login instead (HL-09d).
+ */
+export const ANTHROPIC_KEY_ENV = "HOTLINE_ANTHROPIC_API_KEY";
 export const PIN_ENV = "HOTLINE_PIN";
+
+/** What `init` prints about the reply judge. */
+export function judgeExplanation(): string {
+  return [
+    "Reply judge: when you answer a read-back with something other than a plain yes",
+    'or no ("yeah, let\'s ship that one"), Hotline asks a small model what you meant.',
+    "It uses your own Claude Code login (claude -p, model haiku) if claude is",
+    "installed, else your Codex login (codex exec), else an Anthropic API key from",
+    `${ANTHROPIC_KEY_ENV}. Only your short spoken reply is sent, never the request`,
+    'or anything an agent wrote. A yes with a condition ("yes if the tests pass")',
+    'is not an approval. With none of these, or judge.backend "off" in the config,',
+    "such replies are texted to you instead. hotline doctor shows which one is used.",
+  ].join("\n");
+}
 /** Shortest PIN `init` accepts without a warning. */
 export const RECOMMENDED_PIN_DIGITS = 6;
 
@@ -40,6 +60,7 @@ export function initUsage(): string {
     "",
     `The PIN (4 to 8 digits; ${RECOMMENDED_PIN_DIGITS} or more recommended) and credentials are asked`,
     `without echo, or read from ${PIN_ENV}, ${SECRET_ENV.map(([, env]) => env).join(", ")}.`,
+    `An optional Anthropic API key for the reply judge is read from ${ANTHROPIC_KEY_ENV} only.`,
     "Never pass them as arguments. Next: hotline voice apply, hotline install, hotline doctor.",
   ].join("\n");
 }
@@ -201,6 +222,11 @@ export async function initCommand(
         missing.push(label);
       }
     }
+    const judgeKey = context.env[ANTHROPIC_KEY_ENV] || undefined;
+    if (judgeKey !== undefined) {
+      await secrets.set("anthropic.apiKey", judgeKey);
+      stored.push("Anthropic API key (reply judge)");
+    }
     if ((await secrets.get("elevenlabs.toolSecret")) === undefined) {
       // Shared by the ElevenLabs tools and the daemon; `hotline voice apply` uploads it.
       await secrets.set("elevenlabs.toolSecret", randomBytes(32).toString("base64url"));
@@ -221,6 +247,7 @@ export async function initCommand(
     }
     for (const label of stored) out.stdout(`stored: ${label}`);
     for (const label of missing) out.stdout(`not set: ${label} (run hotline init --force again to add it)`);
+    out.stdout(judgeExplanation());
     out.stdout(
       [
         "Next:",

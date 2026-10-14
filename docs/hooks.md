@@ -25,6 +25,12 @@ clears the Stop-hook continuation counts.
 Outside away mode the hooks print nothing: the agent shows its own permission
 prompt in the terminal, or simply stops.
 
+With `HOTLINE_JUDGE=1` in its environment the hook does nothing at all, away
+mode or not: it prints nothing, exits 0 and never contacts the daemon. The
+daemon sets it on the `claude -p` or `codex exec` run behind the reply judge
+([daemon.md](daemon.md), HL-09d), which also switches hooks off, so that run
+can never phone you.
+
 ## Permission (`PermissionRequest`)
 
 In away mode:

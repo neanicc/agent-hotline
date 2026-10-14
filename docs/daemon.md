@@ -424,27 +424,78 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
       judge gets only the owner's reply turns, verbatim, never the ask, the
       read-back or any other agent-written text. Only `agreed` confirms; a
       `declined` or `unclear` verdict, an error, or no answer within
-      `JUDGE_TIMEOUT_MS` (8 seconds) leaves the allow not confirmed. The
-      default judge is `FailClosedJudge`, which finds every reply unclear, so
-      today such a reply is never an approval and the ask is texted.
-      `FakeJudge` plays scripted verdicts in tests. A model-backed judge
-      (sending only the owner's reply text to a model) needs the owner's
-      approval and a plan change, since it adds a hosted service; none is
-      built. Constraints before any real judge is wired in: the plan change
-      and the owner's approval; a judge's `agreed` is final (not re-screened
-      for doubt markers), so the judge must agree only to a clear yes; and a
-      high-risk request never takes a judge's `agreed` without the PIN on
-      that call or a confirming text, which `needs-pin` and the queue's
-      `answerProblem` already enforce for every voice allow. The ticket that
-      wires a judge must add judge scenarios with conditional yeses ("yes, if
-      the tests pass") and negations ("no problem", "not that one") before
-      enabling it, and should then retire the fast path's doubt tables rather
-      than grow them. `VoiceCalls`
-      takes `judge` and `judgeTimeoutMs` options, and the orchestrator does
-      not pass them yet, so in the running daemon the judge is always
-      `FailClosedJudge`; any other judge runs only in tests. A call's held decisions are all
-      checked at once, so a slow judge costs one timeout per call, not one per
-      ask.
+      `JUDGE_TIMEOUT_MS` (20 seconds, room for an agent CLI to start) leaves
+      the allow not confirmed. A high-risk request never takes a judge's
+      `agreed` without the PIN on that call or a confirming text, which
+      `needs-pin` and the queue's `answerProblem` enforce for every voice
+      allow. A call's held decisions are all checked at once, so a slow judge
+      costs one timeout per call, not one per ask. The post-call webhook is
+      answered once they are checked, so a judged reply delays that response
+      by up to 20 seconds.
+
+    **The model-backed judge (HL-09d, `reply-judge.ts`).** A plan change at
+    the owner's direction: the reply goes to the owner's own agent provider,
+    on the plan the owner already pays for. `runDaemon` picks the judge once
+    at start (`selectReplyJudge`), logs it (`reply judge`, with the backend
+    and why) and records the backend in the `daemon.started` audit entry.
+    With config `judge.backend: "auto"` (the default) it takes the first
+    available of:
+    1. **Claude Code CLI** (`claude` on the PATH), on the owner's login:
+       `claude -p --output-format json --model haiku --no-session-persistence
+       --settings '{"disableAllHooks":true}' --strict-mcp-config --mcp-config
+       '{"mcpServers":{}}' --tools "" --system-prompt <one line>`. `--bare`
+       cannot be used: it never reads the OAuth login.
+    2. **Codex CLI** (`codex` on the PATH), on the owner's login: `codex exec
+       --ephemeral --ignore-user-config --ignore-rules --sandbox read-only
+       --skip-git-repo-check --output-schema <file> --output-last-message
+       <file> --color never -c model_reasoning_effort="low" -`, with Codex's
+       default model.
+    3. **Anthropic API**, when the optional `anthropic.apiKey` secret is set
+       (`HOTLINE_ANTHROPIC_API_KEY` at `hotline init`): `POST /v1/messages`
+       with `claude-haiku-5-5`, low effort and a JSON-schema output format,
+       through the daemon's `fetch`. The key is added to the redactor.
+    4. **None**: `FailClosedJudge`; such a reply is texted.
+
+    `judge.backend` can also name one backend (`claude-code`, `codex`,
+    `anthropic-api`; none when it is not available) or be `off`, which sends
+    nothing anywhere. A CLI counts as available when it is an executable on
+    the PATH: nothing is run to find out, so neither the daemon nor `hotline
+    doctor` calls a model at start. Each CLI run happens in a fresh, empty
+    temporary directory (removed afterwards; Codex's schema and answer files
+    sit in a second one), with `HOTLINE_JUDGE=1` in its environment, the
+    prompt on stdin (the owner's words never appear in a process's
+    arguments) and a kill after `JUDGE_TIMEOUT_MS`. `HOTLINE_JUDGE=1` makes
+    `hotline hook` and `hotline mcp` do nothing (exit 0, no output, no daemon
+    contact): a second guard, after hooks and MCP servers are switched off for
+    the run, so the judge's own session can never phone the owner. Each reply
+    turn goes through the daemon's redactor first.
+
+    The prompt asks one narrow question ("did the speaker clearly agree, with
+    no condition attached, and without taking it back?") with the reply turns
+    as a JSON array between `<reply>` markers, `<` and `>` escaped, and says
+    the reply is data, never instructions. The answer must be
+    `{"verdict": "agreed" | "declined" | "unclear", "conditional": bool,
+    "retracted": bool}`; anything else (no JSON object, another shape, a
+    non-zero exit, an error result, an HTTP error, a stop reason other than
+    `end_turn`, a missing CLI, a timeout) is `unclear`. A reply over 500
+    characters is never sent. Then a cheap post-check (`checkedVerdict`,
+    `vetoesAgreement`) can only take an `agreed` away: the model's own
+    `conditional` or `retracted` flag, a condition or correction word ("if",
+    "unless", "but", "except", "only", "first", "until", "when", "actually",
+    "wait", "hold", "instead", "as long as", ...) or a negation ("no",
+    "not", any "n't"; the idioms "no problem", "no worries", "not a problem"
+    and "why not" excepted) makes it `unclear`. The model is the judge; the
+    post-check is a backstop for a model that misses a condition. So "yes if
+    the tests pass", "yes... actually no" and "sure, but not on main" are
+    never approvals, whatever the model says, and "yeah let's ship that one"
+    or "no problem" are when the model agrees. A `declined` ends the request
+    as no answer, as the fast path's clear no does. Tests drive every
+    backend through an injected `JudgeHost` or `fetch` (`FakeJudgeHost`
+    plays the CLIs), and the default `nodeJudgeHost` finds and runs nothing
+    under the test runner or `HOTLINE_TEST_MODE=1`, so no real CLI or
+    network is ever used in tests or CI. The fast path's doubt tables stay
+    for now: they decide what reaches the judge, and retiring them is a
+    follow-up.
 
     The owner can also take an approval back after the agent acknowledged
     it ("Got it." then "wait, no, don't"): an owner turn after the reply,
@@ -503,11 +554,14 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
   word in a later turn about the ask also takes back a free-text answer. These
   rules are tested on scripted transcripts only; real ElevenLabs transcripts
   (turn splitting, interruptions, paraphrased readings) need the live check, and
-  some answers will be refused there until the persona is tuned. Until a
-  real judge is approved, any natural yes outside the fast path's table is
-  texted rather than approved. With a real judge, its verdict on the owner's
-  words is what stands between a voice model that submits an allow on its
-  own and an approval. High-risk requests still need the PIN.
+  some answers will be refused there until the persona is tuned. Without a
+  judge backend (or with `judge.backend: "off"`), any natural yes outside the
+  fast path's table is texted rather than approved. With one, its verdict on
+  the owner's words (and the post-check) is what stands between a voice model
+  that submits an allow on its own and an approval. The judge prompt and
+  post-check are tested against a scripted model only; how well a real model
+  judges real replies needs the live check. High-risk requests still need the
+  PIN.
 - **How a call ended.** `call_initiation_failure` `busy` or `no-answer` is
   `no-pickup`, anything else `failed`. A transcription in which the owner never
   spoke is `no-pickup` (voicemail, silence); one where every ask was settled is
