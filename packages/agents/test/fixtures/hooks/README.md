@@ -44,6 +44,8 @@ Page: <https://code.claude.com/docs/en/hooks>
 | `claude-code/stop.input.json` | "Stop input" | The documented example with `stop_hook_active: false` and empty `background_tasks` and `session_crons` |
 | `claude-code/stop.continued.input.json` | "Stop input" | The documented example (`stop_hook_active: true`, one background task, one cron) with fake ids and paths |
 | `claude-code/stop.block.output.json` | "Stop decision control" | `{"decision": "block", "reason": ...}`; the reason becomes Claude's next instruction |
+| `claude-code/permission-request.bash-background.input.json` | "PreToolUse input" (Bash) | HL-06b. The documented Bash `tool_input` (`command`, `description`, `timeout`, `run_in_background`) with `run_in_background: true`, in the PermissionRequest envelope |
+| `claude-code/permission-request.bash-unsandboxed.input.json` | Claude Code 2.1.299 Bash input schema | HL-06b. `dangerouslyDisableSandbox: true`, a field the installed bundle's Bash schema has but the docs table does not list |
 
 Documented behavior the adapters depend on:
 
@@ -73,6 +75,42 @@ input fixtures are built from these schemas, not captured from a real run.
 | `codex/stop.input.json` | `stop.command.input` | `stop_hook_active: false` |
 | `codex/stop.continued.input.json` | `stop.command.input` | `stop_hook_active: true`, null `transcript_path` and `last_assistant_message` |
 | `codex/stop.block.output.json` | `stop.command.output` | Codex turns `reason` into a continuation prompt |
+| `codex/permission-request.network-access.input.json` | `permission-request.command.input` | HL-06b. A managed-network approval: Codex sends it as `Bash` with the command and `description: "network-access <host>"` (`ApprovalAction::NetworkAccess` in `codex-rs/core/src/tools/approvals.rs`) |
+
+### Shell and file tool input fields (HL-06b)
+
+Checked 2026-10-14, to make every field that changes what runs high risk
+(`actionFields` in `packages/core/src/permission-risk.ts`, docs/hooks.md "What
+is judged is what runs"):
+
+- **Claude Code docs** (<https://code.claude.com/docs/en/hooks>, "PreToolUse
+  input"): Bash `command`, `description`, `timeout`, `run_in_background`;
+  Write `file_path`, `content`; Edit `file_path`, `old_string`, `new_string`,
+  `replace_all`; Read `file_path`, `offset`, `limit`; Glob `pattern`, `path`;
+  Grep `pattern`, `path`, `glob`, `output_mode`, `-i`, `multiline`.
+  "PermissionRequest input" says the hook gets `tool_name` and `tool_input` like
+  PreToolUse.
+- **Claude Code 2.1.299 bundle** (the zod input schemas, read offline): Bash
+  also has `dangerouslyDisableSandbox`, `allowed_domains` (when the sandbox's
+  network allowlist is on), an internal `_simulatedSedEdit` (left out of the
+  model's schema), and an optional field naming another machine to run on in
+  some builds. NotebookEdit has `notebook_path`, `cell_id`, `new_source`,
+  `cell_type`, `edit_mode`.
+- **Codex** at `7eed30ad1beaebc20b7d848ce9ee887525a379b0`: the
+  `PermissionRequest` hook's `tool_input` for a shell approval holds only
+  `command` (the command string) and `description` (the model's justification,
+  or `network-access <host>`), built by `PermissionRequestPayload::bash`
+  (`codex-rs/core/src/tools/sandboxing.rs`, `approvals.rs`). The command's
+  `workdir` and `sandbox_permissions` are not sent, and the hook's `cwd` is the
+  turn's folder (`tool_hook_cwd` in `hook_runtime.rs`). Patches send
+  `{"command": <patch>}`; MCP tools send their arguments. The tool arguments
+  that can change where or how a command runs: `exec_command` (`ExecCommandArgs`
+  in `core/src/tools/handlers/unified_exec.rs`) has `workdir`,
+  `environment_id`, `shell`, `login`, `tty`, `sandbox_permissions`,
+  `additional_permissions`, `justification` and `prefix_rule`; `local_shell`
+  (`LocalShellExecAction` in `protocol/src/models.rs`) has an argv `command`,
+  `working_directory`, `env` and `user`; the older `shell` tool had an argv
+  `command`, `workdir` and `with_escalated_permissions`.
 
 Documented behavior the adapters depend on:
 

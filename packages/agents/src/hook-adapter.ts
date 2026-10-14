@@ -25,6 +25,7 @@ import {
   type AgentKind,
   type Ask,
   type AskOutcome,
+  actionFields,
   ClaudePermissionRequestInput,
   ClaudePermissionRequestOutput,
   ClaudeStopInput,
@@ -60,6 +61,8 @@ const EXPIRY_GRACE_MS = 30_000;
 export const MAX_PREVIEW = 200;
 export const MAX_DESCRIPTION = 120;
 export const MAX_SUMMARY = 300;
+/** The folder and setting names a request adds to its preview (`fieldNotes`). */
+export const MAX_FIELD_NOTES = 120;
 const MAX_TOOL_NAME = 100;
 const MAX_REASON = 4000;
 const MAX_OWNER_WORDS = 300;
@@ -169,16 +172,68 @@ export interface PermissionAsk {
   risk: PermissionRisk;
 }
 
+/** At most this many field or variable names are read out; the rest are counted. */
+const MAX_NAMES = 5;
+
+function names(list: readonly string[]): string {
+  const shown = list.slice(0, MAX_NAMES).map((name) => safeToolName(name));
+  return `${shown.join(", ")}${list.length > MAX_NAMES ? ` and ${list.length - MAX_NAMES} more` : ""}`;
+}
+
+/**
+ * What the owner hears about input fields that change what runs (core's
+ * `actionFields`): the folder it would run in, the names (never the values) of
+ * environment variables it sets, and the names of settings Hotline does not
+ * know. Sandbox, network and background fields are named by their risk reason
+ * ("asks to run outside the sandbox"). Empty when there are none.
+ */
+function fieldNotes(toolName: string, toolInput: unknown, cwd: string): string[] {
+  const notes: string[] = [];
+  const unknown: string[] = [];
+  for (const { name, value, reason } of actionFields(toolName, toolInput)) {
+    if (reason === "asks to run in another folder") {
+      notes.push(
+        typeof value === "string" && value !== ""
+          ? `in folder ${shownPath(cwd, value)}`
+          : "in another folder",
+      );
+    } else if (reason === "asks to set environment variables") {
+      const variables =
+        typeof value === "object" && value !== null && !Array.isArray(value) ? Object.keys(value) : [];
+      notes.push(
+        variables.length > 0
+          ? `with environment variables ${names(variables)}`
+          : "with environment variables",
+      );
+    } else if (
+      reason === "has a setting Hotline does not know" ||
+      reason === "has input Hotline cannot read"
+    ) {
+      unknown.push(name);
+    }
+  }
+  if (unknown.length > 0)
+    notes.push(`with ${unknown.length === 1 ? "setting" : "settings"} ${names(unknown)}`);
+  return notes;
+}
+
 /**
  * The short line the owner hears or reads for a permission request, in this
- * order: why it is high risk, the tool and a one-line preview (a command, the
- * files a patch touches, a path), then the agent's own description, labelled as
- * the agent's words. Never file contents. A preview too long to read out says
- * how much was cut and makes the request high risk, since the cut part could
- * hold anything. The description is untrusted and never replaces the preview.
+ * order: why it is high risk, the tool with any field that changes where or how
+ * it runs, a one-line preview (a command, the files a patch touches, a path),
+ * then the agent's own description, labelled as the agent's words. Never file
+ * contents. A preview too long to read out says how much was cut and makes
+ * the request high risk, since the cut part could hold anything. The
+ * description is untrusted and never replaces the preview.
  */
-export function permissionAsk(toolName: string, toolInput: unknown, cwd: string): PermissionAsk {
-  let risk = classifyPermission({ toolName, toolInput, cwd });
+export function permissionAsk(
+  toolName: string,
+  toolInput: unknown,
+  cwd: string,
+  /** The agent that asked: a Codex shell request is high, since Codex does not say where it runs. */
+  agent?: AgentKind,
+): PermissionAsk {
+  let risk = classifyPermission({ toolName, toolInput, cwd, ...(agent === undefined ? {} : { agent }) });
   const command = isShellTool(toolName) || toolName === "apply_patch" ? shellCommand(toolInput) : undefined;
   const patch = toolName === "apply_patch" && command !== undefined ? patchFiles(command) : undefined;
   const path = field(toolInput, "file_path") ?? field(toolInput, "notebook_path") ?? field(toolInput, "path");
@@ -206,9 +261,18 @@ export function permissionAsk(toolName: string, toolInput: unknown, cwd: string)
     shown = `${head === "" ? "" : `${head} `}(${what} shortened, ${more} more characters)`;
     risk = withRiskReason(risk, "is too long to read out in full");
   }
+  // Right after the tool name, before the preview: the call reads at most the
+  // first 300 characters of this text (providers' `MAX_SPOKEN_ASK_LENGTH`), so a
+  // long command must never push where or how it runs out of what is spoken.
+  const notes = collapse(fieldNotes(toolName, toolInput, cwd).join("; "));
+  let tool = oneLine(toolName, MAX_TOOL_NAME);
+  if (notes !== "") {
+    if (notes.length > MAX_FIELD_NOTES) risk = withRiskReason(risk, "is too long to read out in full");
+    tool = `${tool} (${oneLine(notes, MAX_FIELD_NOTES)})`;
+  }
   const parts: string[] = [];
   if (risk.risk === "high") parts.push(`High risk: ${risk.reasons.join(", ")}.`);
-  parts.push(`${oneLine(toolName, MAX_TOOL_NAME)}: ${shown}`);
+  parts.push(`${tool}: ${shown}`);
   const description = oneLine(field(toolInput, "description") ?? "", MAX_DESCRIPTION);
   // Only a description with something readable in it; the daemon redacts it with the rest.
   if (/[\p{L}\p{N}]/u.test(description)) parts.push(`The agent says: "${description.replace(/"/g, "'")}"`);
@@ -377,7 +441,7 @@ async function permissionHook(options: HookOptions): Promise<HookResult> {
     note,
   });
   const { tool_name: toolName, tool_input: toolInput, cwd, session_id: sessionId } = parsed.data;
-  const { text, risk } = permissionAsk(toolName, toolInput, cwd);
+  const { text, risk } = permissionAsk(toolName, toolInput, cwd, agent);
   let connection: HookConnection;
   try {
     connection = await options.connect();
