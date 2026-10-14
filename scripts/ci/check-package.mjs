@@ -126,6 +126,34 @@ async function main() {
   });
   expect(hook, 0, (out) => out === "", "hook claude stop outside away mode");
 
+  // In away mode with nobody to answer (fake providers), a permission request
+  // must come back as Claude Code's deny output: silence is not consent.
+  expect(await run(["away", "on"]), 0, () => true, "away on");
+  const permission = await run(["hook", "claude", "permission", "--wait-seconds", "2"], {
+    input: JSON.stringify({
+      session_id: "package-check",
+      transcript_path: join(temp, "transcript.jsonl"),
+      cwd: temp,
+      permission_mode: "default",
+      hook_event_name: "PermissionRequest",
+      tool_name: "Bash",
+      tool_input: { command: "rm -rf node_modules", description: "Remove node_modules" },
+    }),
+  });
+  expect(
+    permission,
+    0,
+    (out) => {
+      try {
+        return JSON.parse(out).hookSpecificOutput?.decision?.behavior === "deny";
+      } catch {
+        return false;
+      }
+    },
+    "permission hook denies when nobody answers",
+  );
+  expect(await run(["away", "off"]), 0, () => true, "away off");
+
   daemon.child.kill("SIGTERM");
   const stopped = await daemon.exited;
   if (stopped.code !== 0) fail(`daemon exited with ${stopped.code ?? stopped.signal} after SIGTERM`);

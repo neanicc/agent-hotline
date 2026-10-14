@@ -1904,3 +1904,10 @@ Template:
   provider keys); the setup sequence passes `--public-url`, `--sms-from` and
   `--agent-phone-number-id`, which `init` never prompts for; demo scene 8
   replies `YES <code>` to a permission text, since a bare `yes` is no answer.
+- Staff review P3s on #51: license reads now fail on any error but `ENOENT`;
+  the package check also runs `hook claude permission --wait-seconds 2` in
+  away mode and requires Claude Code's deny output (silence is not consent,
+  from the packaged CLI); the README says the itemised costs land at about
+  $12–14 within the plan's USD 10–15. Not changed: the check keeps the
+  caller's `PATH` so it can find `node`; the copy sits outside the workspace,
+  so the workspace `node_modules` is not on its resolution path.

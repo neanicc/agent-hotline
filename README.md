@@ -155,10 +155,10 @@ other than Claude Code and Codex; more than one human.
 ## Costs
 
 Planning estimate ([plan section 8](docs/plan.md#8-security-privacy-and-cost)):
-roughly **USD 10–15 a month** for about 60 minutes of calls and 200 texts. The
-rates below are assumptions taken from the public Twilio (Canada) and ElevenLabs
-pricing pages on 2026-10-14 (in dollars as listed), not quotes; check current
-pricing before you sign up.
+roughly **USD 10–15 a month** for about 60 minutes of calls and 200 texts; the
+itemised rates below land at about $12–14. They are assumptions taken from the
+public Twilio (Canada) and ElevenLabs pricing pages on 2026-10-14 (in dollars as
+listed), not quotes; check current pricing before you sign up.
 
 | Item | Assumed rate | 60 min + 200 texts |
 | --- | --- | --- |
