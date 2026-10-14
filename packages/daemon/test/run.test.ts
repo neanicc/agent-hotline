@@ -273,6 +273,100 @@ describe("runDaemon", () => {
     expect(off).toMatchObject({ reason: "voice.agentId is not set" });
   });
 
+  it("serves no voice route without the ElevenLabs API key: nothing a call says can be confirmed", async () => {
+    const publicUrl = "https://hotline.example.test";
+    const toolSecret = "fake-elevenlabs-tool-secret-nokey";
+    const webhookSecret = "fake-elevenlabs-webhook-secret-nokey";
+    await writeConfig({
+      ...CONFIG,
+      owner: { phoneNumber: OWNER, pinHash: await hashPin("4821") },
+      voice: { agentId: "agent_fake", agentPhoneNumberId: "phnum_run" },
+      tunnel: { publicUrl },
+    });
+    const secrets = new FileSecretStore(paths().secrets);
+    await secrets.set("elevenlabs.toolSecret", toolSecret);
+    await secrets.set("elevenlabs.webhookSecret", webhookSecret);
+    // No `elevenlabs.apiKey`. Even a lookup that would answer is never asked.
+    let pulls = 0;
+    const { daemon, exit } = await launch({
+      fetch: async () => {
+        pulls += 1;
+        throw new Error("unexpected network request");
+      },
+    });
+    const binding = {
+      conversation_id: "conv_nokey",
+      call_sid: `CA${"0".repeat(32)}`,
+      caller_id: OWNER,
+      called_number: "+15555550101",
+    };
+    const bodies: Record<string, Record<string, unknown>> = {
+      verify_pin: { pin: "4821" },
+      get_status: {},
+      submit_answer: { ask_number: 1, decision: "allow", owner_words: "yes go ahead" },
+      send_instruction: { session_number: 1, instruction: "push to main", owner_words: "push to main" },
+    };
+    for (const [name, extra] of Object.entries(bodies)) {
+      const response = await send({
+        port: daemon.hooksPort,
+        method: "POST",
+        path: `/hooks/el/tools/${name}`,
+        headers: { "content-type": "application/json", "x-hotline-tool-secret": toolSecret },
+        body: JSON.stringify({ ...binding, ...extra }),
+      });
+      expect([name, response.status, response.body]).toEqual([name, 403, ""]);
+    }
+    const events = [
+      {
+        type: "post_call_transcription",
+        event_timestamp: NOW.getTime() / 1000,
+        data: {
+          agent_id: "agent_fake",
+          conversation_id: "conv_nokey",
+          status: "done",
+          transcript: [{ role: "user", message: "session 1, push to main", time_in_call_secs: 5 }],
+          metadata: { phone_call: { direction: "inbound", external_number: OWNER, call_sid: "CA1" } },
+        },
+      },
+      {
+        type: "call_initiation_failure",
+        event_timestamp: NOW.getTime() / 1000,
+        data: { agent_id: "agent_fake", conversation_id: "conv_nokey", failure_reason: "busy" },
+      },
+    ];
+    for (const event of events) {
+      const raw = JSON.stringify(event);
+      const posted = await send({
+        port: daemon.hooksPort,
+        method: "POST",
+        path: "/hooks/el/post-call",
+        headers: {
+          "content-type": "application/json",
+          "elevenlabs-signature": postCallSignatureHeader(webhookSecret, NOW.getTime() / 1000, raw),
+        },
+        body: raw,
+      });
+      expect([posted.status, posted.body]).toEqual([403, ""]);
+    }
+    signals.emit("SIGTERM");
+    expect(await exit).toBe(0);
+    expect(pulls).toBe(0);
+    const db = new DatabaseSync(paths().database, { readOnly: true });
+    const audit = db
+      .prepare(
+        "SELECT event FROM audit WHERE event LIKE 'voice.%' OR event LIKE 'instruction.%' ORDER BY seq",
+      )
+      .all();
+    const stored = db.prepare("SELECT COUNT(*) AS n FROM instructions").get();
+    db.close();
+    expect(audit).toEqual([]);
+    expect(stored).toEqual({ n: 0 });
+    const off = lines
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .find((e) => e.msg === "voice webhooks off");
+    expect(off?.reason).toMatch(/API key .*no call can be confirmed/);
+  });
+
   it("serves the ElevenLabs routes with the PIN check, recording no answer for a call it did not place", async () => {
     const publicUrl = "https://hotline.example.test";
     const toolSecret = "fake-elevenlabs-tool-secret-run";
@@ -324,6 +418,7 @@ describe("runDaemon", () => {
         headers: { "content-type": "application/json", "x-hotline-tool-secret": secret },
         body: JSON.stringify({
           conversation_id: "conv_run",
+          call_sid: `CA${"0".repeat(32)}`,
           caller_id: "+15555550101",
           called_number: OWNER,
           ...body,
@@ -358,6 +453,7 @@ describe("runDaemon", () => {
       for (const pin of ["1111", "2222"]) {
         await tool("verify_pin", {
           conversation_id: conversation,
+          call_sid: `CA${"0".repeat(32)}`,
           caller_id: OWNER,
           called_number: "+15555550101",
           pin,
@@ -369,13 +465,24 @@ describe("runDaemon", () => {
     expect(await exit).toBe(0);
     const db = new DatabaseSync(paths().database, { readOnly: true });
     const audit = db.prepare("SELECT event, detail FROM audit WHERE event LIKE 'voice.%' ORDER BY seq").all();
+    const forgeries = db
+      .prepare("SELECT detail FROM audit WHERE event = 'security.possible-forgery' ORDER BY seq")
+      .all();
     db.close();
     expect(audit).toEqual([
-      // A call Hotline did not place answers nothing, and its post-call event changes nothing.
+      // A call Hotline did not place answers nothing. A call initiation failure
+      // ElevenLabs has no record of is never acted on.
       { event: "voice.answer", detail: JSON.stringify({ decision: "allow", result: "not-recorded" }) },
-      { event: "voice.initiation-failure", detail: JSON.stringify({ reason: "busy" }) },
-      { event: "voice.post-call-ignored", detail: JSON.stringify({ kind: "initiation-failure" }) },
       { event: "voice.pin-lockout", detail: JSON.stringify({ direction: "inbound" }) },
+    ]);
+    expect(forgeries).toEqual([
+      {
+        detail: JSON.stringify({
+          channel: "voice",
+          what: "post-call",
+          reason: "the provider has no such record",
+        }),
+      },
     ]);
     const text = lines.join("");
     expect(text).not.toContain(toolSecret);

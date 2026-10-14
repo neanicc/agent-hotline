@@ -210,10 +210,12 @@ read message and call history, or change the voice agent's configuration. It
 cannot fabricate the owner's inbound message (Twilio records the real sender
 of an inbound text) or the owner's speech in a real call's transcript, so it
 cannot make an approval verify. It can see a live call's conversation id in the
-store and send `verify_pin` guesses for that call, bounded by the PinGate's
-limits (2 per call, 6 an hour, 10 a day), and it can deny service, for example
-by forging a call initiation failure so a live call counts as failed, which
-fails closed (no answer).
+store and send `verify_pin` guesses for that call while it is going on,
+bounded by the PinGate's limits (2 per call, 6 an hour, 10 a day). Every tool
+call and post-call event, a call initiation failure included, is checked
+against ElevenLabs' record first, so a forged one cannot end a live call or
+hear the status after it ended. It can still deny service in ways that fail
+closed (no answer), such as holding the post-call route's few slots.
 Use narrowly scoped keys where the providers allow it. The daemon token lets an
 agent talk to the local API, which it is meant to do; no agent-API route can
 answer an ask.

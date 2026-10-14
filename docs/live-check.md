@@ -55,8 +55,14 @@ Never fabricate an entry; "not tested" is a valid result.
   its `reason`: `the webhook differs from the provider's record` means
   ElevenLabs' webhook and its API disagree; `the call is not over at the
   provider` means the post-call webhook came before the API said `done`; a
-  refused PIN on a real call means the live conversation record lacks the phone
-  metadata the PIN check needs.
+  refused PIN or answer on a real call means the live conversation record lacks
+  the phone metadata every tool call needs (`direction`, `agent_number`,
+  `external_number`, `phone_number_id`, `call_sid`) or the tool call lacks
+  `call_sid`, `caller_id` or `called_number`. Also let one call ring out
+  unanswered: it should end as no pickup and be retried. If it waits until the
+  ask times out instead, note the audit `reason` for its initiation failure:
+  ElevenLabs' record of a failed call lacks something the check needs (status
+  `failed`, outbound phone metadata).
 
 ## Record
 

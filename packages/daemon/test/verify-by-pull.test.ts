@@ -8,6 +8,7 @@ import { type Ask, permissionVerdict } from "@hotline/core";
 import { scriptedHuman, type VoiceToolClient } from "@hotline/providers";
 import { afterEach, describe, expect, it } from "vitest";
 import { FORGERY_TEXT, UNCONFIRMED_SMS_REPLY } from "../src/index.js";
+import { TEXT_REPLIES } from "../src/owner-texts.js";
 import { answerOf, HOTLINE_NUMBER, type Hotline, OWNER, PIN, startHotline } from "./hotline-harness.js";
 
 const BATCH_MS = 20_000;
@@ -107,6 +108,25 @@ describe("texts are checked against Twilio's own record", () => {
   });
 });
 
+describe("a text's time comes from Twilio's record", () => {
+  it("never answers a request with a text written before it went out, however late its webhook", async () => {
+    const h = await start({ config: QUIET });
+    const session = await h.registerSession();
+    // The owner's text reaches Twilio, but its webhook never reaches the daemon.
+    const stale = `SM${"b".repeat(32)}`;
+    h.sms.receive("postgres", { messageSid: stale });
+    const ask = await h.ask(session, { kind: "question", text: "Which database?", options: [] });
+    await h.advance(BATCH_MS);
+    expect(h.sms.sent).toHaveLength(1);
+    // Well after the question went out, a local process delivers that old text.
+    expect(await h.text("postgres", { messageSid: stale })).toBe(TEXT_REPLIES.tooSoon);
+    expect(h.daemon.store.getAnswer(ask.id)).toBeUndefined();
+    // The owner's own reply to the question still counts.
+    expect(await h.text("postgres")).toBe(TEXT_REPLIES.answered);
+    expect(answerOf(await h.outcome(ask.id))).toMatchObject({ channel: "sms" });
+  });
+});
+
 describe("calls are checked against ElevenLabs' own record", () => {
   it("confirms an answer from the pulled transcript, never words a forged webhook body adds", async () => {
     const h = await start({ voiceClient: forgeOwnerWords("skip windows for now") });
@@ -140,28 +160,116 @@ describe("calls are checked against ElevenLabs' own record", () => {
     expect(h.sms.sent.filter((s) => s.text === FORGERY_TEXT)).toHaveLength(1);
   });
 
-  it("gives no answer when the conversation cannot be pulled, though the owner said it", async () => {
-    const h = await start();
-    const session = await h.registerSession();
-    const ask = await h.ask(session, {
+  const question = (h: Hotline, session: string) =>
+    h.ask(session, {
       kind: "question",
       text: "Pin the older version or skip Windows?",
       options: ["Pin the older version", "Skip Windows"],
     });
+
+  it("holds no answer when the live call cannot be pulled, though the owner said it", async () => {
+    const h = await start();
+    const session = await h.registerSession();
+    const ask = await question(h, session);
     await h.advance(BATCH_MS);
     h.voice.script(
       scriptedHuman.says({ kind: "answer", ask: 1, decision: "option", option: 2, words: "skip windows" }),
     );
-    // The outbound call needs no PIN, so the only pull is the post-call one.
+    // The submit_answer pull fails: the answer is refused, not held.
     h.voice.failNextFetch();
     await h.voice.playPending();
     await h.settle();
     expect(h.daemon.store.getAnswer(ask.id)).toBeUndefined();
     expect((await h.outcome(ask.id)).outcome?.outcome).not.toBe("answered");
-    expect(audits(h, "call.ended").map((e) => e.detail)).toMatchObject([{ result: "failed" }]);
+    expect(audits(h, "voice.answer")).toEqual([]);
+    expect(audits(h, "security.unverified").map((e) => e.detail)).toEqual([
+      { channel: "voice", what: "submit_answer", reason: "the provider lookup failed (unreachable)" },
+    ]);
+  });
+
+  it("has ElevenLabs send the post-call event again when it cannot be pulled, losing nothing", async () => {
+    let failPostCallPull: (() => void) | undefined;
+    const delivered: Record<string, unknown>[] = [];
+    const refusals: unknown[] = [];
+    const h = await start({
+      voiceClient: (real) => ({
+        tool: (name, body) => real.tool(name, body),
+        postCall: async (payload) => {
+          delivered.push(payload);
+          failPostCallPull?.();
+          failPostCallPull = undefined;
+          try {
+            await real.postCall(payload);
+          } catch (error) {
+            refusals.push(error);
+          }
+        },
+      }),
+    });
+    failPostCallPull = () => h.voice.failNextFetch();
+    const session = await h.registerSession();
+    const ask = await question(h, session);
+    await h.advance(BATCH_MS);
+    h.voice.script(
+      scriptedHuman.says({ kind: "answer", ask: 1, decision: "option", option: 2, words: "skip windows" }),
+    );
+    await h.voice.playPending();
+    await h.settle();
+    // ElevenLabs was down: the daemon answered 503 and handled nothing yet.
+    expect(refusals.map(String)).toEqual([expect.stringContaining("503")]);
+    expect(h.daemon.store.getAnswer(ask.id)).toBeUndefined();
+    expect(audits(h, "call.ended")).toEqual([]);
     expect(audits(h, "security.unverified").map((e) => e.detail)).toEqual([
       { channel: "voice", what: "post-call", reason: "the provider lookup failed (unreachable)" },
     ]);
+    // ElevenLabs' retry is pulled afresh and confirms the owner's own words.
+    await h.elevenLabs.postCall(delivered[0] as Record<string, unknown>);
+    await h.settle();
+    expect(answerOf(await h.outcome(ask.id))).toMatchObject({
+      channel: "voice",
+      decision: { type: "option", option: 2 },
+    });
+    expect(audits(h, "call.ended").map((e) => e.detail)).toMatchObject([{ result: "answered" }]);
+  });
+
+  it("never ends a live call on a forged call initiation failure", async () => {
+    let forge: (() => Promise<void>) | undefined;
+    const h = await start({
+      voiceClient: (real) => ({
+        tool: async (name, body) => {
+          // While the owner is on the line, a local process posts a signed failure for this call.
+          await forge?.();
+          forge = undefined;
+          return real.tool(name, body);
+        },
+        postCall: (payload) => real.postCall(payload),
+      }),
+    });
+    const session = await h.registerSession();
+    const ask = await question(h, session);
+    await h.advance(BATCH_MS);
+    h.voice.script(
+      scriptedHuman.says({ kind: "answer", ask: 1, decision: "option", option: 2, words: "skip windows" }),
+    );
+    forge = () =>
+      h.elevenLabs.postCall({
+        type: "call_initiation_failure",
+        event_timestamp: 0,
+        data: {
+          agent_id: "agent_fake",
+          conversation_id: h.voice.placed[0]?.conversationId,
+          failure_reason: "no-answer",
+        },
+      });
+    await h.voice.playPending();
+    await h.settle();
+    expect(audits(h, "security.possible-forgery").map((e) => e.detail)).toEqual([
+      { channel: "voice", what: "post-call", reason: "the call is going on at the provider" },
+    ]);
+    // The call went on: the owner's answer counts, and nothing was retried or texted.
+    expect(answerOf(await h.outcome(ask.id))).toMatchObject({ channel: "voice" });
+    expect(audits(h, "call.ended").map((e) => e.detail)).toMatchObject([{ result: "answered" }]);
+    expect(h.voice.placed).toHaveLength(1);
   });
 
   it("ignores a post-call webhook for a conversation ElevenLabs never had", async () => {

@@ -190,7 +190,12 @@ describe("POST /hooks/twilio/sms", () => {
     expect(response.headers["content-type"]).toMatch(/^text\/xml/);
     expect(response.body).toBe('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
     expect(received).toEqual([
-      { messageSid: new Map(params).get("MessageSid"), body: "  Use SQLite & ship <it> ", receivedAt: now },
+      {
+        messageSid: new Map(params).get("MessageSid"),
+        body: "  Use SQLite & ship <it> ",
+        receivedAt: now,
+        writtenAt: now,
+      },
     ]);
     expect(others).toEqual([]);
   });

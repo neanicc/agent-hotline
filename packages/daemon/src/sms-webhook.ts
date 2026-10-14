@@ -57,6 +57,12 @@ export interface OwnerSms {
   body: string;
   receivedAt: Date;
   /**
+   * When Twilio's own record says the message came in (`date_created`). Only
+   * a reply written after a text went out can answer it, however late its
+   * webhook arrives.
+   */
+  writtenAt?: Date;
+  /**
    * `STOP`, `START` or `HELP` when Twilio matched one of its opt-out, opt-in or
    * help keywords. Twilio has already replied, so Hotline does not.
    */
@@ -203,17 +209,17 @@ export function twilioSmsRoute(options: TwilioSmsRouteOptions): WebhookRoute {
     },
   };
 
-  /** Why Twilio's record does not confirm this owner's text, or undefined when it does. */
-  async function unconfirmed(
+  /** Twilio's record when it confirms this owner's text, or why it does not. */
+  async function confirmed(
     messageSid: string,
     body: string,
     receivedAt: Date,
-  ): Promise<Unverified | undefined> {
+  ): Promise<{ pulled: PulledMessage } | { failure: Unverified }> {
     let pulled: PulledMessage;
     try {
       pulled = await options.lookup(messageSid);
     } catch (error) {
-      return pullFailure(error);
+      return { failure: pullFailure(error) };
     }
     const reason = smsMismatch(pulled, {
       messageSid,
@@ -222,7 +228,7 @@ export function twilioSmsRoute(options: TwilioSmsRouteOptions): WebhookRoute {
       smsNumber: options.smsNumber,
       receivedAt,
     });
-    return reason === undefined ? undefined : { forgery: true, reason };
+    return reason === undefined ? { pulled } : { failure: { forgery: true, reason } };
   }
 
   /**
@@ -248,8 +254,9 @@ export function twilioSmsRoute(options: TwilioSmsRouteOptions): WebhookRoute {
 
     request.log.info({ messageSid, sender: "owner" }, "sms received");
     const body = params.get("Body") ?? "";
-    const failure = await unconfirmed(messageSid, body, receivedAt);
-    if (failure !== undefined) {
+    const check = await confirmed(messageSid, body, receivedAt);
+    if ("failure" in check) {
+      const { failure } = check;
       request.log.warn({ messageSid, forgery: failure.forgery }, "sms not confirmed by twilio; ignored");
       try {
         await options.onUnverified?.(messageSid, failure);
@@ -264,6 +271,7 @@ export function twilioSmsRoute(options: TwilioSmsRouteOptions): WebhookRoute {
       messageSid,
       body,
       receivedAt,
+      ...(check.pulled.dateCreated === undefined ? {} : { writtenAt: check.pulled.dateCreated }),
       ...(optOutType === undefined ? {} : { optOutType }),
     });
     return {

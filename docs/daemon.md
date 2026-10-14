@@ -188,16 +188,21 @@ came from ElevenLabs. What does is ElevenLabs' own record of the conversation,
 fetched by id with the API key (`conversation`, the voice provider's
 `fetchConversation`: `GET /v1/convai/conversations/<id>`,
 https://elevenlabs.io/docs/api-reference/conversations/get). `runDaemon`
-passes the configured voice provider's; without one (no `elevenlabs.apiKey`),
-every pull fails, so no PIN is accepted and no call confirms anything. Checks
-live in `provider-pull.ts`; a mismatch goes to `onUnverified`, which audits
-`security.possible-forgery` and texts the owner at most once an hour (an outage
-is `security.unverified`, no text).
+passes the configured voice provider's; without one (no `elevenlabs.apiKey`,
+or a provider that cannot pull) it registers no voice route at all, so every
+tool call and post-call webhook is the bare 403: no PIN, decision,
+instruction or status goes through. Every server tool and every post-call
+event, a call initiation failure included, is checked against the pulled
+record before it has any effect. Checks live in `provider-pull.ts`; a mismatch
+goes to `onUnverified`, which audits `security.possible-forgery` and texts the
+owner at most once an hour (an outage is `security.unverified`, no text).
 
 `elevenLabsRoutes` (`elevenlabs-webhook.ts`) serves the voice agent's four
 server tools and the post-call webhook. `runDaemon` registers them only when
-`voice.provider` is `elevenlabs`, `voice.agentId` and `tunnel.publicUrl` are set,
-and the `elevenlabs.toolSecret` and `elevenlabs.webhookSecret` secrets exist.
+`voice.provider` is `elevenlabs`, `voice.agentId`, `voice.agentPhoneNumberId`
+and `tunnel.publicUrl` are set, the `elevenlabs.toolSecret` and
+`elevenlabs.webhookSecret` secrets exist, and the voice provider can pull
+conversations (it has `elevenlabs.apiKey`).
 Otherwise it logs `voice webhooks off` with the reason and the paths stay a
 `403`. The tool definitions that point ElevenLabs at these URLs are in
 `@hotline/providers` (`hotlineToolConfigs`; see [contracts](contracts.md#voice-providers)).
@@ -231,12 +236,27 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
   `owner.phoneNumber`. Otherwise the answer is `{"result": "refused",
   "end_call": true}` and no handler runs. The voice model cannot set these
   fields: they are dynamic-variable parameters, not model-filled ones.
+- **The live call at ElevenLabs (HL-13a):** before any tool has an effect (a
+  PIN attempt, a held answer or instruction, a denial, a status read out), the
+  conversation is pulled. It must exist, belong to `voice.agentId`, be going on
+  (`initiated` or `in-progress`), be a phone call with a direction on
+  `voice.agentPhoneNumberId` whose Hotline end is a strict E.164 number other
+  than the owner's and whose far end is `owner.phoneNumber`, and the body's
+  `caller_id`, `called_number` (both required, strict E.164) and `call_sid`
+  must be exactly the record's for that direction. Otherwise
+  `{"result": "refused", "end_call": true}`, nothing runs, and the reason goes to
+  `onUnverified`. The call's direction comes from the record, not the body:
+  outbound only when ElevenLabs dialled out and `placedCall` says Hotline placed
+  it; anything else is inbound and needs the PIN. So a forged tool call, even
+  for a real conversation after its PIN was verified, can neither guess nor
+  lock the PIN, hold or deny a decision, queue an instruction nor hear the
+  status once the call is over.
 - A verified request whose JSON or fields do not parse gets `{"result": "invalid"}`.
 
 | Tool | What the route does |
 | --- | --- |
-| `verify_pin` | First pulls the conversation (HL-13a): it must exist at ElevenLabs, belong to `voice.agentId`, be going on (`initiated` or `in-progress`), be a phone call whose far end is `owner.phoneNumber`, on `voice.agentPhoneNumberId` when that is set, with the caller and called numbers and call SID the tool call carries. Otherwise `{"result": "refused", "end_call": true}` and no attempt is counted, so forged tool calls for a made-up conversation can neither guess the PIN nor lock it. Then checks the PIN with the `PinGate`: 2 wrong PINs per call, then `end_call: true` and no further checks on that call; 6 wrong PINs across all calls of one direction in a rolling hour, or 10 in a rolling day, lock every check on that direction, the right PIN included, until enough time has passed. A caller spoofing the owner's number therefore gets at most 10 guesses a day (0.1% of a 4-digit PIN space). Each lockout calls the PinGate's `onLockout`, and the inbound line texts the owner (at most once an hour per direction). Inbound and outbound calls have separate budgets, so someone guessing on inbound calls (caller ID can be spoofed) cannot block PIN approvals on calls Hotline placed to the owner. The trade-off: such guessing still locks the owner's own inbound line for up to an hour, which fails closed. Answers `{verified, attempts_left, end_call}`. A verified PIN is registered with the redactor (`addShortSecret`). The PIN is checked against `owner.pinHash` with scrypt and never logged or stored |
-| `submit_answer` | On an inbound call, `pin-required` until this call passed `verify_pin`, because caller ID can be spoofed. A call is outbound only when the injected `placedCall(conversationId)` says Hotline placed it (call orchestration knows) and it went to the owner's number from another number; everything else counts as inbound. `runDaemon` passes call orchestration's `placedCall`, true from the moment a call is placed until its post-call event, its failure or the stuck-call limit. Otherwise passes the ask number, decision (`option`, `allow`, `deny`, `text`, `done` or `unclear`), the owner's words, the direction and the call ids to the `submitAnswer` handler. `confirmation` is `pin` only when this call passed `verify_pin`; nothing in the request can set it |
+| `verify_pin` | Pulled first, as above: a forged tool call for a made-up conversation never counts an attempt, so it can neither guess the PIN nor lock it. Then checks the PIN with the `PinGate`: 2 wrong PINs per call, then `end_call: true` and no further checks on that call; 6 wrong PINs across all calls of one direction in a rolling hour, or 10 in a rolling day, lock every check on that direction, the right PIN included, until enough time has passed. A caller spoofing the owner's number therefore gets at most 10 guesses a day (0.1% of a 4-digit PIN space). Each lockout calls the PinGate's `onLockout`, and the inbound line texts the owner (at most once an hour per direction). Inbound and outbound calls have separate budgets, so someone guessing on inbound calls (caller ID can be spoofed) cannot block PIN approvals on calls Hotline placed to the owner. The trade-off: such guessing still locks the owner's own inbound line for up to an hour, which fails closed. Answers `{verified, attempts_left, end_call}`. A verified PIN is registered with the redactor (`addShortSecret`). The PIN is checked against `owner.pinHash` with scrypt and never logged or stored |
+| `submit_answer` | On an inbound call, `pin-required` until this call passed `verify_pin`, because caller ID can be spoofed. A call is outbound only when ElevenLabs' record has it dialled out to the owner and the injected `placedCall(conversationId)` says Hotline placed it (call orchestration knows); everything else counts as inbound. `runDaemon` passes call orchestration's `placedCall`, true from the moment a call is placed until its post-call event, its failure or the stuck-call limit. Otherwise passes the ask number, decision (`option`, `allow`, `deny`, `text`, `done` or `unclear`), the owner's words, the direction and the call ids to the `submitAnswer` handler. `confirmation` is `pin` only when this call passed `verify_pin`; nothing in the request can set it |
 | `get_status` | `{"result": "pin-required"}` until this call passed `verify_pin`. Then the `getStatus` handler's text (the [inbound line](#inbound-line)'s numbered status), redacted and cut to 1500 characters |
 | `send_instruction` | `pin-required` until this call passed `verify_pin`. Then the `sendInstruction` handler gets the session number, instruction and the owner's words, and answers `queued` (held until the post-call transcript confirms it), `unknown-session` (not a number this call's status read out, or that session ended), `too-many` or `invalid` |
 
@@ -261,15 +281,32 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
   transcript, metadata (direction, numbers, call SID, duration) and status,
   never the body's; whose turns count as the owner's is decided from the pulled
   metadata too. A body that differs from the record is audited as a possible
-  forgery (the record is still what counts). A pull that fails, or a record that
-  is another conversation or another agent's, becomes a failed call (an
-  initiation failure with reason `unknown`): nothing is confirmed, and every ask
-  on it ends as no answer under the queue's usual retry and text rules. A record
-  still `initiated`, `in-progress` or `processing` means the event came before
-  the call was over, which ElevenLabs never does: it is audited as a possible
-  forgery and left unhandled, so the genuine event still counts when it comes.
-  `call_initiation_failure` events are not pulled: they confirm nothing, and a
-  forged one can only make a call count as failed.
+  forgery (the record is still what counts). The record must be this agent's
+  finished phone call with a direction, on `voice.agentPhoneNumberId`, whose
+  Hotline end is a strict E.164 number other than the owner's; outbound only
+  when `placedCall` says Hotline placed it, to `owner.phoneNumber`, and inbound
+  only when Hotline did not place it. A finished call that is not with the
+  owner (a stranger calling in, or an outbound call Hotline no longer waits on)
+  is handed on with no transcript turns, so it is recorded but nothing said on
+  it counts. ElevenLabs having no such conversation, or any other mismatch,
+  becomes a failed call (an initiation failure with reason `unknown`): nothing
+  is confirmed, and every ask on it ends as no answer under the queue's usual
+  retry and text rules. A record still `initiated`, `in-progress` or
+  `processing` means the event came before the call was over, which ElevenLabs
+  never does: it is audited as a possible forgery and left unhandled, so the
+  genuine event still counts when it comes.
+- **Call initiation failures are pulled too:** a `call_initiation_failure` is
+  acted on only when the record shows that call failed: this agent's outbound
+  call on the Hotline number to `owner.phoneNumber`, placed by Hotline, status
+  `failed`, with no words from the person in it. Otherwise it is ignored and
+  audited (a possible forgery, except for a call Hotline no longer waits on),
+  so a forged one cannot end a live call, nor start retries and texts. The
+  failure reason (`busy`, `no-answer`) is the event's: both end the call as no
+  pickup, and only for a call that really failed.
+- **Retry on an outage:** when ElevenLabs cannot be reached or refuses the
+  lookup, the route answers `503` and handles nothing, so ElevenLabs delivers
+  the event again and the genuine transcript is not lost. Until a delivery
+  gets through, the call's asks wait, and end as no answer at their timeout.
 - **Once per event:** a `post_call_transcription` or `call_initiation_failure`
   for a conversation is handled once. A replay, or a retry after success, gets
   `200` and is ignored, whatever its signature header looks like. Events are
@@ -609,8 +646,10 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
   session; `stop` and Twilio's keywords get no reply of Hotline's own. Any other text answers only an ask Hotline texted that is
   still open, and only one: a `YES <code>` reply names the ask with that code;
   otherwise there must be exactly one such ask, texted at least 10 seconds
-  before the message was first seen (the time its SID was claimed; an ask with
-  no recorded send time never qualifies). A reply that predates the text, or
+  before the message was first seen (the earlier of the time its SID was
+  claimed and Twilio's own `date_created` for it, so a text whose webhook comes
+  late or is replayed keeps the time it was written; an ask with no recorded
+  send time never qualifies). A reply that predates the text, or
   came too quickly to answer it (a stray reply meant for something earlier),
   is not used, and the owner is asked to read the text and reply again. So a
   free-text answer or a "no" can never land on a question or request texted

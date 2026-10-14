@@ -161,15 +161,26 @@ export class OwnerTexts {
     }
   }
 
-  async #handle({ messageSid, body, receivedAt, optOutType }: OwnerSms): Promise<string | undefined> {
+  async #handle({
+    messageSid,
+    body,
+    receivedAt,
+    writtenAt,
+    optOutType,
+  }: OwnerSms): Promise<string | undefined> {
     this.#store.appendAudit("sms.received", { messageSid, reply: replyKind(body) }, receivedAt);
     const state = this.#state.data;
+    // Recorded by `ownerText` just before; a fresh claim reads `receivedAt`.
+    const claimedAt = this.#store.inboundMessageFirstSeen(messageSid) ?? receivedAt;
     const plan = planTextReply({
       body,
       messageSid,
       receivedAt,
-      // Recorded by `ownerText` just before; a fresh claim reads `receivedAt`.
-      firstSeenAt: this.#store.inboundMessageFirstSeen(messageSid) ?? receivedAt,
+      // The earlier of the daemon's first sight and Twilio's own time: a text
+      // written before a request went out can never answer it, even if its
+      // webhook only arrives (or is replayed) later.
+      firstSeenAt:
+        writtenAt !== undefined && writtenAt.getTime() < claimedAt.getTime() ? writtenAt : claimedAt,
       optedOut: optOutType !== undefined,
       waiting: state.queue.open
         .filter((q) => q.texted && q.duplicateOf === undefined)

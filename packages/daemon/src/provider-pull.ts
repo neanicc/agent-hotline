@@ -10,6 +10,7 @@
 // not the record asked for) or a record that does not match means no answer.
 // A mismatch is audited as a possible forgery and the owner is texted, at most
 // once an hour. Reasons are fixed phrases: never bodies, numbers or words.
+import { PhoneNumber } from "@hotline/core";
 import {
   type ConversationRecord,
   PullError,
@@ -45,6 +46,15 @@ export function pullFailure(error: unknown): Unverified {
       : { forgery: false, reason: `the provider lookup failed (${error.reason})` };
   }
   return { forgery: false, reason: "the provider lookup failed" };
+}
+
+/**
+ * Whether a failed pull may succeed when the webhook comes again: the provider
+ * could not be reached or refused for now. Not for a record it does not have,
+ * an answer that is not one, or a provider that cannot pull at all.
+ */
+export function transientPullFailure(error: unknown): boolean {
+  return !(error instanceof PullError) || error.reason === "unreachable" || error.reason === "refused";
 }
 
 export interface ExpectedSms {
@@ -92,7 +102,15 @@ export interface CallRecordExpectations {
   agentPhoneNumberId?: string | undefined;
   /** `config.owner.phoneNumber`. */
   ownerNumber: string;
+  /** Whether Hotline placed this conversation and still waits on it (call orchestration knows). */
+  placedCall: (conversationId: string) => boolean;
 }
+
+type PhoneCall = NonNullable<NonNullable<ConversationRecord["metadata"]>["phone_call"]>;
+type LinePhoneCall = PhoneCall & { direction: "inbound" | "outbound" };
+
+const isE164 = (value: unknown): value is string =>
+  typeof value === "string" && PhoneNumber.safeParse(value).success;
 
 /** Why a record is not this agent's conversation `conversationId`, or undefined. */
 function conversationMismatch(
@@ -105,72 +123,156 @@ function conversationMismatch(
   return undefined;
 }
 
-/** Why a record is not one of this agent's phone calls with the owner, or undefined. */
-function callMismatch(
+/**
+ * The record's phone call when it is one on the Hotline line, or why not: it
+ * has a direction, the Hotline end is a strict E.164 number that is not the
+ * owner's, and it is on the configured phone number id. Who is on the far end
+ * is left to the caller.
+ */
+function hotlineLine(
+  record: ConversationRecord,
+  expected: CallRecordExpectations,
+): { phone: LinePhoneCall; reason?: undefined } | { reason: string } {
+  const phone = record.metadata?.phone_call;
+  if (phone === undefined || phone === null) return { reason: "the conversation is not a phone call" };
+  const direction = phone.direction;
+  if (direction !== "inbound" && direction !== "outbound") return { reason: "the call has no direction" };
+  if (!isE164(phone.agent_number) || sameE164(phone.agent_number, expected.ownerNumber)) {
+    return { reason: "the call is not on a Hotline number" };
+  }
+  if (expected.agentPhoneNumberId !== undefined && phone.phone_number_id !== expected.agentPhoneNumberId) {
+    return { reason: "the call is not on the Hotline number" };
+  }
+  return { phone: { ...phone, direction } };
+}
+
+/** This agent's phone call on the Hotline line with the owner on the far end, or why the record is not one. */
+function ownerCall(
   record: ConversationRecord,
   conversationId: string,
   expected: CallRecordExpectations,
-): string | undefined {
+): { phone: LinePhoneCall; reason?: undefined } | { reason: string } {
   const other = conversationMismatch(record, conversationId, expected.agentId);
-  if (other !== undefined) return other;
-  const phone = record.metadata?.phone_call;
-  if (phone === undefined || phone === null) return "the conversation is not a phone call";
-  if (phone.direction !== "inbound" && phone.direction !== "outbound") return "the call has no direction";
-  if (!sameE164(phone.external_number, expected.ownerNumber))
-    return "the call is not with the owner's number";
-  if (expected.agentPhoneNumberId !== undefined && phone.phone_number_id !== expected.agentPhoneNumberId) {
-    return "the call is not on the Hotline number";
+  if (other !== undefined) return { reason: other };
+  const line = hotlineLine(record, expected);
+  if (line.reason !== undefined) return line;
+  if (!sameE164(line.phone.external_number, expected.ownerNumber)) {
+    return { reason: "the call is not with the owner's number" };
   }
-  return undefined;
+  return line;
 }
+
+/** A call SID as a comparable value: absent, null and empty all mean none. */
+const sidOf = (value: string | null | undefined) =>
+  value === undefined || value === null || value === "" ? undefined : value;
 
 /**
  * Why a pulled record is not the live call a server tool claims to come from,
  * or undefined when it is: this agent's conversation, still going on, a phone
- * call with the owner's number on the far end, on the configured Hotline
- * number, with the numbers and call SID the tool call carries.
+ * call on the Hotline line with the owner's number on the far end, and both
+ * the caller and the called number (strict E.164, both required) and the call
+ * SID exactly as the provider has them.
  */
 export function liveCallMismatch(
   record: ConversationRecord,
   binding: ToolCallBinding,
   expected: CallRecordExpectations,
 ): string | undefined {
-  const mismatch = callMismatch(record, binding.conversation_id, expected);
-  if (mismatch !== undefined) return mismatch;
+  const call = ownerCall(record, binding.conversation_id, expected);
+  if (call.reason !== undefined) return call.reason;
+  const { phone } = call;
   if (!LIVE_STATUSES.has(record.status)) return "the call is not going on";
-  const phone = record.metadata?.phone_call;
-  if (phone === undefined || phone === null) return "the conversation is not a phone call";
-  if (binding.call_sid && phone.call_sid && binding.call_sid !== phone.call_sid) {
-    return "the call SID differs from the provider's";
-  }
+  if (sidOf(binding.call_sid) !== sidOf(phone.call_sid)) return "the call SID differs from the provider's";
   // Caller and called number as the provider has them, for the call's direction.
   const [caller, called] =
     phone.direction === "outbound"
       ? [phone.agent_number, phone.external_number]
       : [phone.external_number, phone.agent_number];
-  const differs = (claimed: string | undefined, actual: string | null | undefined) =>
-    claimed !== undefined && claimed !== "" && (typeof actual !== "string" || !sameE164(claimed, actual));
-  if (differs(binding.caller_id, caller) || differs(binding.called_number, called)) {
+  const same = (claimed: string | undefined, actual: string | null | undefined) =>
+    typeof actual === "string" && sameE164(claimed, actual);
+  if (!same(binding.caller_id, caller) || !same(binding.called_number, called)) {
     return "the numbers differ from the provider's";
   }
   return undefined;
 }
 
 /**
- * Whether a pulled record can stand for a post-call event: `final` when it is
- * this agent's finished conversation; `not-final` when it is still going on
- * (or being processed), so the event came too early to be ElevenLabs';
- * otherwise why it does not match. Who was on the line is not checked here: the
- * record's own metadata decides whose turns count (a stranger's never do).
+ * The direction a confirmed live call counts as: outbound only when the
+ * provider dialled out and Hotline placed that conversation. Anything else
+ * needs the PIN, as an inbound call does.
+ */
+export function liveCallDirection(
+  record: ConversationRecord,
+  expected: CallRecordExpectations,
+): "inbound" | "outbound" {
+  return record.metadata?.phone_call?.direction === "outbound" && expected.placedCall(record.conversation_id)
+    ? "outbound"
+    : "inbound";
+}
+
+/**
+ * What a pulled record says about a post-call transcription event:
+ * - `final`: this agent's finished call on the Hotline line with the owner,
+ *   outbound only if Hotline placed it and inbound only if it did not;
+ * - `no-owner`: a finished call on the Hotline line that is not a call with
+ *   the owner: a stranger calling in, or an outbound call Hotline does not
+ *   wait on (given up on). Nothing said on it may count;
+ * - `not-final`: still going on (or being processed), so the event came too
+ *   early to be ElevenLabs';
+ * - `mismatch`: anything else, with why.
  */
 export function finishedCallCheck(
   record: ConversationRecord,
   conversationId: string,
-  agentId: string,
-): { type: "final" } | { type: "not-final" } | { type: "mismatch"; reason: string } {
-  const mismatch = conversationMismatch(record, conversationId, agentId);
-  if (mismatch !== undefined) return { type: "mismatch", reason: mismatch };
-  return FINAL_STATUSES.has(record.status) ? { type: "final" } : { type: "not-final" };
+  expected: CallRecordExpectations,
+): { type: "final" } | { type: "no-owner" } | { type: "not-final" } | { type: "mismatch"; reason: string } {
+  const other = conversationMismatch(record, conversationId, expected.agentId);
+  if (other !== undefined) return { type: "mismatch", reason: other };
+  if (!FINAL_STATUSES.has(record.status)) return { type: "not-final" };
+  const line = hotlineLine(record, expected);
+  if (line.reason !== undefined) return { type: "mismatch", reason: line.reason };
+  const { phone } = line;
+  if (!isE164(phone.external_number)) return { type: "mismatch", reason: "the call has no other number" };
+  const placed = expected.placedCall(conversationId);
+  if (phone.direction === "inbound" && placed) {
+    return { type: "mismatch", reason: "the provider has a call Hotline placed as inbound" };
+  }
+  if (phone.direction === "outbound" && !placed) return { type: "no-owner" };
+  if (!sameE164(phone.external_number, expected.ownerNumber)) {
+    return phone.direction === "inbound"
+      ? { type: "no-owner" }
+      : { type: "mismatch", reason: "the call is not with the owner's number" };
+  }
+  return { type: "final" };
+}
+
+/**
+ * Why a pulled record does not show that the call a `call_initiation_failure`
+ * event names really failed, or undefined when it does: this agent's
+ * conversation, `failed` at the provider, an outbound call on the Hotline line
+ * to the owner's number that Hotline placed, with no words from the person in
+ * it. `forgery` is false only when there is no call of Hotline's to act on.
+ */
+export function failedCallMismatch(
+  record: ConversationRecord,
+  conversationId: string,
+  expected: CallRecordExpectations,
+): Unverified | undefined {
+  const call = ownerCall(record, conversationId, expected);
+  if (call.reason !== undefined) return { forgery: true, reason: call.reason };
+  if (!FINAL_STATUSES.has(record.status)) {
+    return { forgery: true, reason: "the call is going on at the provider" };
+  }
+  if (record.status !== "failed") return { forgery: true, reason: "the call did not fail at the provider" };
+  if (call.phone.direction !== "outbound")
+    return { forgery: true, reason: "the failed call is not outbound" };
+  if (record.transcript.some((turn) => turn.role === "user")) {
+    return { forgery: true, reason: "the call was answered at the provider" };
+  }
+  if (!expected.placedCall(conversationId)) {
+    return { forgery: false, reason: "the failed call is not one Hotline waits on" };
+  }
+  return undefined;
 }
 
 /** The one text about possible forgeries. Says what happened and what to do; no numbers or words. */

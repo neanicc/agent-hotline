@@ -113,7 +113,8 @@ export async function startHotline(options: HotlineOptions = {}): Promise<Hotlin
     quietHours: { timeZone: "America/Toronto" },
     secrets: { store: "file" },
     sms: { fromNumber: HOTLINE_NUMBER },
-    voice: { agentId: "agent_fake" },
+    // The fake voice provider's own ElevenLabs number id.
+    voice: { agentId: "agent_fake", agentPhoneNumberId: "phnum_fake" },
     tunnel: { publicUrl: PUBLIC_URL },
     ...options.config,
   };

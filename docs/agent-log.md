@@ -2528,8 +2528,8 @@ Template:
   finished (`initiated`, `in-progress`, `processing`) leaves the event
   unhandled, since ElevenLabs only sends it after the call; this keeps a forged
   early event from ending a real call. A post-call body that differs from the
-  record is used as the record and reported. Initiation-failure events are not
-  pulled: they confirm nothing.
+  record is used as the record and reported. (Superseded by the review fixes
+  below: initiation failures are pulled too, and an outage is retried.)
 - Decision: a 404 or a mismatch is audited as `security.possible-forgery`
   (channel, what, a fixed reason; never bodies or numbers) and texts the owner
   at most once an hour (`ForgeryAlarm`, in memory); an outage is
@@ -2537,8 +2537,8 @@ Template:
 - Decision: the pull methods are optional on `SmsProvider` and `VoiceProvider`
   so other implementations (HL-12's scenario suite runs in parallel) keep
   compiling; the daemon treats a provider without them as one that can never
-  confirm anything. Without `elevenlabs.apiKey`, the voice routes still serve
-  but no PIN or post-call event verifies.
+  confirm anything. Without `elevenlabs.apiKey` (or a provider that can pull)
+  no voice route is registered at all.
 - Decision: SMS confirmation codes are stored only as `scrypt1$salt$hash`
   (16-byte salt per code, N = 2^14, r = 8, p = 1) and compared in constant
   time. State saved before HL-13a with plaintext codes is hashed on start, and
@@ -2562,8 +2562,8 @@ Template:
   call the providers itself (calls, texts, history, agent configuration), and
   can guess at the PIN on a live call whose conversation id it reads from the
   store, within the PinGate limits. It cannot fabricate the owner's inbound
-  message or the owner's speech in a real call's transcript. It can still deny
-  service with a forged initiation failure, which fails closed.
+  message or the owner's speech in a real call's transcript, and a forged
+  initiation failure no longer ends a live call.
 - Evidence: `pnpm run lint`, `pnpm run typecheck` and `pnpm run test` pass (59
   files, 1771 tests). New tests: provider pulls with fake HTTP (Twilio GET by
   SID, ElevenLabs GET by id, 404/401/network/malformed answers, malformed ids
@@ -2587,4 +2587,42 @@ Template:
   (else every call raises a forgery alarm); both are listed in
   `docs/live-check.md`. The forgery alarm's hourly limit is in memory. A
   forger can make the daemon issue provider GETs (bounded by the post-call
-  route's in-flight cap, not for tool calls).
+  route's in-flight cap; tool calls need the tool secret and the owner's
+  number in the body first).
+- Review fixes (security review of d8f896d, "verify-by-pull gap"): every path
+  where a webhook or tool body was trusted without the pulled record is
+  closed, each failing closed.
+  - `call_initiation_failure` is pulled: acted on only when ElevenLabs has
+    Hotline's outbound call to the owner on the Hotline number as `failed`
+    with nobody's words in it; otherwise ignored and audited. Before, a forged
+    one could end a live call as no pickup and start retries and texts.
+  - Every server tool (`submit_answer`, `get_status`, `send_instruction`, not
+    only `verify_pin`) pulls before any effect, and the body's caller, called
+    number and call SID must all be present and equal the record's. The
+    direction comes from the record plus `placedCall`, not from the body's
+    numbers. Before, a forged `submit_answer` could hold a deny or a conflict
+    on a live outbound call (a refusal wins unconfirmed), and a forged
+    `get_status` or `send_instruction` for a PIN-verified conversation kept
+    working for two hours after the call ended.
+  - The post-call check also verifies the phone metadata: a direction, the
+    configured `agentPhoneNumberId` (now required to serve the routes), a
+    strict E.164 Hotline number other than the owner's, the owner's number on
+    the far end, outbound only for a call Hotline placed and inbound only for
+    one it did not. A finished call that is not with the owner is handed on
+    with no transcript turns (still recorded for the cost estimate).
+  - No API key: no voice route is registered (the routes used to serve and
+    fail every pull).
+  - Staff review P2: a transient pull failure on a post-call event answers
+    503 so ElevenLabs delivers it again, instead of turning a genuine
+    transcript into a failed call.
+  - Staff review P2 (replay after a restart): the claim that handled SIDs live
+    only in memory is wrong (`inbound_messages` keeps them 400 days, checked by
+    `ownerText`), but a related gap was real: a genuine owner text whose
+    webhook never arrived could be delivered later and bind to a request
+    texted after it was written. The reply-delay check now uses the earlier of
+    the daemon's first sight and Twilio's `date_created`.
+  - Tests that asserted the old, looser behaviour now assert the stricter one
+    (stranger and unplaced calls hand on no words; a call with the owner on
+    both ends is refused; an initiation failure ElevenLabs does not have is
+    ignored). The run and harness configs gained `call_sid` and
+    `agentPhoneNumberId`, which real ElevenLabs tool calls and configs carry.

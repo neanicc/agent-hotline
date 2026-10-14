@@ -147,15 +147,11 @@ function messageLookup(texter: SmsProvider | undefined): (messageSid: string) =>
   );
 }
 
-/** The voice provider's conversation lookup, or one that always fails closed. */
+/** The voice provider's conversation lookup, or undefined when there is none to pull with. */
 function conversationLookup(
   caller: VoiceProvider | string,
-): (conversationId: string) => Promise<ConversationRecord> {
-  const fetchConversation = typeof caller === "string" ? undefined : caller.fetchConversation?.bind(caller);
-  return (
-    fetchConversation ??
-    (() => Promise.reject(new PullError("No voice provider to look conversations up with", "unsupported")))
-  );
+): ((conversationId: string) => Promise<ConversationRecord>) | undefined {
+  return typeof caller === "string" ? undefined : caller.fetchConversation?.bind(caller);
 }
 
 /**
@@ -266,6 +262,16 @@ async function voiceWebhook(
   }
   redactor.addSecret(toolSecret);
   redactor.addSecret(webhookSecret);
+  // Nothing a call says can be confirmed without pulling its record from
+  // ElevenLabs (HL-13a): without the API key (or a provider that can pull) no
+  // route is served, so no PIN, decision, instruction or status goes through.
+  const lookup = conversationLookup(caller);
+  if (lookup === undefined) {
+    const why = typeof caller === "string" ? caller : "the voice provider cannot look up calls";
+    return { routes: [], off: `${why}, so no call can be confirmed with ElevenLabs` };
+  }
+  const agentPhoneNumberId = config.voice.agentPhoneNumberId;
+  if (agentPhoneNumberId === undefined) return { routes: [], off: "voice.agentPhoneNumberId is not set" };
   const pinHash = config.owner.pinHash;
   const pins = new PinGate({
     check: (pin) => verifyPin(pin, pinHash),
@@ -288,11 +294,9 @@ async function voiceWebhook(
     pins,
     clock,
     redact: (text) => redactor.text(text),
-    // Every PIN attempt and post-call event is checked against ElevenLabs' own record.
-    conversation: conversationLookup(caller),
-    ...(config.voice.agentPhoneNumberId === undefined
-      ? {}
-      : { agentPhoneNumberId: config.voice.agentPhoneNumberId }),
+    // Every tool call and post-call event is checked against ElevenLabs' own record.
+    conversation: lookup,
+    agentPhoneNumberId,
     onUnverified: (what, failure) => alarm.report("voice", what, failure),
     handlers: {
       submitAnswer: (answer) => orchestrator.submitAnswer(answer),
