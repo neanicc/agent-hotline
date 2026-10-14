@@ -19,6 +19,7 @@
 //   GET   /v2/voices?page_size=100[&next_page_token=...]
 //                                       -> {voices: [{voice_id, name, category}], has_more, next_page_token}
 //         https://elevenlabs.io/docs/api-reference/voices/search
+import { DEFAULT_VOICE_LLM, type VoiceLlm } from "@hotline/core";
 import {
   AGENT_DEFINITION_VERSION,
   hotlineAgentConfig,
@@ -32,6 +33,8 @@ import type { CliFetch } from "./setup.js";
 export const ELEVENLABS_ORIGIN = "https://api.elevenlabs.io";
 const TIMEOUT_MS = 15_000;
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
+/** What an ElevenLabs LLM id looks like (`claude-haiku-4-5`, `claude-haiku-4-5@20251001`), safe to print. */
+const LLM_ID = /^[a-z0-9][a-z0-9.@_-]{0,63}$/;
 /** `voice list` reads at most this many pages of 100 voices, then says the list was cut short. */
 export const MAX_VOICE_PAGES = 10;
 /** Name of the workspace secret holding `elevenlabs.toolSecret`. */
@@ -51,6 +54,8 @@ export interface DeployedAgent {
   /** `definition-v<n>` from the agent's tags, or undefined when it has none. */
   definitionVersion?: number;
   voiceId?: string;
+  /** `conversation_config.agent.prompt.llm`, when it looks like an LLM id; undefined means ElevenLabs' default. */
+  llm?: string;
   toolIds: string[];
 }
 
@@ -198,9 +203,11 @@ export class ElevenLabsAdmin {
     const agent = record(record(body.conversation_config).agent);
     const toolIds = record(agent.prompt).tool_ids;
     const voiceId = record(record(body.conversation_config).tts).voice_id;
+    const llm = record(agent.prompt).llm;
     return {
       ...(versions.length === 0 ? {} : { definitionVersion: Math.max(...versions) }),
       ...(typeof voiceId === "string" && isVoiceId(voiceId) ? { voiceId } : {}),
+      ...(typeof llm === "string" && LLM_ID.test(llm) ? { llm } : {}),
       toolIds: Array.isArray(toolIds) ? toolIds.filter((id): id is string => typeof id === "string") : [],
     };
   }
@@ -233,6 +240,8 @@ export interface DeployOptions {
   /** The `elevenlabs.toolSecret` value, stored in ElevenLabs as a workspace secret. */
   toolSecret: string;
   voiceId?: string;
+  /** `config.voice.llm`; unset means `DEFAULT_VOICE_LLM`. */
+  llm?: VoiceLlm;
   /** Ids from earlier runs, so this updates rather than creates. */
   agentId?: string;
   toolSecretId?: string;
@@ -290,14 +299,16 @@ export async function deployAgent(options: DeployOptions): Promise<string> {
   const agent = hotlineAgentConfig({
     toolIds: TOOL_NAMES.map((name) => toolIds[name] as string),
     ...(options.voiceId === undefined ? {} : { voiceId: options.voiceId }),
+    ...(options.llm === undefined ? {} : { llm: options.llm }),
   });
+  const llm = options.llm ?? DEFAULT_VOICE_LLM;
   if (options.agentId === undefined) {
     const agentId = await admin.createAgent(agent);
     await save({ agentId });
-    log(`created the agent (definition v${AGENT_DEFINITION_VERSION})`);
+    log(`created the agent (definition v${AGENT_DEFINITION_VERSION}, LLM ${llm})`);
     return agentId;
   }
   await admin.updateAgent(options.agentId, agent);
-  log(`updated the agent to definition v${AGENT_DEFINITION_VERSION}`);
+  log(`updated the agent to definition v${AGENT_DEFINITION_VERSION}, LLM ${llm}`);
   return options.agentId;
 }

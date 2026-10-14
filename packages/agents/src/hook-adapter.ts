@@ -12,9 +12,11 @@
 //   only when core's `permissionVerdict` says so: the owner's own approval of
 //   exactly this ask, with the PIN or a confirming text when it is high risk.
 //   No answer, a timeout, an unreachable daemon or a malformed outcome denies.
-// - Stop continues only with the owner's own instruction, and only while the
-//   loop guards allow: a turn Hotline did not continue itself is left alone, and
-//   at most `policy.maxConsecutiveContinuations` continuations run in a row.
+// - Stop continues only with the owner's own instruction (an answer to the
+//   stop, or one the owner left for this session on a call, which the daemon
+//   confirmed), and only while the loop guards allow: a turn Hotline did not
+//   continue itself is left alone, and at most
+//   `policy.maxConsecutiveContinuations` continuations run in a row.
 //
 // Everything in the payload was written by the agent and is untrusted: it is
 // cut short, stripped of control characters and redacted by the daemon before
@@ -373,6 +375,60 @@ async function askAndWait(
   return { ask, outcome: undefined };
 }
 
+/** The owner's queued instructions for one daemon session, found but not yet handed over. */
+interface Pending {
+  sessionId: string;
+  ids: string[];
+}
+
+/** The owner's queued instructions for this daemon session (the inbound line), or undefined. Hands nothing over. */
+async function peekInstructions(daemon: HotlineDaemon, sessionId: string): Promise<Pending | undefined> {
+  try {
+    const listed = await daemon.peekInstructions(sessionId);
+    return listed.length === 0 ? undefined : { sessionId, ids: listed.map((instruction) => instruction.id) };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Acknowledges the pending instructions and returns them one per line, or
+ * undefined. Called only once nothing can stop the continuation any more; any
+ * failure leaves them queued and the agent stops.
+ */
+async function ackInstructions(daemon: HotlineDaemon, pending: Pending): Promise<string | undefined> {
+  try {
+    const acked = await daemon.ackInstructions(pending.sessionId, pending.ids, "stop");
+    const text = acked
+      .map((instruction) => instruction.text.trim())
+      .filter((line) => line !== "")
+      .join("\n");
+    return text === "" ? undefined : text;
+  } catch {
+    return undefined;
+  }
+}
+
+async function queuedInstructions(
+  daemon: HotlineDaemon,
+  session: { agent: AgentKind; cwd: string; agentSessionId: string | undefined },
+): Promise<Pending | undefined> {
+  // Without the agent's own session id each registration is a new session,
+  // which has no instructions waiting: do not spend one on looking.
+  if (session.agentSessionId === undefined) return undefined;
+  try {
+    const registered = await daemon.registerSession({
+      agent: session.agent,
+      cwd: session.cwd,
+      ...(session.agentSessionId === undefined ? {} : { agentSessionId: session.agentSessionId }),
+    });
+    return await peekInstructions(daemon, registered.id);
+  } catch {
+    // The stop ask registers again, and fails closed if the daemon is gone.
+    return undefined;
+  }
+}
+
 function waiting(connection: HookConnection, options: HookOptions): Waiting {
   return {
     daemon: connection.daemon,
@@ -502,14 +558,41 @@ async function stopHook(options: HookOptions): Promise<HookResult> {
     return { note: `continuation cap (${count}) reached; the agent stops` };
   }
 
-  const result = await askAndWait(waiting(connection, options), session, {
-    kind: "stop",
-    text: stopText(parsed.data.last_assistant_message),
-  });
-  if (result?.outcome === undefined) return stop("no instruction from the owner; the agent stops");
-  const instruction = stopInstruction(result.ask, result.outcome);
+  // Instructions the owner left on a call to the Hotline number come first:
+  // then nobody is phoned about this stop. They are only looked at here.
+  let instruction: string | undefined;
+  let pending = await queuedInstructions(connection.daemon, session);
+  if (pending === undefined) {
+    const result = await askAndWait(waiting(connection, options), session, {
+      kind: "stop",
+      text: stopText(parsed.data.last_assistant_message),
+    });
+    if (result?.outcome?.outcome === "answered") instruction = stopInstruction(result.ask, result.outcome);
+    // An instruction the owner left while this stop waited ends the stop as no answer.
+    else if (result !== undefined) pending = await peekInstructions(connection.daemon, result.ask.sessionId);
+  }
+  if (pending !== undefined) {
+    // Acknowledging marks them delivered, so everything that could still stop
+    // the continuation is settled first; after the acknowledgement only the
+    // output is left to print.
+    if (!(await isAway(state))) return stop("away mode was switched off; the agent stops");
+    try {
+      await state.setContinuations(sessionId, count + 1);
+    } catch {
+      return { note: "the continuation count cannot be saved; the agent stops" };
+    }
+    const acked = await ackInstructions(connection.daemon, pending);
+    if (acked === undefined) return stop("the owner's instructions could not be picked up; the agent stops");
+    return {
+      // Queued instructions are at most 3 of 1000 characters for a session, so they always fit.
+      stdout: JSON.stringify(
+        StopBlockOutput.parse({ decision: "block", reason: acked.slice(0, MAX_REASON) }),
+      ),
+      note: `continuing with the owner's instruction (${count + 1} in a row)`,
+    };
+  }
   if (instruction === undefined || instruction.trim() === "") {
-    return stop("the owner let the agent stop, or did not answer");
+    return stop("no instruction from the owner, or the owner let the agent stop");
   }
   // Away mode may have been switched off while the hook waited: then the owner
   // is back at the terminal, and no continuation goes out.

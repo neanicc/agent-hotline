@@ -76,6 +76,148 @@ describe("hotline init", () => {
     expect(result.stdout).toContain("…0100");
   });
 
+  it("explains the reply judge, and stores an Anthropic API key only from its variable (HL-09d)", async () => {
+    const plain = await cli(["init", ...FLAGS], testContext(setup, { env: env(SECRETS) }));
+    expect(plain.code).toBe(0);
+    expect(plain.stdout).toContain("Reply judge:");
+    expect(plain.stdout).toContain("your own Claude Code login");
+    expect(plain.stdout).toContain("Only your short spoken reply is sent");
+    expect(plain.stdout).toContain('"yes if the tests pass"');
+    const store = new FileSecretStore(join(setup.hotlineHome, "secrets.json"));
+    expect(await store.get("anthropic.apiKey")).toBeUndefined();
+
+    const key = "sk-ant-fake-judge-key-0001";
+    const prompter = scriptedPrompter();
+    const withKey = await cli(
+      ["init", ...FLAGS, "--force"],
+      testContext(setup, { env: env({ ...SECRETS, HOTLINE_ANTHROPIC_API_KEY: key }), prompt: prompter }),
+    );
+    expect(withKey.code).toBe(0);
+    expect(await store.get("anthropic.apiKey")).toBe(key);
+    expect(withKey.stdout).toContain("stored: Anthropic API key (reply judge)");
+    expect(withKey.stdout + withKey.stderr).not.toContain(key);
+    // Never asked for: the owner's agent login comes first.
+    expect(prompter.questions.join("\n")).not.toMatch(/anthropic/i);
+  });
+
+  describe("the reply judge choice (HL-09d)", () => {
+    const interactiveFlags = FLAGS.filter((flag) => flag !== "--non-interactive");
+    const configPath = () => join(setup.hotlineHome, "config.json");
+    const recorded = async () => parseConfigText(await readFile(configPath(), "utf8")).judge.backend;
+
+    it("records no choice without --judge when it cannot ask, so nothing is sent", async () => {
+      const result = await cli(["init", ...FLAGS], testContext(setup, { env: env(SECRETS) }));
+      expect(result.code).toBe(0);
+      expect(await recorded()).toBeUndefined();
+      expect(result.stdout).toContain("reply judge: not chosen, so nothing is sent");
+    });
+
+    it("takes --judge, and refuses a value that is not a backend", async () => {
+      const chosen = await cli(
+        ["init", ...FLAGS, "--judge", "codex"],
+        testContext(setup, { env: env(SECRETS) }),
+      );
+      expect(chosen.code).toBe(0);
+      expect(await recorded()).toBe("codex");
+      expect(chosen.stdout).toContain("reply judge: codex");
+      const bad = await cli(
+        ["init", ...FLAGS, "--force", "--judge", "always"],
+        testContext(setup, { env: env(SECRETS) }),
+      );
+      expect(bad.code).toBe(1);
+      expect(bad.stderr).toContain("--judge must be one of auto, claude-code, codex, anthropic-api, off");
+      expect(await recorded()).toBe("codex");
+    });
+
+    it("asks once, after explaining what is sent: Enter or yes is auto, no is off", async () => {
+      for (const [answer, choice] of [
+        ["", "auto"],
+        ["Yes", "auto"],
+        ["n", "off"],
+      ] as const) {
+        const prompt = scriptedPrompter(answer);
+        const result = await cli(
+          ["init", ...interactiveFlags, "--force"],
+          testContext(setup, { env: env(SECRETS), prompt }),
+        );
+        expect(result.code).toBe(0);
+        expect(prompt.questions).toEqual([expect.stringContaining("Use the reply judge")]);
+        expect(prompt.questions[0]).toContain("only your short spoken reply");
+        expect(result.stdout.indexOf("Reply judge:")).toBeGreaterThanOrEqual(0);
+        expect(await recorded()).toBe(choice);
+      }
+    });
+
+    it("keeps an earlier off on Enter, showing [y/N]: a refusal never turns into sending", async () => {
+      expect(
+        (await cli(["init", ...FLAGS, "--judge", "off"], testContext(setup, { env: env(SECRETS) }))).code,
+      ).toBe(0);
+      const prompt = scriptedPrompter("");
+      const kept = await cli(
+        ["init", ...interactiveFlags, "--force"],
+        testContext(setup, { env: env(SECRETS), prompt }),
+      );
+      expect(kept.code).toBe(0);
+      expect(prompt.questions).toEqual([expect.stringMatching(/\[y\/N\]: $/)]);
+      expect(await recorded()).toBe("off");
+      // Only an explicit yes turns it back on.
+      const yes = scriptedPrompter("y");
+      expect(
+        (
+          await cli(
+            ["init", ...interactiveFlags, "--force"],
+            testContext(setup, { env: env(SECRETS), prompt: yes }),
+          )
+        ).code,
+      ).toBe(0);
+      expect(await recorded()).toBe("auto");
+      const again = scriptedPrompter("");
+      await cli(
+        ["init", ...interactiveFlags, "--force"],
+        testContext(setup, { env: env(SECRETS), prompt: again }),
+      );
+      expect(again.questions).toEqual([expect.stringMatching(/\[Y\/n\]: $/)]);
+      expect(await recorded()).toBe("auto");
+    });
+
+    it("keeps the earlier choice without --judge when it cannot ask", async () => {
+      for (const choice of ["off", "codex"] as const) {
+        const chosen = await cli(
+          ["init", ...FLAGS, "--force", "--judge", choice],
+          testContext(setup, { env: env(SECRETS) }),
+        );
+        expect(chosen.code).toBe(0);
+        const rerun = await cli(["init", ...FLAGS, "--force"], testContext(setup, { env: env(SECRETS) }));
+        expect(rerun.code).toBe(0);
+        expect(await recorded()).toBe(choice);
+        expect(rerun.stdout).toContain(`reply judge: ${choice}`);
+      }
+    });
+
+    it("keeps a backend chosen earlier on Enter, and gives up on an answer that is neither", async () => {
+      expect(
+        (await cli(["init", ...FLAGS, "--judge", "codex"], testContext(setup, { env: env(SECRETS) }))).code,
+      ).toBe(0);
+      const kept = await cli(
+        ["init", ...interactiveFlags, "--force"],
+        testContext(setup, { env: env(SECRETS), prompt: scriptedPrompter("") }),
+      );
+      expect(kept.code).toBe(0);
+      expect(await recorded()).toBe("codex");
+
+      const before = await readFile(configPath(), "utf8");
+      const prompt = scriptedPrompter("maybe", "sure thing", "hmm");
+      const unclear = await cli(
+        ["init", ...interactiveFlags, "--force"],
+        testContext(setup, { env: env(SECRETS), prompt }),
+      );
+      expect(unclear.code).toBe(1);
+      expect(prompt.questions).toHaveLength(3);
+      expect(unclear.stderr).toContain("answer y or n for the reply judge; nothing was changed");
+      expect(await readFile(configPath(), "utf8")).toBe(before);
+    });
+  });
+
   it("uses the Keychain through an injected security, never the real one", async () => {
     const security = fakeSecurity();
     const flags = FLAGS.filter((flag) => flag !== "file" && flag !== "--secret-store");

@@ -35,9 +35,11 @@ export interface WaitingText {
 }
 
 export type TextPlan =
-  /** Not for Hotline to act on: an opt-out or carrier keyword, `status` (HL-10), `stop`. */
+  /** Not for Hotline to act on: an opt-out or carrier keyword, `stop`. */
   | { type: "ignore" }
   | { type: "call-me" }
+  /** `status`: reply with what every live session is doing (HL-10). Never an answer. */
+  | { type: "status" }
   | { type: "nothing-waiting" }
   /** Several asks wait on texts and the reply names none of them: nothing is recorded. */
   | { type: "ambiguous"; waiting: number }
@@ -81,7 +83,10 @@ export function planTextReply({
 }: TextReplyInput): TextPlan {
   const reply = parseSmsReply(body);
   if (optedOut || reply.type === "carrier-keyword") return { type: "ignore" };
-  if (reply.type === "command") return reply.command === "call-me" ? { type: "call-me" } : { type: "ignore" };
+  if (reply.type === "command") {
+    if (reply.command === "call-me") return { type: "call-me" };
+    return reply.command === "status" ? { type: "status" } : { type: "ignore" };
+  }
   const code = reply.type === "yes" ? reply.code : undefined;
   let target: WaitingText | undefined;
   if (code !== undefined) {
@@ -135,6 +140,7 @@ export const TEXT_REPLIES = {
   notCalling: (reason: string) => `Hotline: not calling, ${reason}.`,
   tooSoon:
     "Hotline: that reply came before you could have read the latest request, so it was not used. Read it, then reply again.",
+  statusUnavailable: "Hotline: status is not available right now.",
 } as const;
 
 /** One plain line of agent text, cut to `max`. */

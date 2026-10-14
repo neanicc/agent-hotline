@@ -17,10 +17,10 @@ Pick any ElevenLabs voice for the caller, including a clone of your own
 ([docs/voice.md](docs/voice.md)).
 
 > Status: pre-alpha, Tier 1 in progress. Outbound calls, texts, permission
-> approvals, away mode, the installer and packaging are built and tested against
-> fake providers. The inbound status line (HL-10), the scenario suite (HL-12) and
-> the security pass (HL-13) are still open, and no live call has been recorded
-> yet ([docs/live-check.md](docs/live-check.md)). Progress:
+> approvals, away mode, the inbound status line, the installer and packaging are
+> built and tested against fake providers, and the scenario suite runs every
+> flow end to end against them. The security pass (HL-13) is still open, and no
+> live call has been recorded yet ([docs/live-check.md](docs/live-check.md)). Progress:
 > [plan section 9](docs/plan.md#9-tickets).
 
 ## What you need
@@ -120,6 +120,21 @@ so the rules are strict:
 - **Redaction.** Only short summaries go to Twilio and ElevenLabs, with API keys,
   tokens, private keys, `.env` values and passwords redacted first. Logs show
   phone numbers as their last four digits.
+- **Your own agent judges unclear replies.** When you answer a read-back with
+  something other than a plain yes or no ("yeah, let's ship that one"), Hotline
+  sends your short spoken reply, and only that (redacted; never the request or
+  anything an agent wrote), to your own agent provider to ask whether you
+  clearly agreed: the Claude Code CLI on your login (a small model), else the
+  Codex CLI on your login, else an optional Anthropic API key. Each run is
+  isolated: an empty temporary folder, no hooks, no MCP servers, nothing
+  saved. Claude Code runs with no tools; Codex keeps its shell tool in its
+  read-only sandbox without network. A yes with a condition ("yes if the tests pass") or taken back
+  is never an approval, and an error or timeout counts as unclear. Nothing is
+  sent until you choose it: `hotline init` asks once (or takes `--judge`), and
+  `judge.backend: "off"` or no choice sends nothing; such replies are then
+  texted to you. The CLI gets only its own login and basic environment, never
+  Hotline's credentials. `hotline doctor` shows which one is used
+  ([daemon.md](docs/daemon.md), [install.md](docs/install.md)).
 - **Local first.** Config, the PIN (stored only as a scrypt hash), transcripts and
   the audit log stay on your Mac. Credentials live in the macOS Keychain or a
   `0600` file, never in the config or the repository.
@@ -166,8 +181,14 @@ listed), not quotes; check current pricing before you sign up.
 | Twilio call leg to a Canadian number | $0.014 / min | $0.84 |
 | Twilio texts (Canada), plus carrier fees | $0.0083 + about $0.007 / segment | about $3 |
 | ElevenLabs Starter (Agents, voice cloning) | $6 / month, 75 call minutes included, then $0.08 / min | $6 |
-| LLM for the voice agent (billed by ElevenLabs) | depends on the model; `doctor` assumes $0.03 / min | about $1–3 |
+| LLM for the voice agent: Claude Haiku 4.5 (billed by ElevenLabs per token) | $1 / $5 per million input / output tokens; `doctor` assumes $0.03 / min | about $2 |
 | **Total** | | **about $12–14** |
+
+The voice agent runs on Claude Haiku 4.5, the cheapest documented Claude model
+on ElevenLabs: it only talks and calls Hotline's tools, and the daemon checks
+every decision against the call transcript, so a cheaper model costs friction,
+never safety. `voice.llm` switches to Claude Sonnet 5.5 or Sonnet 4.6, at about
+two or three times the LLM cost ([voice.md](docs/voice.md#the-model)).
 
 Calls you place to the hotline add Twilio's inbound rate. Rate limits (4 calls an
 hour and 20 a day by default) cap the worst case.
@@ -188,6 +209,7 @@ pnpm run test         # Vitest, all packages, fakes only
 pnpm run lint         # Biome (`pnpm run format` fixes)
 pnpm run package      # dist/hotline; scripts/ci/run.sh package also runs it from a temp folder
 pnpm run hotline --version   # the unbundled CLI from apps/cli/dist
+pnpm run eval -- --mode local   # the scenario suite against the built tree (docs/eval.md)
 ```
 
 CI calls the same steps through [scripts/ci/run.sh](scripts/ci/run.sh) (`setup`,
@@ -201,6 +223,7 @@ scenario suite, [docs/eval.md](docs/eval.md).
 | `packages/providers` | Voice and SMS provider interfaces, real clients and fakes |
 | `packages/agents` | MCP server and hook adapters for Claude Code and Codex |
 | `apps/cli` | The `hotline` command |
+| `eval` | The scenario suite: runner, scripted humans, self-test; human-owned `thresholds.toml` |
 
 ## How this repository is built
 

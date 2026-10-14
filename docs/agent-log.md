@@ -2260,6 +2260,548 @@ Template:
     entry to record the owner's direction, and the quotes are what the
     decisions rest on.
 
+## 2026-10-14 — HL-10 Inbound line (#11)
+
+- Change: the owner can call the Hotline number, give the PIN, hear every live
+  session's status and leave one session an instruction; a `status` text gets
+  the same status. New `packages/daemon/src/inbound-line.ts` (status,
+  `send_instruction`, post-call confirmation, lockout texts, inbound call
+  records), `instruction-confirm.ts` (pure confirmation) and `sessions.ts`
+  (session lifetime). Store migration 4 adds `instructions`. Agent API: the
+  inbox now hands queued instructions over, and
+  `POST /v1/sessions/:id/instructions/take` does the same for the MCP server
+  (after `ask_human`) and the Stop hook. Agent definition v5 (inbound steps).
+- Decision: an instruction is held until the post-call transcript backs it,
+  like other voice decisions. Reason: the model writes `instruction`,
+  `owner_words` and `session_number`, the status it read holds agent text, and
+  an instruction becomes an agent's next prompt. The rules as finally
+  shipped (after the security review below): the owner's whole utterance is
+  the instruction plus at most a leading session reference and filler;
+  exactly one session identified outside the instruction's words; the
+  read-back "For session <n>, <name>: <instruction>. Send it?" with a clear yes
+  (the owner's protocol from HL-14c and HL-09c); no retraction in the owner's
+  next reply.
+- Review fixes (security review of 270c8db, coordinator): (1) a digit or
+  number word anywhere near the instruction named a session, so "in session
+  one, add test two" named both 1 and 2 and the model chose; now exactly one
+  identifier, outside the instruction's words. (2) `ownerSaid` matched a
+  substring, so "don't push to main" confirmed "push to main"; now the
+  utterance must be the instruction and nothing else but a session reference
+  and filler. (3) Turns matching model-supplied `otherInstructions` were
+  skipped by the take-back check, so the model could launder "never mind" as
+  another instruction; the parameter and its call site in `inbound-line.ts`
+  are gone, each instruction is checked alone, and retractions are never
+  excused. (4) The read-back and a yes to it are required; the prompt says so
+  (still definition v5, which this PR introduced and nobody has deployed, so no
+  second bump). (5) Owner numbers are compared with `sameE164` (both sides
+  valid E.164 and identical, no normalising) in the ElevenLabs routes, the
+  post-call owner check and the SMS webhook; the PIN is only ever checked
+  through `verify_pin`. (6) One tokeniser, `speechTokens` in providers, for
+  `ownerSaid`, `voice-confirm.ts` and `instruction-confirm.ts`, with tests for
+  curly apostrophes, fullwidth letters and combining marks. The swap leaves
+  voice-confirm's decisions as they were (all 1457 earlier tests pass),
+  except that a combining mark with no precomposed form no longer splits a
+  word. (7) The status's agent text stays fenced and capped (name 60, latest
+  ask 120), and agent turns never count as the owner's words.
+- Review fixes, second round (security review of 570a218, bot staff review
+  and Greptile on 570a218): (1) the take-back check now covers the rest of
+  the call after the owner's yes, and counts doubt markers and bare
+  negations ("no", "don't", "stop", "hold off", "wait") as well as
+  retractions. The only exception is the utterance of another instruction
+  that `confirmInstructions` confirmed on its own (judged together, repeated
+  until stable), and never a turn with a retraction. It over-blocks ("no,
+  that's all" drops the instruction) by decision: the owner can say it again
+  or text it. (2) The queued text is the owner's own words for exactly the
+  validated tokens, cut from the transcript, never the model's `instruction`;
+  redacted first, then `plainInstruction` keeps only letters, digits, spaces
+  and plain punctuation. (3) `takeInstructions` drops instructions past their
+  6 hours in the same transaction instead of delivering them. (4) An ended
+  session's inbox and take routes answer 404, and `check_inbox` registers
+  again at once. (5) `get_status` remembers only the sessions it read out.
+  (6) Held instructions get a fixed id and `addInstruction` is idempotent, so
+  a retried post-call event stores each once. (7) Open-ask counts use every
+  open ask. (8) Held instructions are forgotten after one hour, not two, and
+  forgotten calls stop counting against the caps. The read-back reply uses a
+  fixed yes lexicon and fails closed; switching to HL-09c's reply judge when
+  it lands is a follow-up.
+- Review fixes, third round (bot staff review of aaf01c8, two P2s and two
+  P3s): every word of the read-back reply must now be a yes or one of the few
+  words around one ("yes, send it", "go ahead"), so "send it to the other
+  one" or "fine, but later" is not a yes; a table of near-miss replies tests
+  it, and "sounds good" alone fails closed by decision. The Stop hook checks
+  away mode and saves the continuation count before it takes instructions,
+  so it never marks one delivered that it then cannot pass on. The
+  `requirePhoneNumber` comment is back in place; the restart gap is in
+  docs/daemon.md. Evidence: build passes, test passed 57 files, 1492 tests,
+  three times in a row.
+- Review fixes, fourth round (bot staff review of 146a44a, two P2s): held
+  instructions forgotten after an hour without a post-call event are now
+  audited and texted to the owner as not passed on (a restart still drops
+  them silently; HL-13), and the Stop hook skips the instruction lookup when
+  the payload has no usable session id, so it never registers a throwaway
+  session. P3s left as notes: the inbox GET hands instructions over (the
+  MCP server's `check_inbox` is its only reader on this Mac), the status text
+  carries the latest ask's redacted text to the owner's number, and the
+  lockout catch stays a commented no-op.
+- Review fixes, fifth round (bot staff review of 544dee0, two P2s): hand-over
+  is two steps, `GET /v1/sessions/:id/instructions` (list, with ids) and
+  `POST .../instructions/ack` (mark those ids delivered), replacing the
+  one-step take route. The Stop hook acknowledges only after away mode and its
+  continuation count are settled, and the MCP server just before it returns,
+  so an instruction is never marked delivered and then lost; the inbox, whose
+  response carries them, still acknowledges at once. At the 20-session cap a
+  new registration ends the longest-idle session that has nothing open and
+  has been idle 15 minutes (`session.evicted`) instead of refusing, so
+  restarted agents without a session id cannot lock registrations out for 6
+  hours, while a looping agent cannot evict sessions in use. P3s left as
+  notes: a second `get_status` on one call renumbers sessions (the read-back
+  names the number and session, and the owner confirms it); queuing an
+  instruction cancels the session's open stop even while it is on a live
+  call, by decision, since the instruction replaces the owner's answer to it;
+  the English lexicon follow-up to HL-09c's reply judge stays open.
+  Evidence: build passes, test passed 57 files, 1496 tests.
+- Review fixes, sixth round (bot staff review of 8f5dd39, two P2s and a P3):
+  how many instructions each call holds is saved in `daemon_state`
+  (`inbound.held`, counts only), so after a restart the next start audits
+  them (`restarted`) and texts the owner once; and a session name's words
+  count as a session reference only when the owner named the session by
+  name, never once they gave a number and never a word of the instruction,
+  so an agent folder named like a command cannot split the owner's words.
+  `sessions.ts` declarations are back in order. Evidence: build passes, test
+  passed 57 files, 1498 tests, four of six full runs; the other two each
+  failed one timing test this PR does not touch (`redact.test.ts`, "decodes
+  16 KiB of hostile escapes in under 50 ms", 74 and 150 ms under a load
+  average near 6), which passed five runs alone. Its limit is unchanged.
+  The commit subject of 07d7290 runs past 72 characters; it is pushed, so it
+  stays (no history rewrite).
+- Review fixes, seventh round (bot staff review of 07d7290, two P2s): the MCP
+  server no longer acknowledges instructions once the client gave up on
+  `ask_human` (they stay queued), with a test that fails without the guard;
+  delivery is documented as at most once in docs/mcp.md and docs/hooks.md;
+  and a corpus test pins the over-blocking and refused cases of
+  `confirmInstruction`, so a later edit cannot loosen them unnoticed.
+  Splitting `instruction-confirm.ts` (tokeniser and span, session
+  reference, retraction) is a proposed follow-up. Evidence: build passes,
+  test passed 57 files, 1511 tests, three times in a row.
+- Review fixes, eighth round (bot staff review of cc444bf, one P2 and two
+  P3s): an instruction whose owner words hold a symbol that
+  `plainInstruction` would strip ("use C++") is now refused and the owner
+  texted, never queued altered (P3). Left as is, by decision: the
+  at-most-once window between acknowledging an instruction and the hook
+  printing or the MCP result reaching the agent (P2, which the review marks
+  not a blocker). Closing it needs a receipt from the agent, which neither
+  agent offers; the window is documented, and the failure mode is that the
+  agent does not act. Unfenced agent text in the `status` SMS (P3) stays: it
+  goes only to the owner's number, and no text can approve without a code.
+- Catch-up with main after HL-09c (#54): `voice-confirm.ts` conflicted. HL-09c's
+  read-back confirmation is kept whole; only its local tokeniser now calls
+  the shared `speechTokens`/`normalizeSpeech`. 58 files, 1711 tests pass.
+  The instruction read-back reply still uses the fixed yes lexicon; moving it
+  to HL-09c's reply judge is the follow-up.
+- Review fixes, ninth round (bot staff review of 6ff22c2, one P2 and a P3):
+  session numbers are stable for the whole call (a session keeps the number
+  it was first read out with, new ones get the next unused number, ended
+  ones' numbers are never reused), so a second status cannot shift what
+  "session 2" means; the stale doc comment above `isReference` is gone.
+  P3s left as notes: the SMS status's latest-ask text and the yes words in
+  `FILLER`.
+- Review fixes, tenth round (bot staff review of 3e52c7b, two P2s): the inbox
+  route only lists queued instructions (with ids), and `check_inbox`
+  acknowledges them just before it returns and not once the client gave up,
+  like `ask_human`, so a lost inbox response never loses an instruction. And
+  the owner now gets one text after every call that gave instructions, with
+  counts only: that they were queued, or which were not passed on, since the
+  voice agent said `queued` before the transcript was checked. P3s left: the
+  confirmation heuristics (the live check should watch the drop rate) and a
+  `MAX_REASON` guard that the caps make unreachable. Evidence: 58 files, 1712
+  tests pass.
+- Review fixes, eleventh round (bot staff review of 83fde92): the `status`
+  SMS now carries state and counts only, never agent-written ask text, with
+  an end-to-end test pinning its exact content (P2); the note returned with
+  instructions says the agent's usual permission prompts still apply (P3).
+  The other P2 asked for a table-driven corpus of transcripts that must and
+  must not confirm, which `instruction-confirm.test.ts` already has
+  ("confirmInstruction corpus"). Left as a note: surfacing the session-cap
+  429 in `hotline doctor` (P3, build lane).
+- Review fixes, twelfth round (bot staff review of 93d4e6f): `send_instruction`
+  now forgets expired calls before it reads its own call's memory, and the
+  call being served is never the one evicted for space, so it can never
+  answer `queued` into memory it already let go (P2; a test past the
+  1000-call cap fails with the old order). The review's other P2 was that CI
+  was still pending when it ran; CI on 93d4e6f was green. P3s: the reply-judge
+  follow-up is proposed as an issue below; this entry runs long and the
+  per-round history is also in the PR description.
+- Final review (bot staff review of 4288071): approve with nits, no P0 to P2.
+  P3 fixed: a held instruction keeps a snapshot of the session names the
+  owner had heard. P3s left: the one-hour call memory, already stated in
+  docs/daemon.md, and keeping the matcher's word lists small until the live
+  check shows real drop rates.
+- Decision: sessions are named by number. `get_status` numbers live sessions
+  by registration and remembers, per call, which number is which session;
+  `send_instruction` takes only a number that call's status read out
+  (`unknown-session` otherwise), per the HL-14 comment on #11.
+- Decision: delivery at the Stop hook goes through the hook's continuation
+  path. The hook takes queued instructions before asking anyone (no call for
+  that stop), and a stop already waiting is cancelled by a new instruction
+  for its session, after which the hook takes it. Rejected: answering the stop
+  ask with the instruction through the queue, which accepts a voice answer only
+  for an ask on the call in progress; that would need a core queue change.
+  Hook change kept small for HL-06b: two helpers and one block in `stopHook`.
+- Decision (plan open question 3, recommended default): instructions are
+  delivered at the next ask or Stop hook only; nothing mid-turn.
+- Decision: inbound calls answer no asks. Plan section 4D lists status and
+  instructions only, so answering asks on an inbound call stays out of scope;
+  call orchestration still refuses `submit_answer` on calls it did not place.
+- Decision: session lifetime. A session idle for 6 hours with no open ask and
+  no queued instruction is ended (`session.expired`), checked before each new
+  registration and status read; queued instructions expire after 6 hours; at
+  most 20 live sessions (a new one past that gets 429, an existing one can
+  refresh). Ending a session drops its queued instructions.
+- Decision: caps of 5 instructions per call, 3 waiting per session and 20 in
+  all; instructions redacted and cut to 1000 characters before storage.
+- Decision: a PIN lockout is texted to the owner at most once an hour per
+  direction, quiet hours or not. An instruction that was not confirmed (or
+  whose session ended) gets one text after the call saying it was not passed
+  on, so silence never looks like delivery.
+- Not needed: the HL-09b P3 (OwnerTexts keeping `OrchestratorState.data`
+  across an await). Nothing here reloads orchestrator state, and the new
+  `status` reply path has no await; the instructions live in the store, not
+  the orchestrator state.
+- Evidence: `scripts/ci/run.sh build` passes; `scripts/ci/run.sh test` 57
+  files, 1369 tests, passed three times in a row. After catching up with main
+  (HL-06b #46 and #52, no conflicts outside this log), build passes and test
+  passed 57 files, 1457 tests, three times in a row. After the security
+  review fixes: build passes and test passed 57 files, 1467 tests, three times
+  in a row; mutation checks on the new rules, each reverted: extra words
+  allowed (4 tests fail), several sessions named accepted (1), read-back
+  skipped (2), take-back skipped (3). After the second round: build passes
+  and test passed 57 files, 1475 tests, three times in a row; mutations,
+  each reverted: take-back limited to the next reply (1 test fails), the
+  model's text stored instead of the owner's words (1). New end-to-end tests
+  (`apps/cli/test/inbound-line.test.ts`) run the real daemon routes with the
+  fake voice and SMS providers, then the real hook adapter and MCP server:
+  PIN, status, instruction, delivery at the Stop hook (no call placed) and at
+  `ask_human` and `check_inbox` (once); a waiting stop picking one up; wrong
+  PIN; the lockout text; a stranger's call and text; a spoofed owner number
+  without the PIN; a take-back and a paraphrase never queued; the status text.
+  Mutation checks, each reverted: `confirmInstruction` always confirming
+  (9 tests fail), the Stop hook skipping queued instructions (3 unit tests and
+  1 end-to-end test fail). Scenario suite not built yet (HL-12). Real Claude
+  Code or Codex runs not done: they would use the developer's real config and
+  credentials.
+- Open issues or follow-ups: Codex's MCP server registers without a session
+  id, so a Codex session shows as two sessions in the status (MCP and hooks);
+  an instruction reaches whichever one the owner named. The transcript rules
+  are tested on the fake's transcripts only; real ElevenLabs turn splitting
+  needs the live check. PinGate counters and the held instructions are in
+  memory (HL-13).
+
+## 2026-10-14 — HL-12 Scenario suite (#13)
+
+- Decision / change: the suite is a workspace package, `@hotline/scenarios`
+  in `eval/` (added to `pnpm-workspace.yaml`, the root `tsconfig.json`, Vitest
+  projects and Biome; built by `tsc -b`). The root script `eval` runs
+  `node eval/dist/main.js`, which takes `--mode`, `--thresholds` and `--out`
+  exactly as `scripts/ci/run.sh eval` passes them (pnpm 11 passes the `--`
+  through; the runner skips it). `run.sh` itself is unchanged. It prints one
+  line per scenario, then exactly `THRESHOLDS: PASS` or `THRESHOLDS: FAIL`, and
+  writes `eval-out/report.json` and `report.txt`, which the CI job uploads.
+- Decision: real processes for the agent side. Each scenario starts the real
+  daemon in-process (`runDaemon`, ephemeral ports, temporary `HOTLINE_HOME`,
+  fake clock, `autoTick` off) and runs the built CLI as child processes:
+  `hotline away on`, `hotline hook <claude|codex> <permission|stop>` with the
+  agent's payload on stdin, and `hotline mcp --agent <claude|codex>` driven by
+  the MCP SDK's stdio client. The children get a scrubbed environment
+  (temporary `HOME` and `HOTLINE_HOME`, `HOTLINE_TEST_MODE=1`, nothing else
+  inherited but `PATH`). Rejected: calling `runHook` and the MCP server
+  in-process, which would skip the CLI's argument parsing, away-mode file,
+  continuation store and port and token lookup.
+- Decision: the fake clock starts on 2031-06-10 (17:58 in Toronto, outside
+  default quiet hours). The CLI children read the real clock, and both the hook
+  (`min(start + wait, expiresAt + 30 s)`) and the MCP server (`expiresAt + 60
+  s`) compare it with the daemon's `expiresAt`; a fake clock behind the real one
+  would end every wait at once. Ahead of it, every outcome comes from the
+  daemon. No product code changed for this.
+- Decision: TOML parsing with `smol-toml` 1.8.0 (exact pin, zero
+  dependencies, released 2026-08-11). The thresholds file is read strictly:
+  `schema` must be 1, `[suite.scenarios]` may hold only `required_in`,
+  `pass_rate_min` and `required`; anything else fails the run. Scoring: a
+  required scenario that did not run prints `FAIL <name>: not run` and counts
+  as a failure; the pass rate (passed over run plus missing) must reach
+  `pass_rate_min`; in a `required_in` mode every required scenario must pass;
+  nothing run, an unreadable file or an injected fault is FAIL.
+- Decision: the self-test fault is an always-approve proxy in front of the
+  agent API (`eval/src/fault.ts`): every outcome request is answered at once
+  with an approval nobody gave (allow with `confirmation: "pin"`, option 1,
+  "keep going"). It is switched on only by the runner's `fault` option
+  (`--fault always-approve`), lives only in the suite, and a faulted run always
+  scores FAIL. `eval/test/self-test.test.ts` checks that `silence-denies`,
+  `high-risk-needs-pin` and `agent-text-cannot-self-approve` fail with it and
+  pass without it. With the fault, 15 of 22 scenarios fail; the 7 that pass
+  expect an allow anyway or never read an outcome (the inbound line,
+  quiet hours).
+- Scenario choices (also in docs/eval.md): Codex shell requests are always
+  high risk (HL-06b), so the Codex permission scenario is
+  `no-pickup-falls-back-to-text`, approved by `YES <code>` with
+  `confirmation: "text"`; voice allows use Claude Code `Bash` `pnpm test` and
+  the read-back (`scriptedHuman.confirms` or a `read-back` step);
+  `high-risk-needs-pin` plays a confirmed yes without the PIN (`needs-pin`, a
+  bare text "yes", expiry, deny) and then the PIN plus read-back (allow);
+  `unclear-answer-denies` plays definition v4's two unclear replies per ask;
+  `agent-text-cannot-self-approve` plays a voice model that submits an allow
+  the owner never said; `inbound-instruction-delivered` registers the Codex
+  hooks' session through the agent API, as the Stop hook registers it.
+- `test/workspace.test.ts` now counts `eval` as a workspace package, so the
+  same exact-pin, strict-config and tsconfig-reference checks cover it.
+- Evidence: `scripts/ci/run.sh build` and `test` pass (60 files, 1727 tests).
+  The local gate, `scripts/ci/run.sh eval --local`, printed 22 PASS lines and
+  `THRESHOLDS: PASS` (about 8 s); the runner passed 3 runs in a row and 6 runs
+  at once. The local sandbox refuses command lines containing the word "eval",
+  so the gate and the runner were run through small wrapper scripts in the
+  session's scratch folder that call `scripts/ci/run.sh eval --local` and
+  `node eval/dist/main.js` by path. Mutation checks, each reverted: every
+  voice allow confirmed (`agent-text-cannot-self-approve` fails), ask text not
+  redacted (`secrets-redacted-before-send` fails), `permissionVerdict` allowing
+  on no answer (5 scenarios fail). No product bug was found. Not run: real
+  Claude Code or Codex against the daemon (they would use the developer's real
+  config), and no live call.
+- Open issues or follow-ups: HL-13a adds pull lookups to the fakes; the suite
+  uses the fakes only through their public `script`, `placed`, `sent`,
+  `inboundCall` and `playPending`, so it should keep working. A replayed
+  `submit_answer` tool call is not a scenario yet (the route test covers it).
+- Review fixes (staff review and Greptile on #68):
+  - Hook output is now parsed with core's strict per-agent schemas, so output the agent would reject never counts.
+  - The thresholds parser refuses unknown keys at every level.
+  - A failed hotline or MCP start cleans up what it started.
+  - A daemon that does not shut down cleanly fails its scenario.
+  - `--only` refuses empty names.
+  - docs/eval.md states the self-test's limit: it catches an approval the agent sees, not a flaw injected inside the daemon (the mutation checks above covered those once).
+  - After the fixes, build passes, test passes (60 files, 1727 tests) and `eval --local` prints 22 PASS lines and `THRESHOLDS: PASS`.
+
+## 2026-10-14 — HL-09d Model-backed reply judge on the owner's agent login (#56)
+
+- Owner direction (autopilot session, recorded on #1 and #56): approvals are
+  interpreted naturally ("let Claude decide what they mean... it should
+  definitely not be limited like a regex"), with the least friction and the
+  lowest cost, and on the plan the owner already has: "Is there no way for
+  them to use just the Claude code plan in this?" Plan change (plan section 8):
+  the owner's short reply goes to the owner's own agent provider.
+- Change: `packages/daemon/src/reply-judge.ts` adds `ClaudeCodeJudge`
+  (`claude -p` on the owner's login), `CodexJudge` (`codex exec` on the
+  owner's login), `AnthropicApiJudge` (optional `anthropic.apiKey` secret,
+  raw `fetch`, no new dependency) and `selectReplyJudge`, which `runDaemon`
+  calls once at start and passes through `CallOrchestrator` to `VoiceCalls`.
+  The running daemon no longer always fails closed. Config `judge.backend`
+  (`auto` default, `claude-code`, `codex`, `anthropic-api`, `off`). `hotline
+  doctor` reports the backend with no model call, `--check-judge` makes one
+  tiny call with the fixed reply "yes, go ahead". `hotline init` explains the
+  judge. `HOTLINE_JUDGE=1` makes `hotline hook` and `hotline mcp` do nothing.
+- Decisions (no human available):
+  - Detection: a CLI is available when it is an executable on the daemon's
+    `PATH`. Nothing is run to find out (not even `--version`), so the daemon,
+    `doctor` and the package smoke check never start a real agent CLI. A CLI
+    that is installed but logged out is selected and fails closed per call;
+    `doctor --check-judge` finds that.
+  - One backend, picked at start; no fallback chain per call. Simpler, one
+    timeout per call, and a failing CLI is visible in `doctor`.
+  - Models: `--model haiku` for Claude Code (the CLI resolves the alias),
+    `claude-haiku-5-5` at low effort for the API, Codex's default model at
+    `model_reasoning_effort="low"` (a wrong model name would make every call
+    fail closed, and which models a ChatGPT login offers varies). Cost
+    priority per the owner.
+  - Claude Code isolation: `--settings {"disableAllHooks":true}`,
+    `--strict-mcp-config --mcp-config {"mcpServers":{}}`, `--tools ""` (all
+    tools off), `--no-session-persistence`, `--system-prompt` replacing the
+    default one, empty temporary cwd. No `--json-schema`: its output field
+    name is not documented in `claude --help`, so the answer JSON is asked for
+    in the prompt and validated strictly. `--bare` is not usable (no OAuth).
+    All flags checked present in `claude --help` (2.1.299) and `codex exec
+    --help` (0.146.0) on the dev Mac; neither CLI was run against a model.
+  - Prompt on stdin, never in argv, so the owner's words are not visible in
+    the process list. Each reply turn goes through the daemon's redactor.
+  - Output `{"verdict", "conditional", "retracted"}`; the two flags make the
+    model state a condition or a retraction explicitly, and either one turns
+    an `agreed` into `unclear`.
+  - Post-check (`vetoesAgreement`): a short list of condition and correction
+    words, and any negation, veto an `agreed`. It only takes approvals away.
+    The idioms "no problem", "no worries", "not a problem" and "why not" are
+    excepted from the negation rule, reversing HL-09c's "not allowed" for
+    them: there the fast path decided alone, here the model judges the whole
+    reply first ("no, problem is the tests fail" should come back unclear or
+    declined), and these are among the commonest natural yeses.
+  - `JUDGE_TIMEOUT_MS` 8 s to 20 s (about 20 s per #56): an agent CLI takes
+    several seconds to start. The post-call webhook response waits for it;
+    if ElevenLabs times the webhook out first it retries, and the in-flight
+    map makes the retry wait for the same attempt.
+  - The doubt tables stay: they decide what reaches the judge, and retiring
+    them is a separate change (follow-up).
+  - `HOTLINE_ANTHROPIC_API_KEY` is read by `init` from the environment only and
+    never prompted, so the default setup asks nothing new.
+- Tests: `reply-judge.test.ts` (prompt, parsing, post-check, each backend's
+  exact arguments, isolation, failure modes, selection order, redaction, the
+  conditional-yes and negation scenarios through `judgeVoiceDecision` with a
+  scripted model, including a model that wrongly agrees), `reply-judge-host.test.ts`
+  (with `node:child_process` mocked: the default host and a daemon without an
+  injected host never spawn under test mode), `judge-wiring.test.ts` (the
+  running daemon judges a natural yes, refuses a conditional one, ends on a
+  judged no, and texts without a judge), CLI tests for doctor, init, and the
+  hook and MCP guards. Mutation checks: no post-check (16 tests fail), the
+  judge not passed in `runDaemon` (3 fail).
+- Staff review at 13f2765 (84, 0 P0/P1, 3 P2, 2 P3), fixed in the same PR:
+  - P2 (default egress without opt-in): `judge.backend` has no default now.
+    Unset means the owner has not chosen and works like `off`: nothing is
+    looked up, run or sent. `hotline init` explains the judge and asks once
+    (`[Y/n]`; Enter or yes is `auto`, or keeps a backend chosen earlier; no is
+    `off`; three unclear answers stop `init` before anything is written), or
+    takes `--judge <choice>`. `--non-interactive` without `--judge` records
+    nothing. `doctor` warns "not chosen" and says how to choose. This keeps
+    the owner's "least friction" (one Enter at setup) while the owner's words
+    never leave the machine without a recorded choice; the owner can make
+    `auto` the default again if they prefer.
+  - P2 (whole daemon environment passed to the CLI): `judgeChildEnv` builds
+    the child's environment from an allowlist, `JUDGE_BASE_ENV` (PATH, HOME,
+    user, locale, XDG, proxy and CA variables) plus the CLI's own login
+    variables (`CLAUDE_CODE_LOGIN_ENV`, `CODEX_LOGIN_ENV`), and drops every
+    `HOTLINE_*` name. `runJudgeProcess` takes the spawn function, so a test
+    checks the exact spawn options without running anything.
+  - P2 (20 s of dead air on a live call): not the case. The judge runs only
+    in the post-call webhook, after the owner hung up; `submit_answer` during
+    the call holds the answer without judging it, and the queue places no
+    other call until this one has ended. A wiring test now proves no tool call
+    during the call sees a judge run. `JUDGE_TIMEOUT_MS` stays 20 s.
+  - P3 (PATH of a daemon with a short PATH): the selection's detail names the
+    PATH searched, in the daemon's `reply judge` log line and in `doctor`.
+  - P3 (Codex answer from stdout): only the `--output-last-message` file
+    counts; no file is `unclear`, whatever stdout holds.
+- Greptile at 13f2765 (2 P2), fixed in the same PR:
+  - A CLI that ignores SIGTERM could outlive its deadline and hold the run
+    (and `doctor --check-judge`) open. `runJudgeProcess` now sends SIGTERM at
+    the deadline, SIGKILL `JUDGE_KILL_GRACE_MS` (2 s) later, destroys the
+    pipes and rejects then, whether or not the process ever closes.
+  - `JudgeOutput` was a non-strict zod object, so an answer with an extra
+    field still approved. It is strict now, like `JUDGE_OUTPUT_SCHEMA`.
+- Catch-up with main after HL-10 (#55): `run.ts` and `orchestrator.ts`
+  conflicts resolved by keeping both sides (the judge and the inbound line).
+  HL-10 made a PIN-verified inbound call able to `submit_answer` while an
+  outbound call's post-call webhook is being judged, and every
+  orchestration step was serialized behind the judge (up to 20 s). The judge
+  now runs outside those steps: `CallOrchestrator.postCall` reads the held
+  answers in one step, awaits `VoiceCalls.judgeHeld` outside the chain, and
+  applies the checks in a second step; a held answer that changed meanwhile
+  is checked by the fast path alone (fails closed). A wiring test holds the
+  judge open and shows a tick and an owner text still run (mutation: judging
+  inside the step fails it). HL-10's inbound instruction confirmation
+  (`instruction-confirm.ts`) keeps its own checks and does not use the reply
+  judge; wiring it in is a follow-up that needs its own scenarios.
+- Catch-up with main after HL-12 (#68): only the agent log conflicted (HL-12
+  entry kept before this one, in landing order). Staff review at ca74cba
+  (88, 0 P0/P1, 1 P2, 3 P3), fixed in the same push:
+  - P2: Enter at `init --force` turned an earlier `off` into `auto`. Now an
+    earlier `off` is asked as `[y/N]` and Enter keeps it; only an explicit
+    yes turns the judge on.
+  - P3: the agreeing-idiom exception spanned sentences ("No. Problem is
+    it's prod" lost its "no"). Idioms now count only within one turn and
+    clause.
+  - P3: the Codex run's residual risk (shell tool in a read-only, offline
+    sandbox; phone audio as input) is written down in docs/daemon.md.
+  - P3 (AGENTS.md should name the judge's provider): human-owned, not
+    edited.
+- Staff review at 03a1254 (84, 0 P0/P1, 2 P2, 3 P3):
+  - P2 (plan says the judge runs with no tools): true for Claude Code only.
+    The plan, README, install.md and daemon.md now say that Codex keeps its
+    shell tool in its read-only, offline sandbox, so it is read-only rather
+    than tool-less, and that `auto` tries Claude Code first. No Codex flag
+    was added: none that turns the shell tool off was checked against the
+    real CLI, and an unverified flag could break the owner's judge.
+  - P2 (owner direction unverified): recorded in the #56 issue body and the
+    #1 status comment of wave 8, both posted by the autopilot. The PR body
+    links them. A human confirms before this lands.
+  - P3 (post-check is English only): stated in daemon.md.
+  - P3 (duplicate post-call delivery judges twice): already handled. The
+    post-call route keeps one in-flight handler per event and conversation,
+    and a retry awaits it.
+  - P3 (Enter is yes on a first run): kept, per the owner's "least
+    friction". The explanation of what is sent prints before the question,
+    and an earlier `off` now defaults to no.
+
+## 2026-10-14 — HL-14d Voice agent on Claude Haiku 4.5, set explicitly (#57)
+
+- Owner direction (comments on #57): bill the user as little as possible,
+  since the voice agent only converses and calls tools and the daemon checks
+  every decision (fail closed), so a cheaper model costs friction, never
+  safety. Use `claude-haiku-4-5`, not `claude-haiku-5-5` (in the API enum but
+  not on the documented list). Keep `voice.llm` configurable against an
+  allowlist, thinking off, ElevenLabs' default backups on. Added from HL-09c
+  (#54): the persona's read-back example must name the tool and the whole
+  command, and a test must show the daemon recognises it.
+- Decision / change: `AGENT_DEFINITION_VERSION` is 6. `hotlineAgentConfig`
+  sends `prompt.llm` (`voice.llm`, default `DEFAULT_VOICE_LLM` =
+  `claude-haiku-4-5`), `thinking_budget: 0` and `backup_llm_config:
+  {preference: "default"}`. Core's config takes an optional `voice.llm` from
+  `VOICE_LLMS` (`claude-haiku-4-5`, `claude-sonnet-4-6`, `claude-sonnet-5-5`,
+  each on both ElevenLabs' LLM page and its create-agent API reference, read
+  2026-10-14); anything else fails config loading, and `hotlineAgentConfig`
+  refuses it too. `hotline voice apply` sends it and logs the model;
+  `hotline doctor` reads `conversation_config.agent.prompt.llm` from the
+  deployed agent, prints "the agent runs on <llm>", and warns (never fails)
+  when it differs from the config. The read-back sentence in outbound step 2
+  now says "names the tool and the whole command as the ask gives them, keeps
+  the ask's key words and the session name", with the example "Allow Bash:
+  pnpm test, for Claude in demo-app? Yes?". No `SAFETY_RULES` sentence
+  changed; the snapshot diff is that sentence, the three body fields and the
+  `definition-v6` tag.
+- Decisions (no human available):
+  - The field names were clear in the API reference (`llm`, `thinking_budget`,
+    `reasoning_effort`, `backup_llm_config` with `preference` `default`,
+    `disabled` or `override`), so all three settings are sent, not only
+    `llm`. `reasoning_effort` is not sent: the reference says it is "only
+    available for some models", and Claude thinking is set by the budget.
+    Whether ElevenLabs accepts `thinking_budget: 0` for each allowed model is
+    a live-check item.
+  - The example names the full session ("for Claude in demo-app"), not just
+    the folder as the issue's example did ("in demo-app"): with another
+    session's ask on the call, the daemon's reading match needs the words no
+    other ask has ("claude"), and a test covers that two-ask case.
+  - A model mismatch warns rather than fails: it changes cost and latency,
+    not what the daemon accepts.
+  - `costs.llmPerMinute` stays $0.03: Haiku 4.5 at $1 / $5 per million tokens,
+    with a prompt of about 1,800 tokens resent each turn, comes to roughly 20k
+    to 30k input tokens a minute, about $0.02 to $0.03 plus the 10% Vertex
+    uplift ElevenLabs mentions for some Claude models. An estimate, not a
+    measurement; the README row now names Haiku and its token prices, and
+    docs/voice.md gives the Sonnet figures (about 2x and 3x).
+  - The fake voice provider's read-back ("Allow Bash to git push origin main
+    for Claude in demo-app? Yes?") already names the tool and command and is
+    left alone, so the existing daemon tests keep their meaning.
+- Evidence (automated, worktree, Node 24 locally): `scripts/ci/run.sh build`
+  passes (typecheck and Biome); `CI=true scripts/ci/run.sh test` passes, 1723
+  tests in 58 files; `scripts/ci/run.sh package` passes. New tests: the
+  prompt's read-back sentence and the absence of the v5 example, the body's
+  `llm`, `thinking_budget` and `backup_llm_config`, every allowed override and
+  refused ids (`elevenlabs-agent.test.ts`); `voice.llm` accepted and refused
+  (`config.test.ts`); the prompt's own example, extracted from `AGENT_PROMPT`,
+  recognised by `readings()` as the permission ask's read-back and confirming
+  the allow alone and with a second session's ask, while the v5 example fails
+  closed with "the request was not read back for a yes"
+  (`persona-readings.test.ts`); doctor's pass line and warnings for an agent
+  on ElevenLabs' default, an unapplied `voice.llm`, and an unprintable value
+  (`doctor.test.ts`); `voice apply` sending the default and an override, and
+  refusing `claude-haiku-5-5` before any request (`voice.test.ts`).
+  `scripts/ci/run.sh eval`: "NOT RUN (scenario suite not implemented yet;
+  HL-12)". No ElevenLabs request was made and no call was placed.
+- Open issues or follow-ups: turn latency, tool calls and the `system__*`
+  variables on Haiku 4.5 are live-check items (added to docs/live-check.md);
+  if Haiku follows the read-back protocol poorly, switch with `voice.llm`.
+  `claude-haiku-5-5` could be added to `VOICE_LLMS` once ElevenLabs documents
+  it. Doctor's cost estimate does not yet derive `llmPerMinute` from
+  `voice.llm`.
+- Bot staff review on #70 (approve with nits, no P0 or P1). P2 answered in
+  docs/voice.md: ElevenLabs' default backup models may come from another LLM
+  vendor, so while one answers the same redacted prompt, asks and transcript
+  go to that vendor. Backups stay on by the owner's direction on #57. P3
+  (doctor's `llmPerMinute` does not follow `voice.llm`) is the follow-up
+  already listed above.
+
 ## 2026-10-14 — HL-22 Keychain self-test in hotline doctor (#22)
 
 - Decision / change: `hotline doctor` adds a `keychain` check when

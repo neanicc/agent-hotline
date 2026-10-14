@@ -146,7 +146,7 @@ hotline away on
 
 Ask Codex (or Claude Code) for a task that needs a command approval, such as
 running the tests. When the phone rings, say "yeah, go for it". The voice reads
-the request back in one short sentence ("Allow pnpm test in demo-app? Yes?");
+the request back in one short sentence ("Allow Bash: pnpm test, for Claude in demo-app? Yes?");
 say "yes", and the command runs. For a second request, say "nope": it is denied
 at once, with no read-back.
 
@@ -169,10 +169,11 @@ turn with that instruction. Say "that's it" on a later call to let it stop.
 
 ## Not in the demo yet
 
-Calling the hotline yourself to hear every agent's status (HL-10) is not built
-yet. Until it lands, an inbound call asks for the PIN but cannot read status.
-Add that scene once the inbound line is merged and recorded in the
-[live check](live-check.md).
+Calling the hotline yourself (HL-10) is built and tested against fakes only:
+the PIN, the numbered status, and an instruction read back ("For session 1,
+Claude in demo-app: run the tests. Send it?") that reaches the agent at its
+next ask or Stop hook. Add that scene once a live call has been recorded in
+the [live check](live-check.md).
 
 ## After recording
 

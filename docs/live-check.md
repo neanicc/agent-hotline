@@ -44,6 +44,25 @@ Never fabricate an entry; "not tested" is a valid result.
   approved. If a real read-back of a long request is not recognised
   (`voice.answer-unconfirmed`, "the request was not read back for a yes"),
   note the read-back's words.
+- Voice model (definition v6, HL-14d): `hotline voice apply` succeeds (if
+  ElevenLabs refuses the agent body, note the HTTP status: `thinking_budget: 0`
+  or `backup_llm_config` are the new fields), and `hotline doctor` says "the
+  agent runs on claude-haiku-4-5". In the ElevenLabs dashboard, the agent's
+  LLM is Claude Haiku 4.5, thinking is off and backup LLMs are on the default.
+  On a call, measure turn latency: the time from the end of your answer to the
+  start of the agent's reply, for three or four turns; note it. Confirm the
+  webhook tools work on this model: `submit_answer` records an answer (the
+  agent continues), `verify_pin` checks a PIN on a high-risk ask and on a call
+  you place, and `get_status` and `send_instruction` work on a call you place.
+  Confirm the `system__caller_id`, `system__called_number` and
+  `system__conversation_id` variables reach the daemon: each tool call has a
+  `voice tool` line in the daemon log and none is refused with a 403 (a
+  missing or wrong binding fails the call closed). Read a permission
+  read-back aloud: it names the tool and the whole command ("Allow Bash: pnpm
+  test, for Claude in demo-app? Yes?"), and your yes approves it. If latency
+  is poor, or the agent often rewords asks, misses read-backs or calls a tool
+  wrongly, try `{"voice": {"llm": "claude-sonnet-5-5"}}`, `hotline voice
+  apply`, and repeat; record both.
 - Claude Code: ask it to "use ask_human to ask me which color to use, then
   continue". Answer by voice; check the session continues with your answer.
 - Codex: `hotline away on`, give it a task that needs a command approval. Approve

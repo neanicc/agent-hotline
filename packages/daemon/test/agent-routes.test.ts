@@ -11,6 +11,7 @@ import {
   type HotlineStore,
   INBOX_ASK_LIMIT,
   type InboxResponse,
+  MAX_LIVE_SESSIONS,
   MAX_OPEN_ASKS,
   MAX_OPEN_ASKS_TOTAL,
   type OutcomeResponse,
@@ -122,6 +123,8 @@ describe("agent API routes", () => {
       ["GET", "/v1/asks/id-1/outcome"],
       ["POST", "/v1/asks/id-1/cancel"],
       ["POST", "/v1/sessions/id-1/end"],
+      ["GET", "/v1/sessions/id-1/instructions"],
+      ["POST", "/v1/sessions/id-1/instructions/ack"],
     ] as const) {
       expect((await api(daemon, method, path, method === "POST" ? {} : undefined, "")).status).toBe(401);
       expect(
@@ -546,6 +549,220 @@ describe("agent API routes", () => {
     const { ask: created } = await ask(daemon, session.id, { kind: "question", text: "Color?" });
     expect((await api(daemon, "GET", `/v1/asks/${created.id}/outcome?waitSeconds=31`)).status).toBe(400);
     expect((await api(daemon, "GET", "/v1/asks/nope/outcome")).status).toBe(404);
+  });
+});
+
+/** An instruction as the inbound line stores it once the post-call transcript confirmed it. */
+function instruct(store: HotlineStore, sessionId: string, text: string, at = now) {
+  store.addInstruction({
+    id: `instruction-${++ids}`,
+    sessionId,
+    text,
+    ownerExcerpt: `session one, ${text}`,
+    sourceId: "conversation-1",
+    channel: "voice",
+    receivedAt: at.toISOString(),
+    status: "queued",
+  });
+}
+
+describe("owner instructions (HL-10)", () => {
+  it("list queued instructions without handing them over, and hand over only what is acknowledged, once", async () => {
+    const daemon = await start();
+    const session = await register(daemon);
+    const other = await register(daemon, { cwd: "/work/other" });
+    instruct(daemon.store, session.id, "run the tests");
+    now = new Date(START.getTime() + 1000);
+    instruct(daemon.store, session.id, "then open a PR");
+    instruct(daemon.store, other.id, "rebase on main");
+    const peek = await api(daemon, "GET", `/v1/sessions/${session.id}/instructions`);
+    const listed = (peek.json as { instructions: { id: string; text: string }[] }).instructions;
+    expect(listed.map((i) => i.text)).toEqual(["run the tests", "then open a PR"]);
+    // A peek changes nothing; an unacknowledged instruction stays queued.
+    expect(daemon.store.listInstructions({ status: "queued" })).toHaveLength(3);
+    const ids = listed.map((i) => i.id);
+    const acked = await api(daemon, "POST", `/v1/sessions/${session.id}/instructions/ack`, {
+      via: "stop",
+      ids,
+    });
+    expect(acked.json).toEqual({
+      instructions: [
+        { text: "run the tests", receivedAt: START.toISOString() },
+        { text: "then open a PR", receivedAt: now.toISOString() },
+      ],
+    });
+    // Once only, and only this session's: another session's id is never acknowledged here.
+    const otherId = daemon.store.listInstructions({ sessionId: other.id })[0]?.id ?? "";
+    expect(
+      (
+        await api(daemon, "POST", `/v1/sessions/${session.id}/instructions/ack`, {
+          via: "ask",
+          ids: [...ids, otherId],
+        })
+      ).json,
+    ).toEqual({ instructions: [] });
+    // The inbox lists them with ids but hands nothing over: reading it twice shows them twice.
+    const inbox = (await api(daemon, "GET", `/v1/sessions/${other.id}/inbox`)).json as InboxResponse;
+    expect(inbox.instructions.map((i) => i.text)).toEqual(["rebase on main"]);
+    const again = (await api(daemon, "GET", `/v1/sessions/${other.id}/inbox`)).json as InboxResponse;
+    expect(again.instructions).toEqual(inbox.instructions);
+    await api(daemon, "POST", `/v1/sessions/${other.id}/instructions/ack`, {
+      via: "inbox",
+      ids: inbox.instructions.map((i) => i.id),
+    });
+    expect(
+      ((await api(daemon, "GET", `/v1/sessions/${other.id}/inbox`)).json as InboxResponse).instructions,
+    ).toEqual([]);
+    expect(daemon.store.listInstructions().map((i) => [i.text, i.status, i.deliveredVia])).toEqual([
+      ["run the tests", "delivered", "stop"],
+      ["then open a PR", "delivered", "stop"],
+      ["rebase on main", "delivered", "inbox"],
+    ]);
+    expect(
+      daemon.store.listAudit({ sessionId: session.id }).filter((e) => e.event === "instruction.delivered"),
+    ).toHaveLength(2);
+  });
+
+  it("refuse a malformed acknowledgement, and an unknown session", async () => {
+    const daemon = await start();
+    const session = await register(daemon);
+    for (const body of [
+      {},
+      { via: "stop" },
+      { via: "stop", ids: [] },
+      { via: "stop", ids: ["a"], extra: 1 },
+    ]) {
+      expect((await api(daemon, "POST", `/v1/sessions/${session.id}/instructions/ack`, body)).status).toBe(
+        400,
+      );
+    }
+    expect(
+      (await api(daemon, "POST", "/v1/sessions/nope/instructions/ack", { via: "stop", ids: ["a"] })).status,
+    ).toBe(404);
+    expect((await api(daemon, "GET", "/v1/sessions/nope/instructions")).status).toBe(404);
+  });
+
+  it("drop a session's queued instructions when it ends", async () => {
+    const daemon = await start();
+    const session = await register(daemon);
+    instruct(daemon.store, session.id, "run the tests");
+    await api(daemon, "POST", `/v1/sessions/${session.id}/end`, {});
+    expect(daemon.store.listInstructions()[0]).toMatchObject({
+      status: "dropped",
+      dropReason: "session-ended",
+    });
+    // An ended session is unknown to its readers, so their client registers again.
+    expect((await api(daemon, "GET", `/v1/sessions/${session.id}/instructions`)).status).toBe(404);
+    expect((await api(daemon, "GET", `/v1/sessions/${session.id}/inbox`)).status).toBe(404);
+  });
+
+  it("never hand over an instruction past its six hours, even to a session that keeps reading", async () => {
+    const daemon = await start();
+    const session = await register(daemon);
+    instruct(daemon.store, session.id, "run the tests");
+    now = new Date(START.getTime() + 6 * 60 * 60 * 1000 + 1000);
+    instruct(daemon.store, session.id, "then open a PR");
+    const peek = await api(daemon, "GET", `/v1/sessions/${session.id}/instructions`);
+    const listed = (peek.json as { instructions: { id: string; text: string }[] }).instructions;
+    expect(listed.map((i) => i.text)).toEqual(["then open a PR"]);
+    // An expired id is never acknowledged, even if a reader still holds it.
+    const stale = daemon.store.listInstructions()[0]?.id ?? "";
+    const acked = await api(daemon, "POST", `/v1/sessions/${session.id}/instructions/ack`, {
+      via: "stop",
+      ids: [stale, ...listed.map((i) => i.id)],
+    });
+    expect((acked.json as { instructions: { text: string }[] }).instructions.map((i) => i.text)).toEqual([
+      "then open a PR",
+    ]);
+    expect(daemon.store.listInstructions().map((i) => [i.text, i.status, i.dropReason])).toEqual([
+      ["run the tests", "dropped", "expired"],
+      ["then open a PR", "delivered", undefined],
+    ]);
+  });
+
+  it("store an instruction once by id, so a retried webhook cannot queue it twice", async () => {
+    const daemon = await start();
+    const session = await register(daemon);
+    const record = {
+      id: "instruction-fixed",
+      sessionId: session.id,
+      text: "run the tests",
+      ownerExcerpt: "session one, run the tests",
+      sourceId: "conversation-1",
+      channel: "voice" as const,
+      receivedAt: now.toISOString(),
+      status: "queued" as const,
+    };
+    expect(daemon.store.addInstruction(record)).toBe(true);
+    expect(daemon.store.addInstruction({ ...record, text: "something else" })).toBe(false);
+    expect(daemon.store.listInstructions().map((i) => i.text)).toEqual(["run the tests"]);
+  });
+});
+
+describe("session lifetime (HL-10)", () => {
+  const HOUR = 60 * 60 * 1000;
+
+  it("end sessions nobody heard from in six hours, unless they have an open ask or a queued instruction", async () => {
+    const daemon = await start();
+    const idle = await register(daemon);
+    const asking = await register(daemon, { cwd: "/work/asking" });
+    const instructed = await register(daemon, { cwd: "/work/instructed" });
+    await ask(daemon, asking.id, { kind: "question", text: "Color?" });
+    instruct(daemon.store, instructed.id, "run the tests");
+    now = new Date(START.getTime() + 6 * HOUR - 1000);
+    await register(daemon, { cwd: "/work/new-1" });
+    expect(daemon.store.getSession(idle.id)?.state).not.toBe("ended");
+    now = new Date(START.getTime() + 6 * HOUR);
+    await register(daemon, { cwd: "/work/new-2" });
+    expect(daemon.store.getSession(idle.id)?.state).toBe("ended");
+    expect(daemon.store.getSession(asking.id)?.state).not.toBe("ended");
+    expect(daemon.store.getSession(instructed.id)?.state).not.toBe("ended");
+    expect(daemon.store.listAudit({ sessionId: idle.id }).map((e) => e.event)).toContain("session.expired");
+    // A queued instruction expires after six hours too; then its session can go.
+    now = new Date(START.getTime() + 12 * HOUR);
+    await register(daemon, { cwd: "/work/new-3" });
+    expect(daemon.store.listInstructions()[0]).toMatchObject({ status: "dropped", dropReason: "expired" });
+    expect(daemon.store.getSession(instructed.id)?.state).toBe("ended");
+  });
+
+  it("refuse a new session past the cap of live sessions, while an existing one can still refresh", async () => {
+    const daemon = await start();
+    const first = await register(daemon, { agentSessionId: "agent-1" });
+    for (let i = 1; i < MAX_LIVE_SESSIONS; i++) await register(daemon, { cwd: `/work/s${i}` });
+    const refused = await api(daemon, "POST", "/v1/sessions", { agent: "codex", cwd: "/work/one-too-many" });
+    expect(refused).toEqual({ status: 429, json: { error: "too many live sessions" } });
+    expect(daemon.store.listAudit().map((e) => e.event)).toContain("session.refused");
+    const refreshed = await register(daemon, { agentSessionId: "agent-1" });
+    expect(refreshed.id).toBe(first.id);
+    // Ending one makes room.
+    await api(daemon, "POST", `/v1/sessions/${first.id}/end`, {});
+    expect((await api(daemon, "POST", "/v1/sessions", { agent: "codex", cwd: "/work/room" })).status).toBe(
+      201,
+    );
+  });
+});
+
+describe("session cap eviction (HL-10)", () => {
+  it("at the cap, ends the longest-idle session with nothing open instead of refusing", async () => {
+    const daemon = await start();
+    const oldest = await register(daemon, { cwd: "/work/killed" });
+    now = new Date(START.getTime() + 1000);
+    const asking = await register(daemon, { cwd: "/work/asking" });
+    await ask(daemon, asking.id, { kind: "question", text: "Color?" });
+    for (let i = 2; i < MAX_LIVE_SESSIONS; i++) await register(daemon, { cwd: `/work/s${i}` });
+    // Not idle long enough yet: refused.
+    now = new Date(START.getTime() + 10 * 60_000);
+    expect((await api(daemon, "POST", "/v1/sessions", { agent: "codex", cwd: "/work/new" })).status).toBe(
+      429,
+    );
+    // Fifteen minutes on, the longest-idle session without an open ask makes room.
+    now = new Date(START.getTime() + 16 * 60_000);
+    expect((await api(daemon, "POST", "/v1/sessions", { agent: "codex", cwd: "/work/new" })).status).toBe(
+      201,
+    );
+    expect(daemon.store.getSession(oldest.id)?.state).toBe("ended");
+    expect(daemon.store.getSession(asking.id)?.state).not.toBe("ended");
+    expect(daemon.store.listAudit({ sessionId: oldest.id }).map((e) => e.event)).toContain("session.evicted");
   });
 });
 

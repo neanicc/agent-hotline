@@ -6,6 +6,7 @@
 // reads neither (fails closed, as designed).
 import type { Decision } from "@hotline/core";
 import {
+  AGENT_PROMPT,
   FakeVoiceProvider,
   type HumanStep,
   parsePostCallEvent,
@@ -308,6 +309,63 @@ describe("the fake voice agent's readings follow the persona and are recognised"
           ownerWords: answer.words,
         }),
       ).toEqual({ confirmed: false, reason: "the ask's reading is not in the transcript" });
+    });
+  });
+});
+
+describe("the persona's own read-back example (HL-14d)", () => {
+  // HL-09c requires a permission read-back to name every command and tool token,
+  // so the example the prompt gives the voice model must pass that check itself.
+  const example = /such as "(Allow [^"]+)"/.exec(AGENT_PROMPT)?.[1] ?? "";
+  const permission: ReadAsk = {
+    text: "pnpm test",
+    nickname: "Claude in demo-app",
+    kind: "permission",
+    toolName: "Bash",
+  };
+  const question: ReadAsk = {
+    text: "Pin the older ONNX runtime or skip the Windows build?",
+    nickname: "Codex in api-server",
+    kind: "question",
+    options: ["Pin ONNX 1.17", "Skip Windows"],
+  };
+
+  /** A call where the agent reads the permission ask, hears a yes, says `readBack`, and the owner says yes. */
+  const call = (readBack: string): TranscriptTurn[] => [
+    {
+      role: "agent",
+      message: "Hey, it's your hotline. One of your agents needs you for a sec. Got a moment?",
+    },
+    { role: "owner", message: "sure" },
+    { role: "agent", message: "Claude in demo-app wants to run Bash: pnpm test." },
+    { role: "owner", message: "yeah, go for it" },
+    { role: "agent", message: readBack },
+    { role: "owner", message: "yes" },
+  ];
+  const confirmAllow = (transcript: TranscriptTurn[], asks: readonly ReadAsk[]) =>
+    confirmVoiceDecision({ transcript, asks, index: 0, decision: { type: "allow" }, ownerWords: "yes" });
+
+  it("names the tool and the whole command in one short sentence", () => {
+    expect(example).toBe("Allow Bash: pnpm test, for Claude in demo-app? Yes?");
+  });
+
+  it("is recognised as the read-back of a permission ask, so the yes to it confirms the allow", () => {
+    const transcript = call(example);
+    expect(readings(transcript, [permission])[4]).toBe(0);
+    expect(confirmAllow(transcript, [permission])).toEqual({ confirmed: true, excerpt: "yes" });
+  });
+
+  it("is still recognised with another session's ask on the same call", () => {
+    const transcript = call(example);
+    expect(readings(transcript, [permission, question])[4]).toBe(0);
+    expect(confirmAllow(transcript, [permission, question])).toEqual({ confirmed: true, excerpt: "yes" });
+  });
+
+  it("would fail closed in the v5 form, which left out the tool", () => {
+    const old = call("Allow pnpm test in demo-app? Yes?");
+    expect(confirmAllow(old, [permission])).toEqual({
+      confirmed: false,
+      reason: "the request was not read back for a yes",
     });
   });
 });

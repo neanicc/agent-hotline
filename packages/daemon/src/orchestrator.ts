@@ -52,6 +52,7 @@ import { OwnerTexts } from "./orchestrator-texts.js";
 import { VoiceCalls } from "./orchestrator-voice.js";
 import type { OwnerSms } from "./sms-webhook.js";
 import type { HotlineStore } from "./store.js";
+import type { ReplyJudge } from "./voice-confirm.js";
 
 export { ORCHESTRATOR_STATE_KEY, type OrchestratorLog, RATE_STATE_KEY } from "./orchestrator-state.js";
 export { CALL_CENTS_PER_MINUTE } from "./orchestrator-voice.js";
@@ -83,6 +84,15 @@ export interface CallOrchestratorOptions {
   newCode?: () => string;
   /** How long `stop` waits for the step in progress; default `STOP_WAIT_MS`. */
   stopWaitMs?: number;
+  /**
+   * Judges an owner's reply to a read-back that the fast path could not
+   * decide (HL-09d: `selectReplyJudge` in run.ts). Default `FailClosedJudge`.
+   */
+  judge?: ReplyJudge;
+  /** How long to wait for `judge`; default `JUDGE_TIMEOUT_MS`. */
+  judgeTimeoutMs?: number;
+  /** The reply to the owner's `status` text (the inbound line's `statusText`). */
+  status?: () => string;
 }
 
 export class CallOrchestrator {
@@ -113,6 +123,8 @@ export class CallOrchestrator {
       ...(options.voice === undefined ? {} : { voice: options.voice }),
       log,
       process: processEvent,
+      ...(options.judge === undefined ? {} : { judge: options.judge }),
+      ...(options.judgeTimeoutMs === undefined ? {} : { judgeTimeoutMs: options.judgeTimeoutMs }),
     });
     this.#texts = new OwnerTexts({
       store: options.store,
@@ -121,6 +133,7 @@ export class CallOrchestrator {
       ...(options.sms === undefined ? {} : { sms: options.sms }),
       redact: options.redact,
       ...(options.newCode === undefined ? {} : { newCode: options.newCode }),
+      ...(options.status === undefined ? {} : { status: options.status }),
       log,
       process: processEvent,
     });
@@ -221,9 +234,18 @@ export class CallOrchestrator {
     return this.#run(async () => this.#voice.submitAnswer(answer));
   }
 
-  /** A verified post-call webhook; see `VoiceCalls.postCall`. */
-  postCall(event: Exclude<PostCallEvent, { type: "other" }>, receivedAt: Date): Promise<void> {
-    return this.#run(() => this.#voice.postCall(event, receivedAt));
+  /**
+   * A verified post-call webhook; see `VoiceCalls.postCall`. The held answers
+   * are read in turn with the other steps, the reply judge runs outside them
+   * (`VoiceCalls.judgeHeld`), and its checks are applied in turn again: a slow
+   * judge never holds a tool call on another call, a text or a tick.
+   */
+  async postCall(event: Exclude<PostCallEvent, { type: "other" }>, receivedAt: Date): Promise<void> {
+    // `judgeHeld` reads the held answers before its first await, so inside this step.
+    const { judging } = await this.#run(async () => ({ judging: this.#voice.judgeHeld(event) }));
+    // A failure leaves no checks: `postCall` then uses the fast path alone.
+    const judged = await judging.catch(() => new Map());
+    return this.#run(() => this.#voice.postCall(event, receivedAt, judged));
   }
 
   /**

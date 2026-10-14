@@ -7,7 +7,14 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Answer, Ask, AskOutcome, Session } from "@hotline/core";
-import { createRedactor, type Daemon, generateApiToken, openStore, startDaemon } from "@hotline/daemon";
+import {
+  createRedactor,
+  type Daemon,
+  endSession,
+  generateApiToken,
+  openStore,
+  startDaemon,
+} from "@hotline/daemon";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult, Progress } from "@modelcontextprotocol/sdk/types.js";
@@ -22,7 +29,9 @@ import {
   type HotlineDaemon,
   type HotlineMcpOptions,
   type Inbox,
+  type ListedInstruction,
   type OutcomeState,
+  type OwnerInstruction,
 } from "../src/index.js";
 
 const START = new Date("2026-10-13T21:00:00.000Z");
@@ -402,6 +411,86 @@ describe("hotline MCP server", () => {
     });
   });
 
+  it("hands the owner's queued instructions to the next ask_human result, and only once", async () => {
+    const running = await startTestDaemon();
+    const { mcp } = await connect(clientFor(running.apiPort));
+    const session = await waitFor(() => running.store.listSessions()[0], "the session");
+    // What the inbound line stores once the post-call transcript confirmed it.
+    running.store.addInstruction({
+      id: "instruction-1",
+      sessionId: session.id,
+      text: "use the blue theme everywhere",
+      ownerExcerpt: "session one, use the blue theme everywhere",
+      sourceId: "conversation-9",
+      channel: "voice",
+      receivedAt: now.toISOString(),
+      status: "queued",
+    });
+    const call = mcp.callTool({
+      name: "ask_human",
+      arguments: { question: "Color?", options: ["Red", "Blue"] },
+    });
+    const ask = await pendingAsk(running);
+    running.store.recordAnswer(ownerAnswer(ask.id), now);
+    const result = resultJson(await call);
+    expect(result).toMatchObject({
+      outcome: "answered",
+      choice: { option: 2, text: "Blue" },
+      instructions: [{ text: "use the blue theme everywhere", receivedAt: now.toISOString() }],
+    });
+    expect(running.store.listInstructions()[0]).toMatchObject({ status: "delivered", deliveredVia: "ask" });
+    const inbox = resultJson(await mcp.callTool({ name: "check_inbox", arguments: {} }));
+    expect(inbox.instructions).toEqual([]);
+  });
+
+  it("acknowledges no instruction once the client gave up on ask_human, so it stays queued", async () => {
+    const giveUp = new AbortController();
+    const acked: string[][] = [];
+    class Abandoned extends ScriptedDaemon {
+      override async peekInstructions(): Promise<ListedInstruction[]> {
+        // The client cancels the call just as the instructions are listed.
+        giveUp.abort();
+        return [{ id: "instruction-1", text: "run the tests", receivedAt: START.toISOString() }];
+      }
+      override async ackInstructions(
+        _sessionId: string,
+        ids: readonly string[],
+      ): Promise<OwnerInstruction[]> {
+        acked.push([...ids]);
+        return [];
+      }
+    }
+    const scripted = new Abandoned((ask) => answered(ask.id, { type: "text", text: "ship it" }));
+    const { mcp } = await connect(scripted);
+    await mcp
+      .callTool({ name: "ask_human", arguments: { question: "Go?" } }, undefined, { signal: giveUp.signal })
+      .catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(acked).toEqual([]);
+  });
+
+  it("still returns the answer when the instructions cannot be fetched", async () => {
+    // ScriptedDaemon's instruction calls always fail.
+    const scripted = new ScriptedDaemon((ask) => answered(ask.id, { type: "text", text: "ship it" }));
+    const { mcp } = await connect(scripted);
+    const result = resultJson(await mcp.callTool({ name: "ask_human", arguments: { question: "Go?" } }));
+    expect(result).toMatchObject({ outcome: "answered", answer: "ship it" });
+    expect(result).not.toHaveProperty("instructions");
+  });
+
+  it("registers again when the daemon ended its idle session, so check_inbox keeps working", async () => {
+    const running = await startTestDaemon();
+    const { mcp } = await connect(clientFor(running.apiPort));
+    const first = await waitFor(() => running.store.listSessions()[0], "the session");
+    // What the daemon does to a session nobody heard from for six hours.
+    endSession(running.store, first.id, now, "idle");
+    const inbox = await mcp.callTool({ name: "check_inbox", arguments: {} });
+    expect(inbox.isError).toBeUndefined();
+    const live = running.store.listSessions().filter((s) => s.state !== "ended");
+    expect(live).toHaveLength(1);
+    expect(live[0]?.id).not.toBe(first.id);
+  });
+
   it("reports an unreachable inbox as an error", async () => {
     const { mcp } = await connect(clientFor(await closedPort()));
     const result = await mcp.callTool({ name: "check_inbox", arguments: {} });
@@ -461,6 +550,14 @@ class ScriptedDaemon implements HotlineDaemon {
   }
 
   async inbox(): Promise<Inbox> {
+    throw new DaemonError("unreachable", "down");
+  }
+
+  async peekInstructions(): Promise<ListedInstruction[]> {
+    throw new DaemonError("unreachable", "down");
+  }
+
+  async ackInstructions(_sessionId: string, _ids: readonly string[]): Promise<OwnerInstruction[]> {
     throw new DaemonError("unreachable", "down");
   }
 

