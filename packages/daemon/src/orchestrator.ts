@@ -21,25 +21,24 @@
 //   file only from the owner's number on a verified webhook, once per message
 //   SID (remembered in the store across restarts).
 // - Logs and audit entries carry ids, kinds, counts and reasons, never words.
-import { randomInt, randomUUID, timingSafeEqual } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import {
   Answer,
   Ask,
+  AskOutcome,
   type AskStatus,
   createQueue,
   nextWakeAt,
   type PolicySettings,
-  parseSmsReply,
   type QueueAction,
   type QueueEvent,
   type QueueState,
-  type SmsReply,
-  smsAnswer,
   step,
 } from "@hotline/core";
 import type { PostCallEvent, SmsProvider, VoiceAsk, VoiceProvider } from "@hotline/providers";
 import { z } from "zod";
 import type { SubmitAnswerResult, VoiceAnswer } from "./elevenlabs-webhook.js";
+import { planTextReply, replyHint, replyKind, TEXT_REPLIES, textFor } from "./owner-texts.js";
 import type { OwnerSms } from "./sms-webhook.js";
 import type { HotlineStore } from "./store.js";
 import { confirmVoiceDecision, type ReadAsk } from "./voice-confirm.js";
@@ -49,9 +48,11 @@ export const ORCHESTRATOR_STATE_KEY = "orchestrator";
 /** A timer never fires sooner than this after the last step, so overdue work cannot spin. */
 const MIN_TIMER_MS = 100;
 const MAX_TIMER_MS = 2 ** 31 - 1;
-/** Agent text in an outgoing SMS, cut like the voice read-out. */
-const SMS_ASK_LENGTH = 300;
-const SMS_OPTION_LENGTH = 80;
+/**
+ * How long `stop` waits for the step in progress. A slow provider request can
+ * outlast it; the step's unfinished actions are saved and recovered on start.
+ */
+export const STOP_WAIT_MS = 5_000;
 /** Rough cost of a call minute in US cents (Twilio voice plus ElevenLabs Agents), for `hotline doctor`. */
 export const CALL_CENTS_PER_MINUTE = 12;
 
@@ -80,6 +81,8 @@ export interface CallOrchestratorOptions {
   autoTick?: boolean;
   /** For tests: the next confirmation code. Default: 6 random digits. */
   newCode?: () => string;
+  /** How long `stop` waits for the step in progress; default `STOP_WAIT_MS`. */
+  stopWaitMs?: number;
 }
 
 /** A voice answer held until the post-call transcript confirms it. */
@@ -109,6 +112,12 @@ interface SavedState {
   calls: LiveCall[];
   /** Confirmation codes of texted high-risk permission asks, by ask id. Single use. */
   codes: Record<string, string>;
+  /**
+   * Actions of the last step not carried out yet, saved together with the queue
+   * state that assumes them, so a crash part way through can be recovered on
+   * start (see `#recover`).
+   */
+  pending: PendingAction[];
 }
 
 const QueuedAskSchema = z.strictObject({
@@ -128,6 +137,25 @@ const PendingSchema = z.strictObject({
   answeredAt: z.iso.datetime(),
   conflict: z.boolean().optional(),
 });
+/** An action the queue asked for whose effect may not have happened yet. */
+const PendingActionSchema = z.discriminatedUnion("type", [
+  z.strictObject({ type: z.literal("place-call"), callId: z.string(), askIds: z.array(z.string()) }),
+  z.strictObject({ type: z.literal("end-call"), callId: z.string() }),
+  z.strictObject({
+    type: z.literal("send-text"),
+    askId: z.string(),
+    reason: z.enum(["notify", "quiet-hours", "call-limit", "after-call"]),
+  }),
+  z.strictObject({
+    type: z.literal("resolve"),
+    askId: z.string(),
+    outcome: AskOutcome,
+    status: z.enum(["answered", "expired", "cancelled"]),
+  }),
+  z.strictObject({ type: z.literal("delivered"), askId: z.string() }),
+]);
+type PendingAction = z.infer<typeof PendingActionSchema>;
+
 const SavedStateSchema = z.strictObject({
   version: z.literal(1),
   queue: z.strictObject({
@@ -149,31 +177,15 @@ const SavedStateSchema = z.strictObject({
     }),
   ),
   codes: z.record(z.string(), z.string()),
+  pending: z.array(PendingActionSchema).default([]),
 });
 
 const OPEN: ReadonlySet<AskStatus> = new Set<AskStatus>(["pending", "in-flight"]);
-
-function flat(text: string, max: number): string {
-  const one = text
-    .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  return one.length <= max ? one : `${one.slice(0, max - 1).trimEnd()}…`;
-}
-
-function sameCode(presented: string, expected: string): boolean {
-  const a = Buffer.from(presented);
-  const b = Buffer.from(expected);
-  return a.length === b.length && timingSafeEqual(a, b);
-}
+/** `#notReachable`'s reason for an ask past its `expiresAt`. */
+const EXPIRED = "the ask expired";
 
 function sameDecision(a: PendingVoiceAnswer["decision"], b: PendingVoiceAnswer["decision"]): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
-}
-
-/** What the owner's reply is, for the audit log: never the words. */
-function replyKind(reply: SmsReply): string {
-  return reply.type === "command" ? reply.command : reply.type;
 }
 
 export class CallOrchestrator {
@@ -181,7 +193,9 @@ export class CallOrchestrator {
   readonly #store: HotlineStore;
   #log: OrchestratorLog;
   #state: SavedState;
-  #chain: Promise<unknown> = Promise.resolve();
+  /** Every step runs after the previous one. Closed until `start` has recovered. */
+  #chain: Promise<unknown>;
+  #open: () => void = () => {};
   #timer: NodeJS.Timeout | undefined;
   #stopped = false;
   #unsubscribe: (() => void)[] = [];
@@ -195,7 +209,12 @@ export class CallOrchestrator {
       queue: createQueue(`call-${randomUUID().slice(0, 8)}`),
       calls: [],
       codes: {},
+      pending: [],
     };
+    // Webhooks or agent requests that arrive before `start` wait for it.
+    this.#chain = new Promise<void>((resolve) => {
+      this.#open = resolve;
+    });
   }
 
   /** Sends logs to the daemon's logger once it exists. */
@@ -204,14 +223,16 @@ export class CallOrchestrator {
   }
 
   /**
-   * Restores the saved state, reconciles it with the store (asks closed while the
-   * daemon was down are dropped, open asks it does not know are queued), starts
-   * listening for new and changed asks, and runs the first step.
+   * Restores the saved state, finishes what the last run left undone, reconciles
+   * with the store (asks closed while the daemon was down are dropped, open asks
+   * it does not know are queued), starts listening for new and changed asks, and
+   * runs the first step. Nothing else runs until this is done.
    */
-  start(): Promise<void> {
-    const saved = SavedStateSchema.safeParse(this.#store.getState(ORCHESTRATOR_STATE_KEY));
+  async start(): Promise<void> {
+    const stored = this.#store.getState(ORCHESTRATOR_STATE_KEY);
+    const saved = SavedStateSchema.safeParse(stored);
     if (saved.success) this.#state = saved.data as SavedState;
-    else if (this.#store.getState(ORCHESTRATOR_STATE_KEY) !== undefined) {
+    else if (stored !== undefined) {
       // Unreadable state fails closed: open asks are queued afresh below.
       this.#log.warn({}, "call orchestration state unreadable; starting a new queue");
     }
@@ -223,22 +244,61 @@ export class CallOrchestrator {
         void this.#run(() => this.#storeChanged(askId));
       }),
     );
-    return this.#run(async () => {
+    try {
+      await this.#recover();
       const queued = new Set(this.#state.queue.open.map((q) => q.ask.id));
       for (const askId of queued) await this.#storeChanged(askId);
       for (const ask of this.#store.listAsks(["pending", "in-flight"])) {
         if (!queued.has(ask.id)) await this.#process({ type: "ask", ask: { ...ask, status: "pending" } });
       }
       await this.#process({ type: "tick" });
-    });
+    } finally {
+      this.#open();
+    }
   }
 
-  /** Stops the timer and the store listeners, after the step in progress. */
+  /**
+   * Carries out the actions the last run saved but may not have finished. A call
+   * that may or may not have been placed counts as failed (the queue's retry
+   * policy applies); a text is sent again (at least once); the rest is idempotent.
+   */
+  async #recover(): Promise<void> {
+    const pending = this.#state.pending;
+    if (pending.length === 0) return;
+    this.#state.pending = [];
+    this.#save();
+    const now = this.#options.clock();
+    this.#store.appendAudit("orchestration.recovered", { actions: pending.length }, now);
+    const events: QueueEvent[] = [];
+    for (const action of pending) {
+      if (action.type === "place-call") {
+        if (!this.#state.calls.some((call) => call.callId === action.callId)) {
+          events.push({ type: "call-ended", callId: action.callId, result: "failed" });
+        }
+        continue;
+      }
+      events.push(...(await this.#execute(action, now)));
+    }
+    for (const event of events) await this.#process(event);
+  }
+
+  /**
+   * Stops the timer and the store listeners and refuses new steps. Waits for the
+   * step in progress, at most `STOP_WAIT_MS`: a slow provider request may
+   * outlast that, and what it leaves undone is recovered on the next start.
+   */
   async stop(): Promise<void> {
     this.#stopped = true;
     clearTimeout(this.#timer);
     for (const unsubscribe of this.#unsubscribe.splice(0)) unsubscribe();
-    await this.idle();
+    this.#open();
+    let timer: NodeJS.Timeout | undefined;
+    const waited = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, this.#options.stopWaitMs ?? STOP_WAIT_MS);
+      timer.unref();
+    });
+    await Promise.race([this.idle(), waited]);
+    clearTimeout(timer);
   }
 
   /** Resolves once every queued step has run. */
@@ -368,8 +428,6 @@ export class CallOrchestrator {
         this.#store.appendAudit("voice.post-call-ignored", { kind: event.type }, receivedAt);
         return;
       }
-      this.#state.calls = this.#state.calls.filter((other) => other !== call);
-      this.#save();
       const events: QueueEvent[] = [];
       let result: "answered" | "no-pickup" | "dropped" | "failed";
       if (event.type === "initiation-failure") {
@@ -428,8 +486,13 @@ export class CallOrchestrator {
         result = !ownerSpoke ? "no-pickup" : settled === call.askIds.length ? "answered" : "dropped";
       }
       events.push({ type: "call-ended", callId: call.callId, result });
-      this.#recordCall(call, event, result, receivedAt);
+      // The call stays live (with its held answers) until every event is applied:
+      // if this fails part way, ElevenLabs' retry applies them again, and events
+      // already applied are ignored by the queue.
       for (const next of events) await this.#process(next);
+      this.#state.calls = this.#state.calls.filter((other) => other !== call);
+      this.#save();
+      this.#recordCall(call, event, result, receivedAt);
     });
   }
 
@@ -439,6 +502,7 @@ export class CallOrchestrator {
     return {
       text: ask?.text ?? "",
       nickname,
+      options: ask?.options ?? [],
       ...(ask?.toolName === undefined ? {} : { toolName: ask.toolName }),
     };
   }
@@ -489,87 +553,81 @@ export class CallOrchestrator {
   ownerText(message: OwnerSms): Promise<string | undefined> {
     return this.#run(async () => {
       if (this.#store.inboundMessageHandled(message.messageSid)) return undefined;
-      const reply = await this.#handleText(message);
+      // Claimed before any effect, so a redelivery after a crash part way through
+      // can never apply the same words again, say to a different waiting ask. A
+      // failure after this point loses the text (no answer); the owner can resend.
       this.#store.markInboundMessage(message.messageSid, message.receivedAt);
-      return reply;
+      return this.#handleText(message);
     });
   }
 
   async #handleText({ messageSid, body, receivedAt, optOutType }: OwnerSms): Promise<string | undefined> {
-    const reply = parseSmsReply(body);
-    this.#store.appendAudit("sms.received", { messageSid, reply: replyKind(reply) }, receivedAt);
-    // Twilio has already answered its own opt-out, opt-in and help keywords.
-    if (optOutType !== undefined || reply.type === "carrier-keyword") return undefined;
-    if (reply.type === "command") {
-      if (reply.command !== "call-me") return undefined; // `status` is the inbound line (HL-10); `stop` is Twilio's
-      const actions = await this.#process({ type: "call-me" });
-      const ignored = actions.find((action) => action.type === "ignored" && action.event === "call-me");
-      return ignored?.type === "ignored"
-        ? `Hotline: not calling, ${ignored.reason}.`
-        : "Hotline: calling you now.";
-    }
-
-    // Only asks Hotline texted and that are still open can take a text answer,
-    // and a reply must point at exactly one of them.
-    const texted = this.#state.queue.open.filter((q) => q.texted && q.duplicateOf === undefined);
-    const code = reply.type === "yes" ? reply.code : undefined;
-    let target: (typeof texted)[number] | undefined;
-    if (code !== undefined) {
-      target = texted.find((q) => {
-        const expected = this.#state.codes[q.ask.id];
-        return expected !== undefined && sameCode(code, expected);
-      });
-      if (target === undefined) {
-        // A wrong code burns every code still waiting: those requests can then
-        // only be approved on a call, with the PIN.
+    this.#store.appendAudit("sms.received", { messageSid, reply: replyKind(body) }, receivedAt);
+    const plan = planTextReply({
+      body,
+      messageSid,
+      receivedAt,
+      optedOut: optOutType !== undefined,
+      waiting: this.#state.queue.open
+        .filter((q) => q.texted && q.duplicateOf === undefined)
+        .map((q) => {
+          const code = this.#state.codes[q.ask.id];
+          return { ask: q.ask, ...(code === undefined ? {} : { code }) };
+        }),
+    });
+    switch (plan.type) {
+      case "ignore":
+        return undefined;
+      case "call-me": {
+        const actions = await this.#process({ type: "call-me" });
+        const ignored = actions.find((action) => action.type === "ignored" && action.event === "call-me");
+        return ignored?.type === "ignored" ? TEXT_REPLIES.notCalling(ignored.reason) : TEXT_REPLIES.calling;
+      }
+      case "nothing-waiting":
+        return TEXT_REPLIES.nothingWaiting;
+      case "ambiguous":
+        this.#store.appendAudit("sms.ambiguous", { messageSid, waiting: plan.waiting }, receivedAt);
+        return TEXT_REPLIES.ambiguous(plan.waiting);
+      case "code-mismatch": {
+        // Those requests can then only be approved on a call, with the PIN.
         const burnt = Object.keys(this.#state.codes).length;
         this.#state.codes = {};
         this.#save();
         this.#store.appendAudit("sms.code-mismatch", { messageSid, burnt }, receivedAt);
-        return "Hotline: that code does not match a waiting request, so nothing was approved. Text CALL ME to answer by phone.";
+        return TEXT_REPLIES.codeMismatch;
       }
-    } else if (texted.length === 0) {
-      return "Hotline: nothing is waiting for an answer right now.";
-    } else if (texted.length > 1) {
-      this.#store.appendAudit("sms.ambiguous", { messageSid, waiting: texted.length }, receivedAt);
-      return `Hotline: ${texted.length} requests are waiting, so a reply cannot say which one it answers. Nothing was recorded. Text CALL ME to go through them by phone.`;
-    } else {
-      target = texted[0];
+      case "not-an-answer":
+      case "answer": {
+        const askId = plan.ask.id;
+        if (plan.codeUsed) {
+          // Single use: a code that matched is spent whatever happens next.
+          delete this.#state.codes[askId];
+          this.#save();
+        }
+        if (plan.type === "not-an-answer") {
+          this.#store.appendAudit("sms.not-an-answer", { messageSid, reason: plan.reason }, receivedAt, {
+            askId,
+          });
+          return replyHint(plan.ask);
+        }
+        const actions = await this.#process({ type: "answer", answer: plan.answer });
+        const answered = actions.some(
+          (action) =>
+            action.type === "resolve" && action.askId === askId && action.outcome.outcome === "answered",
+        );
+        return answered ? TEXT_REPLIES.answered : TEXT_REPLIES.notRecorded;
+      }
     }
-    if (target === undefined) return undefined;
-    const askId = target.ask.id;
-    const confirmationCode = this.#state.codes[askId];
-    if (code !== undefined) {
-      // Single use: a code that matched is spent whatever happens next.
-      delete this.#state.codes[askId];
-      this.#save();
-    }
-    const result = smsAnswer({
-      ask: target.ask,
-      body,
-      messageSid,
-      receivedAt,
-      ...(confirmationCode === undefined ? {} : { confirmationCode }),
-    });
-    if (result.outcome === "no-answer") {
-      this.#store.appendAudit("sms.not-an-answer", { messageSid, reason: result.reason }, receivedAt, {
-        askId,
-      });
-      return replyHint(target.ask);
-    }
-    const actions = await this.#process({ type: "answer", answer: result.answer });
-    const answered = actions.some(
-      (action) =>
-        action.type === "resolve" && action.askId === askId && action.outcome.outcome === "answered",
-    );
-    return answered ? "Hotline: got it." : "Hotline: that answer could not be recorded.";
   }
 
   // The queue -----------------------------------------------------------------
 
   /** Serializes every step: the queue sees one event at a time. A failure never blocks later steps. */
   #run<T>(work: () => Promise<T>): Promise<T> {
-    const result = this.#chain.then(work);
+    // After `stop`, queued work is refused rather than run against a closing store.
+    const result = this.#chain.then(() =>
+      this.#stopped ? Promise.reject(new Error("call orchestration has stopped")) : work(),
+    );
     this.#chain = result.then(
       () => undefined,
       (error: unknown) => this.#log.error({ err: error }, "call orchestration step failed"),
@@ -597,10 +655,19 @@ export class CallOrchestrator {
     for (let event = events.shift(); event !== undefined; event = events.shift()) {
       const now = this.#options.clock();
       const { state, actions } = step(this.#state.queue, event, now, this.#options.settings);
+      // The new queue state and the actions it assumes are saved together, and
+      // each action is crossed off once done, so a crash in between is recovered.
       this.#state.queue = state;
+      this.#state.pending = actions.filter((action) => action.type !== "ignored") as PendingAction[];
       this.#save();
       all.push(...actions);
-      for (const action of actions) events.push(...(await this.#execute(action, now)));
+      for (const action of actions) {
+        events.push(...(await this.#execute(action, now)));
+        if (action.type !== "ignored") {
+          this.#state.pending.shift();
+          this.#save();
+        }
+      }
     }
     this.#schedule();
     return all;
@@ -630,7 +697,14 @@ export class CallOrchestrator {
     if (ask === undefined) return "unknown ask";
     if (!OPEN.has(ask.status)) return `the ask is ${ask.status}`;
     if (this.#store.getSession(ask.sessionId)?.state === "ended") return "the session ended";
+    // A fresh reading: an earlier slow send in the same step may have run past it.
+    if (this.#options.clock().getTime() >= Date.parse(ask.expiresAt)) return EXPIRED;
     return undefined;
+  }
+
+  /** The queue event for an ask that must not go out: an expired one expires with its own reason. */
+  #dropEvent(askId: string, why: string): QueueEvent {
+    return why === EXPIRED ? { type: "tick" } : { type: "cancel", askId };
   }
 
   /** Carries out one action; returns the events it leads to. */
@@ -673,7 +747,7 @@ export class CallOrchestrator {
       const why = this.#notReachable(askId);
       if (why !== undefined) {
         this.#store.appendAudit("ask.not-called", { reason: why }, now, { askId, callId });
-        events.push({ type: "cancel", askId });
+        events.push(this.#dropEvent(askId, why));
         continue;
       }
       const ask = this.#store.getAsk(askId) as Ask;
@@ -721,7 +795,7 @@ export class CallOrchestrator {
     const why = this.#notReachable(askId);
     if (why !== undefined) {
       this.#store.appendAudit("ask.not-texted", { reason: why }, now, { askId });
-      return [{ type: "cancel", askId }];
+      return [this.#dropEvent(askId, why)];
     }
     const ask = this.#store.getAsk(askId) as Ask;
     const sms = this.#options.sms;
@@ -800,50 +874,5 @@ export class CallOrchestrator {
     const status = action.status === "cancelled" ? "cancelled" : "expired";
     this.#store.closeAsk(askId, status, outcome.reason);
     this.#store.appendAudit("ask.no-answer", { reason: outcome.reason }, now, ids);
-  }
-}
-
-/** The text that asks the owner one thing. Agent text is flattened and cut; the provider redacts it all. */
-export function textFor(ask: Ask, nickname: string, code: string | undefined): string {
-  const who = flat(nickname, 60);
-  const text = flat(ask.text, SMS_ASK_LENGTH);
-  switch (ask.kind) {
-    case "question": {
-      const options = ask.options
-        .map((option, i) => `\n${i + 1}) ${flat(option, SMS_OPTION_LENGTH)}`)
-        .join("");
-      const how = ask.options.length > 0 ? "an option number or your answer" : "your answer";
-      return `Hotline: ${who} asks: ${text}${options}\nReply with ${how}.`;
-    }
-    case "permission": {
-      const tool = flat(ask.toolName ?? "a tool", 80);
-      const how =
-        ask.risk !== "high"
-          ? "Reply YES or NO."
-          : code === undefined
-            ? "HIGH RISK: it can only be approved on a call with your PIN. Reply NO to deny, or CALL ME."
-            : `HIGH RISK. Reply YES ${code} to allow, or NO to deny.`;
-      return `Hotline: ${who} wants to use ${tool}: ${text}\n${how}`;
-    }
-    case "stop":
-      return `Hotline: ${who} finished its turn: ${text}\nReply with what to do next, or DONE.`;
-    case "notify":
-      return `Hotline: ${who}: ${text}`;
-  }
-}
-
-/** What to reply when a text did not answer the one waiting ask. */
-function replyHint(ask: Ask): string {
-  switch (ask.kind) {
-    case "permission":
-      return ask.risk === "high"
-        ? "Hotline: not recorded. Reply YES with the code from the text, or NO."
-        : "Hotline: not recorded. Reply YES or NO.";
-    case "question":
-      return "Hotline: not recorded. Reply with an option number or your answer.";
-    case "stop":
-      return "Hotline: not recorded. Reply with what to do next, or DONE.";
-    case "notify":
-      return "Hotline: nothing is waiting for an answer right now.";
   }
 }

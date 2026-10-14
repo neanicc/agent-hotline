@@ -1064,3 +1064,45 @@ Template:
     greeting reading an ask (1); no yes-word check (1). The `n't` check alone
     survives because the bare-`t` token check catches the same input;
     removing both fails 17 tests.
+- Bot staff review (approve with nits, score 90) and Greptile on #36. Greptile
+  reviewed the first head; its window and retraction findings were already
+  fixed above. Fixed here:
+  - Greptile P0, hedges: "I'm unsure whether to approve this" passed as a yes.
+    Hedges and conditions (`unsure`, `whether`, `if`, `probably`, `think`,
+    `hmm`, ...) now count as doubt; "I cannot approve this" was already caught.
+  - Greptile P0, replayed text: the message SID was recorded only after every
+    effect, so a crash while texting another ask left it unrecorded and the
+    redelivered "yes" could answer that other ask. The SID is now recorded
+    before the text has any effect. Trade-off: a failure after that loses the
+    text (no answer); the owner can resend.
+  - Greptile P1, option and done: a submitted option must be named in the
+    owner's words (digit, ordinal, number word or most of its text) and no
+    other offered option may be; `done` needs a word for it. ("one" alone
+    never names option 1 against another, since "the second one" is common.)
+  - Greptile P1, crash consistency: each step's actions are now saved with the
+    queue state and crossed off as they finish. On start, undone actions are
+    finished: a call that may not have been placed counts as `failed` (the
+    retry rules apply), a text is sent again (at least once), the rest is
+    idempotent. A post-call event's call stays live until all its answers
+    reached the queue. Nothing else runs until start has recovered.
+  - Greptile P2, reason race: the agent API now runs the orchestrator's due
+    work (`settle`) before reading an ask past its `expiresAt`, so the specific
+    reason wins over a plain `timeout`.
+  - Greptile P2, sends past expiry: each ask is checked against a fresh clock
+    before a call or text; an expired one is left to expire in the queue.
+  - Greptile P2, shutdown: `stop` waits at most 5 seconds for the step in
+    progress (ElevenLabs allows 15); the rest is recovered on the next start.
+  - Staff P2, size: the text planning and rendering moved to `owner-texts.ts`
+    (pure: reply binding, codes, reply texts), leaving the orchestrator to
+    carry plans out.
+  - Staff P3s, documented in `docs/daemon.md`: English-only word lists (fail
+    closed), the agent sees `unclear` after an unconfirmed deny, and codes and
+    held answers live in the `0600` database.
+  - Evidence: `scripts/ci/run.sh build` and `test` pass (881 tests, 3 runs in a
+    row). New orchestrator unit tests (recovering an unsent text, a call that
+    may never have been placed, the SID claimed before a crash, a send past
+    expiry), an end-to-end test for the reason race, and unit tests for the
+    hedges, options and done. Mutation checks, each reverted: recording the SID
+    after handling (1 test fails), no pending actions saved (3), no expiry
+    check before sending (1), no `settle` before reads (1), no hedge words (5),
+    options not checked (6), done not checked (1).

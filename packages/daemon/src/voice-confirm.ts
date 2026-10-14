@@ -18,6 +18,9 @@
 // - An approval must be unambiguous: the matched words and the owner's last
 //   words about the ask hold a yes word, and nothing the owner said about the
 //   ask, before or after, sounds doubtful. "No... okay, yes" is not a yes.
+// - An option must be named in the owner's words (its number, ordinal, number
+//   word or most of its text), and no other offered option may be. `done` needs
+//   a word for it ("done", "that's it", "nothing").
 // - A refusal (`deny`) only needs to be the owner's words; it is safe.
 //
 // Everything here fails closed: an ask whose reading cannot be found in the
@@ -31,6 +34,8 @@ export interface ReadAsk {
   text: string;
   nickname: string;
   toolName?: string;
+  /** A question's options, for checking that the owner named the one submitted. */
+  options?: readonly string[];
 }
 
 /** Share of an ask's key words an agent turn must contain to count as reading it. */
@@ -59,10 +64,26 @@ const DOUBT_WORDS = wordSet(
   [
     "no nope nah not never negative deny denied reject refuse stop cancel abort wait hold later maybe",
     "unless but cannot nevermind scratch forget actually instead",
+    // Hedges and conditions: "I'm unsure whether to approve", "yes if the tests pass".
+    "unsure uncertain doubt dunno idk whether if perhaps probably possibly might guess think hmm",
     "dont doesnt didnt wont wouldnt cant couldnt shouldnt isnt arent wasnt werent",
     "havent hasnt hadnt aint mustnt neednt mightnt shant",
   ].join(" "),
 );
+/** How the owner may name option N (index N - 1). "one" is too common ("the second one") to name option 1 against another. */
+const NUMBER_WORDS = "one two three four five six seven eight nine".split(" ");
+const ORDINALS = "first second third fourth fifth sixth seventh eighth ninth".split(" ");
+/** Words that let a stopped agent finish. */
+const DONE_WORDS = wordSet("done nothing finished enough stop nope no");
+const DONE_PHRASES = [
+  "that s it",
+  "thats it",
+  "that is it",
+  "that is all",
+  "that s all",
+  "all good",
+  "no more",
+];
 /** Doubt that only shows as a phrase. */
 const DOUBT_PHRASES = ["hang on", "hold on", "not yet", "no way", "never mind", "dont do"];
 /** Apostrophe look-alikes a transcript may use for "don't". */
@@ -178,6 +199,24 @@ function matchingTurns(
 
 const ownerTurns = (turns: readonly TranscriptTurn[]) => turns.filter((turn) => turn.role === "owner");
 
+/**
+ * Whether `said` names option `n` (1-based): its digit, ordinal or number word,
+ * or most of the option's own key words. With `strict`, the number word "one"
+ * does not count, since "the second one" names option 2, not option 1.
+ */
+function namesOption(
+  said: readonly string[],
+  n: number,
+  option: string | undefined,
+  strict: boolean,
+): boolean {
+  if (said.includes(String(n)) || said.includes(ORDINALS[n - 1] ?? "")) return true;
+  if (said.includes(NUMBER_WORDS[n - 1] ?? "") && !(strict && n === 1)) return true;
+  if (option === undefined) return false;
+  const key = tokens(option).filter((word) => word.length >= 3 && !COMMON.has(word));
+  return key.length > 0 && key.filter((word) => said.includes(word)).length / key.length >= READING_MIN_SHARE;
+}
+
 export type VoiceConfirmation =
   /** `excerpt` is the owner's own transcript turns that back the decision, verbatim. */
   { confirmed: true; excerpt: string } | { confirmed: false; reason: string };
@@ -238,6 +277,25 @@ export function confirmVoiceDecision({
       !(endsMatch || clearYes(last.message))
     ) {
       return { confirmed: false, reason: "the owner's words are not a clear yes" };
+    }
+  }
+  if (decision.type === "option") {
+    // The owner must name this option and no other one the ask offered.
+    const said = tokens(match.text);
+    const options = asks[index]?.options ?? [];
+    const other = options.some(
+      (option, i) => i + 1 !== decision.option && namesOption(said, i + 1, option, true),
+    );
+    if (!namesOption(said, decision.option, options[decision.option - 1], false) || other) {
+      return { confirmed: false, reason: "the owner's words do not name this option" };
+    }
+  }
+  if (decision.type === "done") {
+    // Letting a stopped agent finish is what no answer does too; it still needs a word for it.
+    const said = tokens(match.text);
+    const joined = ` ${said.join(" ")} `;
+    if (!said.some((word) => DONE_WORDS.has(word)) && !DONE_PHRASES.some((p) => joined.includes(` ${p} `))) {
+      return { confirmed: false, reason: "the owner's words do not say the agent is done" };
     }
   }
   return excerpt;

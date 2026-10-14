@@ -300,7 +300,7 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
     if (typeof twilio !== "string") redactor.addSecret(twilio.authToken);
     const caller = options.providers?.voice ?? (await voiceProvider(config, secrets, redactor, fetch));
     const texter = options.providers?.sms ?? smsProvider(config, twilio, redactor, fetch);
-    orchestrator = new CallOrchestrator({
+    const calls = new CallOrchestrator({
       store,
       settings: policySettings(config),
       clock,
@@ -309,6 +309,7 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
       redact: (text) => redactor.text(text),
       ...(options.autoTick === undefined ? {} : { autoTick: options.autoTick }),
     });
+    orchestrator = calls;
     const sms = smsWebhook(config, twilio, redactor, store, orchestrator, clock);
     const voice = await voiceWebhook(config, secrets, redactor, store, orchestrator, clock);
     daemon = await startDaemon({
@@ -321,6 +322,7 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
       clock,
       askTimeoutMinutes: config.policy.askTimeoutMinutes,
       nicknames: config.nicknames,
+      settle: () => calls.tick(),
     });
     if (sms.off !== undefined) daemon.log.info({ reason: sms.off }, "sms webhook off");
     if (voice.off !== undefined) daemon.log.info({ reason: voice.off }, "voice webhooks off");

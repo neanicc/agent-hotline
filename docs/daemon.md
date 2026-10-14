@@ -265,11 +265,32 @@ store, the providers and the webhooks through core's pure queue
   (`text-sent`, `text-failed`, `call-ended`), and sets one timer for
   `nextWakeAt` (at least 100 ms away). On start it restores that state, drops
   asks that closed while it was down, and queues open asks it did not know.
-  Unreadable state fails closed: open asks are queued afresh.
-- **Before anything goes out** each ask is checked again: still open in the
-  store and its session not ended. One that is not is cancelled in the queue and
-  left out of the call or text (`ask.not-called`, `ask.not-texted`), so an agent
-  that gave up while the daemon was down is never called about.
+  Unreadable state fails closed: open asks are queued afresh. Nothing else runs
+  until start has finished: webhooks and agent requests wait for it.
+- **Crash recovery.** Each step's actions are saved with the queue state that
+  assumes them and crossed off one by one as they are carried out. On start,
+  whatever the last run left undone is finished (`orchestration.recovered`): a
+  call that may or may not have been placed counts as failed, so the queue's
+  retry rules apply (the owner may be called again); a text is sent again (at
+  least once); recording an answer, closing an ask and ending a call are
+  idempotent. A post-call event's call stays live until all of its answers
+  have reached the queue, so ElevenLabs' retry after a failure applies them
+  again and the queue ignores the ones already applied.
+- **Stopping.** On shutdown, `stop` refuses new steps and waits at most 5
+  seconds for the one in progress. A slower provider request (ElevenLabs
+  allows 15 seconds) is left behind, and what its step did not finish is
+  recovered on the next start.
+- **Before anything goes out** each ask is checked again, with a fresh clock
+  reading: still open in the store, its session not ended, and not past
+  `expiresAt` (an earlier slow send in the same step may have run past it). An
+  ask that is closed or whose session ended is cancelled in the queue; an
+  expired one is left to expire in the queue with its own reason. Either way it
+  is left out of the call or text (`ask.not-called`, `ask.not-texted`), so an
+  agent that gave up while the daemon was down is never called about.
+- **Reasons before reads.** When an agent reads an ask past its `expiresAt`
+  (outcome, inbox, or a new ask counting against the caps), the agent API first
+  runs the orchestrator's due work (`settle`), so the ask ends with its specific
+  reason rather than a plain `timeout` from whichever timer fired first.
 - **Calls.** `place-call` reads the remaining asks out in the queue's order:
   ask number N on the call is the Nth. The provider gets the session nickname,
   kind, risk, tool, options and the (already redacted) text; `callVariables`
@@ -297,6 +318,11 @@ store, the providers and the webhooks through core's pure queue
     confirms it;
   - free text (a question's answer, a stop's next instruction) must itself be
     words the owner said;
+  - an option must be named in the owner's words (its digit, ordinal, number
+    word or most of its own words), and no other offered option may be ("the
+    second one" names option 2 only); `done` needs a word for it ("done",
+    "that's it", "nothing"), though letting a stopped agent finish is also what
+    no answer does;
   - an answer is taken back by anything the owner said about the ask after it
     that sounds doubtful (below), such as "no", "wait", "never mind",
     "actually";
@@ -310,8 +336,9 @@ store, the providers and the webhooks through core's pure queue
   `later`, `maybe`, `but`, `cancel`, `abort`, `negative`, `cannot`, `actually`,
   any `n't` (apostrophe look-alikes such as `’`, `ʼ`, `` ` ``, `´` and `′` are
   normalised first) and the same forms typed without it (`dont`, `wouldnt`,
-  `cant`, ...), and the phrases "hang on", "hold on", "not yet", "no way" and
-  "never mind".
+  `cant`, ...), hedges and conditions (`unsure`, `whether`, `if`, `probably`,
+  `think`, `hmm`, ...), and the phrases "hang on", "hold on", "not yet", "no
+  way" and "never mind".
   A `deny` needs only the owner's words in a window; nothing else can block a
   refusal. The stored `ownerExcerpt` is the matching owner turns, verbatim, not
   the model's `owner_words`. An unconfirmed answer is dropped
@@ -319,8 +346,15 @@ store, the providers and the webhooks through core's pure queue
   the ask open (no answer from the call; call policy texts it), while an
   unconfirmed `deny` still ends a permission request at once as no answer
   (`unclear`), which denies it, and it is never sent out again for approval.
+  The agent then sees `no-answer` with reason `unclear`, not a recorded `deny`.
   Confirmed answers and `unclear` reports reach the queue before the call's
   `call-ended`.
+  Known limits: the word lists are English, so other languages never confirm
+  an approval, an option or `done` (fail closed: the ask is texted). A doubtful
+  word in a later turn about the ask also takes back a free-text answer. These
+  rules are tested on scripted transcripts only; real ElevenLabs transcripts
+  (turn splitting, interruptions, paraphrased readings) need the live check, and
+  some answers will be refused there until the persona is tuned.
 - **How a call ended.** `call_initiation_failure` `busy` or `no-answer` is
   `no-pickup`, anything else `failed`. A transcription in which the owner never
   spoke is `no-pickup` (voicemail, silence); one where every ask was settled is
@@ -334,9 +368,16 @@ store, the providers and the webhooks through core's pure queue
   and one the redactor leaves intact. Codes are stored with the state, die with
   the ask, and are spent on first use; a code that matches no waiting ask
   burns every waiting code, so those requests can then only be approved on a
-  call with the PIN.
-- **Text replies.** Each owner text is handled once per message SID, also
-  across restarts (`inbound_messages`). `call me` becomes the queue's `call-me`
+  call with the PIN. Codes and held voice answers (with the model's
+  `owner_words`) live in `daemon_state`, inside the `0600` database the store
+  already requires; same-user processes can read it (see
+  [contracts](contracts.md#secrets-secretsts)).
+- **Text replies** (`owner-texts.ts` plans, the orchestrator applies). Each
+  owner text is handled once per message SID, also across restarts
+  (`inbound_messages`). The SID is recorded before the text has any effect, so a
+  redelivery after a crash part way through can never apply the same words
+  again, say to a different waiting ask; a failure after that loses the text
+  (no answer) and the owner can resend. `call me` becomes the queue's `call-me`
   event and gets "calling you now" or the queue's reason for not calling.
   `status` waits for HL-10; `stop` and Twilio's keywords get no reply of
   Hotline's own. Any other text answers only an ask Hotline texted that is

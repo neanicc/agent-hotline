@@ -9,6 +9,7 @@ export * from "./elevenlabs-webhook.js";
 export * from "./lock.js";
 export * from "./logger.js";
 export * from "./orchestrator.js";
+export * from "./owner-texts.js";
 export * from "./pin.js";
 export * from "./private-file.js";
 export * from "./redact.js";

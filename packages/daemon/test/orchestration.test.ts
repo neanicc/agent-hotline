@@ -248,6 +248,23 @@ describe("silence is never consent", () => {
     expect(h.daemon.store.getAnswer(request.id)).toBeUndefined();
   });
 
+  it("reports the specific reason even when the agent reads the outcome before the queue's timer fires", async () => {
+    const h = await start();
+    const session = await h.registerSession();
+    const question = await h.ask(session, { kind: "question", text: "Delete the old fixtures?" });
+    await h.advance(BATCH_MS);
+    h.voice.script(scriptedHuman.noPickup());
+    await h.voice.playPending();
+    await h.settle();
+    await h.advance(RETRY_MS);
+    h.voice.script(scriptedHuman.noPickup());
+    await h.voice.playPending();
+    await h.settle();
+    // Past expiry with no orchestration tick: the outcome route settles the queue first.
+    h.clock.now = new Date(h.clock.now.getTime() + 30 * MINUTE);
+    expect(await reason(h, question)).toBe("no-pickup");
+  });
+
   it("a dropped call texts the open ask at once, and its expiry reports the drop", async () => {
     const h = await start();
     const session = await h.registerSession();

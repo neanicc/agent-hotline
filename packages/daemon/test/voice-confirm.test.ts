@@ -252,4 +252,68 @@ describe("confirmVoiceDecision", () => {
   it.each(["yes go ahead", "sure", "okay push it", "yep, do it"])("%j sounds like a plain yes", (said) => {
     expect(soundsDoubtful(said)).toBe(false);
   });
+
+  it.each([
+    "I cannot approve this",
+    "I'm unsure whether to approve this",
+    "yes if the tests pass",
+    "I think so, yes",
+    "probably okay",
+    "hmm, okay",
+  ])("refusals and hedges such as %j never approve", (said) => {
+    expect(confirm([GREETING, READ_PUSH, owner(said)], 0, said).confirmed).toBe(false);
+  });
+});
+
+describe("confirmVoiceDecision for options and done", () => {
+  const ask: ReadAsk = { ...QUESTION, options: ["Pin the older version", "Skip Windows"] };
+  const reading = agent(
+    "Claude in demo-app asks: pin the older ONNX version or skip Windows? Option 1, pin; option 2, skip.",
+  );
+  const option = (said: string, chosen: number) =>
+    confirmVoiceDecision({
+      transcript: [GREETING, reading, owner(said)],
+      asks: [ask],
+      index: 0,
+      decision: { type: "option", option: chosen },
+      ownerWords: said,
+    }).confirmed;
+
+  it.each([
+    ["option two", 2],
+    ["the second one", 2],
+    ["2", 2],
+    ["skip windows", 2],
+    ["the first", 1],
+    ["option one please", 1],
+    ["pin the older version", 1],
+  ])("%j confirms option %i", (said, chosen) => {
+    expect(option(said, chosen)).toBe(true);
+  });
+
+  it.each([
+    ["option two", 1],
+    ["the second one", 1],
+    ["skip windows", 1],
+    ["not the first, the second", 1],
+    ["not the first, the second", 2],
+    ["whichever", 1],
+  ])("%j does not confirm option %i", (said, chosen) => {
+    expect(option(said, chosen)).toBe(false);
+  });
+
+  it("needs a word for done", () => {
+    const stop: ReadAsk = { text: "Finished the migration. What next?", nickname: "Codex in api-server" };
+    const done = (said: string) =>
+      confirmVoiceDecision({
+        transcript: [GREETING, agent("Codex in api-server finished the migration. What next?"), owner(said)],
+        asks: [stop],
+        index: 0,
+        decision: { type: "done" },
+        ownerWords: said,
+      }).confirmed;
+    expect(done("that's it for today")).toBe(true);
+    expect(done("nothing, thanks")).toBe(true);
+    expect(done("now write the tests")).toBe(false);
+  });
 });
