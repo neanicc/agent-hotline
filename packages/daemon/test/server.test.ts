@@ -194,7 +194,8 @@ describe("webhook listener", () => {
     const daemon = await start();
     const response = await send({ port: daemon.hooksPort, method, path });
     expect(response.status).toBe(403);
-    expect(JSON.parse(response.body)).toEqual({ error: "forbidden" });
+    // Bare: the same empty 403 as a failed signature or an unreadable body.
+    expect(response.body).toBe("");
   });
 
   it("serves nothing outside /hooks", async () => {

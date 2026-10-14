@@ -366,3 +366,99 @@ Template:
   (`AskStatus` has no `delivered`). A `call me` text reply has no queue event yet.
   An ask held only by the text limit during quiet hours is not woken when quiet
   hours end; it waits for a text slot or its expiry.
+
+## 2026-10-13 — HL-07 SMS provider (#30)
+
+- Decision / change:
+  - `packages/providers`: `SmsProvider` with `sendToOwner(text)` only. A provider
+    is bound to the owner's number when created, so no caller can text anyone
+    else. `TwilioSmsProvider` is a small hand-written REST call (one form POST to
+    the Messages resource, Basic auth, 10 s timeout) with a required injected
+    `fetch`, instead of the `twilio` package: one request type does not justify
+    the dependency, and a required `fetch` means no test can reach the network.
+    Texts are redacted by an injected function and capped at Twilio's 1600
+    characters. Errors carry Twilio's numeric code, never its message text.
+    `FakeSmsProvider` keeps the same rules and records sends.
+  - Signature validation is hand-written HMAC-SHA1 per
+    https://www.twilio.com/docs/usage/security#validating-requests. The test
+    reproduces Twilio's documented example (token `12345`, signature
+    `L/OH5YylLD5NRKLltdqwSvS0BnU=`) verbatim. Its numbers are Twilio's
+    published example values, not 555 numbers, because the signature covers
+    them; every other test uses `+1555555 01xx`. Comparison hashes both sides
+    with SHA-256, then `timingSafeEqual`. Repeated parameter names fail closed.
+  - Webhook router (issue #8 constraints from the HL-04 review): routes can
+    declare a `precheck` that runs in `onRequest` before the body is read
+    (Twilio: signature header present and form content type). A strict
+    `parseFormBody` replaces `URLSearchParams` semantics (malformed escapes,
+    invalid UTF-8 and empty segments throw). Every 4xx on the webhook listener,
+    parse errors included, becomes the same bare `403` with an empty body, as do
+    all other rejections; the HL-04 test that expected `{"error":"forbidden"}`
+    now expects the empty body.
+  - `POST /hooks/twilio/sms`: verified against the exact public URL (configured
+    origin plus raw path and query) and our `AccountSid`. Only `From` = owner and
+    `To` = `sms.fromNumber` reaches the handler; anyone else gets one generic
+    reply, capped at 5 per hour in total, so strangers cannot run up the bill.
+    The last 1000 message SIDs are remembered to drop retries and replays
+    (durable replay protection stays with HL-13). When Twilio sends
+    `OptOutType`, Hotline does not reply on top of Twilio's own reply.
+    `runDaemon` registers the route only with the config and both Twilio secrets
+    present, and adds the auth token to the redactor. Until HL-09, an owner's
+    text is audited by SID and reply type only.
+  - Reply parsing is pure in `packages/core/src/sms-reply.ts` (a new file, so it
+    stays disjoint from HL-03's `queue.ts`). Exact whole-message matching; free
+    text never approves a permission request. `stop` and all of Twilio's default
+    opt-out keywords mean "stop texting me", because Twilio blocks further texts
+    after any of them; Twilio's opt-in and help keywords are never answers.
+  - High-risk approvals by text (plan section 8): the owner replies
+    `yes <code>` with a one-time code the daemon put in the outgoing text, and
+    only a match sets `confirmation: "text"`. The code proves the reply came from
+    the phone that received the text, which a spoofed sender number cannot.
+    The PIN is never accepted by text, so it never passes through Twilio.
+    Generating and storing the code per ask is HL-09's job.
+- Evidence (automated): `scripts/ci/run.sh build` (Biome, `tsc -b`, typecheck
+  including tests, CLI smoke) passed; `scripts/ci/run.sh test` passed (490
+  tests in 26 files after rebasing on HL-03). A mutation check (dropping the account SID check, the signature
+  header precheck and the `From` check) failed 5 webhook tests. Scenario suite:
+  not built yet (HL-12). No real agent or live-call testing; no real Twilio
+  request was made.
+- Open issues or follow-ups: HL-09 constructs `TwilioSmsProvider` from the
+  config and secrets (passing `globalThis.fetch` and the daemon redactor),
+  generates confirmation codes, and replaces the audit-only owner handler with
+  `smsAnswer` plus replies. HL-10 answers the `status` text. HL-13: durable
+  replay protection by message SID, fuzzing `parseSmsReply`. If Twilio's
+  Advanced Opt-Out is configured to treat `YES` as an opt-in keyword, the owner
+  may also see Twilio's opt-in confirmation; the answer still arrives.
+- Staff review (two P2s, both constraints on HL-09, nothing exploitable in this
+  PR). These are HL-09 acceptance criteria:
+  - (1) Twilio signatures carry no timestamp, and the SID set is in memory, so a
+    captured signed "yes" could be replayed after a restart. Accept a text only
+    for an ask Hotline actually texted that is still open (`answerProblem` covers
+    the time window). Persist handled SIDs (HL-13).
+  - (2) Bind each reply to one texted ask. When several permission asks are
+    waiting on texts, fail closed instead of giving a bare "yes" to the newest.
+    Generate confirmation codes randomly per ask, expire them with the ask, and
+    consume them on first use.
+  - The outgoing text should say "reply YES or NO", because `cancel`, `end` and
+    `quit` mean stop.
+  - Fixed here (P3): a network failure's `SmsSendError` keeps only the system
+    error code, not the raw error, whose cause can name the URL with the account
+    SID. `docs/daemon.md` now says the Twilio webhook URL must be exactly
+    `<publicUrl>/hooks/twilio/sms` (the config already refuses a `publicUrl` with
+    a path).
+- Greptile fixes (three threads on #30):
+  - Webhook replies: `twilioSmsRoute` now requires a `redact` option, and a
+    reply from the owner handler is redacted and length-checked with
+    `prepareSmsText` before it reaches the TwiML, the same path outgoing texts
+    take. A reply that is empty after redaction or too long is dropped, not
+    sent. `runDaemon` passes the daemon redactor.
+  - Retries: a SID is recorded as handled only after its handler succeeds. A
+    copy that arrives while the first attempt is still running waits for it
+    and handles the message itself if that attempt fails, instead of getting a
+    200 before the work is done. A failed other-sender audit write also leaves
+    the SID unhandled.
+  - The generated "never approves" test judged results with `parseSmsReply`,
+    the parser under test. It now uses its own literal yes-word list and code
+    rule, and requires the approvals to match that list exactly.
+  - Mutation checks: the old route fails 4 of the new webhook tests; adding
+    `ok` to the parser's yes words fails the generated test, which passed
+    before.
