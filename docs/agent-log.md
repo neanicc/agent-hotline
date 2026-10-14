@@ -912,3 +912,14 @@ Template:
     did not reserve the name that sounds the same. Dedupe now compares names
     in their speakable form. Test included; comparing raw names fails it.
   - Tests: `CI=true scripts/ci/run.sh test`, 753 tests in 37 files.
+- Staff review of 5eda8c5 (approve with nits, score 91, one P2, two P3s):
+  - P2, mitigated: a folder name could still spell an instruction in plain
+    words. Only the first `MAX_FOLDER_WORDS` (4) words of the folder are now
+    spoken, followed by "…" when more were dropped; the owner's configured
+    names are not word-capped. The real control is still HL-09 confirming
+    `owner_words` against the owner's turns.
+  - P3, test added: after 99 sessions with one name the name repeats rather
+    than looping.
+  - P3, left as is: `defaultNickname`'s optional arguments (one production
+    caller, which passes both; the HL-05 test keeps its three-argument call).
+  - `CI=true scripts/ci/run.sh test`: 755 tests in 37 files.

@@ -319,7 +319,8 @@ redact, taken})` is the spoken name the daemon stores when a session
 registers: `config.nicknames[<last folder>]` if set, else "Claude in
 <folder>" or "Codex in <folder>". The folder is redacted whole, then
 `speakableName` keeps only letters, marks, digits, spaces and `- _ . ' [ ] …`,
-then the whole name is cut to `MAX_SPOKEN_NICKNAME_LENGTH` (60). An empty
+only the first `MAX_FOLDER_WORDS` (4) words of the folder are kept (a
+configured name is not word-capped), then the whole name is cut to `MAX_SPOKEN_NICKNAME_LENGTH` (60). An empty
 folder is "an unnamed folder". A name another live session has gets a number
 ("Claude 2 in demo-app"). `callVariables` applies `speakableName` to the
 nickname again before fencing it.

@@ -20,6 +20,13 @@ export const AGENT_SPOKEN_NAMES: Readonly<Record<AgentKind, string>> = {
   codex: "Codex",
 };
 
+/**
+ * Words of a folder name that are spoken. Real folder names rarely have more
+ * than a few; the cap keeps a folder named like a sentence from being read out
+ * as one. (A configured name is the owner's and is not capped by words.)
+ */
+export const MAX_FOLDER_WORDS = 4;
+
 /** Said instead of the folder when nothing speakable is left of it (such as `/` or a folder of symbols). */
 export const UNNAMED_FOLDER = "an unnamed folder";
 
@@ -92,7 +99,13 @@ export function sessionNickname({
   const folder = lastFolder(cwd);
   const configured = Object.hasOwn(nicknames, folder) ? speakableName(redact(nicknames[folder] ?? "")) : "";
   const agentName = AGENT_SPOKEN_NAMES[agent];
-  const place = speakableName(redact(folder)) || UNNAMED_FOLDER;
+  const words = speakableName(redact(folder))
+    .split(" ")
+    .filter((word) => word.length > 0);
+  const place =
+    words.length === 0
+      ? UNNAMED_FOLDER
+      : `${words.slice(0, MAX_FOLDER_WORDS).join(" ")}${words.length > MAX_FOLDER_WORDS ? ELLIPSIS : ""}`;
   const name = (n?: number) => {
     const suffix = n === undefined ? "" : ` ${n}`;
     if (configured !== "") {

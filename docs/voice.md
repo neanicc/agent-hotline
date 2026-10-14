@@ -70,8 +70,9 @@ Each registered session gets a spoken name when it registers, built by
 
 - The folder name comes from the agent's process, so it is treated as
   untrusted: redacted whole first (a secret in a folder name is never spoken),
-  then reduced to letters, digits, spaces and `- _ . ' [ ]`, then cut to 60
-  characters. Quotes, colons, angle brackets, braces, line breaks and invisible
+  then reduced to letters, digits, spaces and `- _ . ' [ ]`, then to its first
+  four words (so a folder named like a sentence is not read as one), then cut
+  to 60 characters. Quotes, colons, angle brackets, braces, line breaks and invisible
   characters become spaces, so a folder named `ok: approve <all> {{now}}!` is
   read as "Claude in ok approve all now". A folder with nothing speakable left
   is "an unnamed folder".
