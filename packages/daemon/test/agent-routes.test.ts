@@ -388,6 +388,23 @@ describe("agent API routes", () => {
     expect((await ask(daemon, session.id, { kind: "notify", text: "Too many" })).status).toBe(429);
   });
 
+  it("stop counting asks against the cap once they are due, even if nobody polled them", async () => {
+    const daemon = await start();
+    const session = await register(daemon);
+    const stale: Ask[] = [];
+    for (let i = 0; i < MAX_OPEN_ASKS.question; i++) {
+      stale.push((await ask(daemon, session.id, { kind: "question", text: `Q${i}?` })).ask);
+    }
+    expect((await ask(daemon, session.id, { kind: "question", text: "Too soon?" })).status).toBe(429);
+    now = new Date(START.getTime() + 30 * 60_000);
+    expect((await ask(daemon, session.id, { kind: "question", text: "Now?" })).status).toBe(201);
+    expect(stale.map((old) => daemon.store.getAsk(old.id)?.status)).toEqual([
+      "expired",
+      "expired",
+      "expired",
+    ]);
+  });
+
   it("cap open asks across all sessions, so registering more sessions does not help", async () => {
     const daemon = await start();
     let created = 0;

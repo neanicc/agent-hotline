@@ -55,6 +55,12 @@ Bodies are strict: an unknown field, a relative `cwd`, a `permission` or `stop`
 kind (HL-06 adds them) or more than 9 options gets `400` with the failing paths,
 never the values. An unknown session or ask gets `404`.
 
+Before counting against the caps, every open ask past its `expiresAt` is marked
+`expired`, so asks nobody polls (a killed agent, an undelivered notification)
+stop blocking new ones. The routes do not check that an ask belongs to the
+caller's session: the per-install token is the only boundary, and any holder
+of it can act on any session.
+
 An outcome is `answered` only when the store holds the answer, which
 `recordAnswer` accepted after `answerProblem` passed. An open ask whose
 `expiresAt` has passed on the daemon's clock is marked `expired` when it is next

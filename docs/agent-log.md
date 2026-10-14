@@ -560,8 +560,9 @@ Template:
     through `recordAnswer` after `answerProblem` (the requirement carried over
     on #7 and #10).
   - Open asks are capped at 3 questions and 10 notifications per session, and
-    10 and 30 across all sessions (`429`, audited). `urgent` is stored only as
-    the agent's request.
+    10 and 30 across all sessions (`429`, audited). Due asks are marked
+    expired before each count. `urgent` is stored only as the agent's
+    request.
   - The store gained `onAskChange`, `listSessionAsks`, `countOpenAsks` and
     `findLiveSession`. There is no migration.
 - Defaults chosen:
@@ -583,7 +584,7 @@ Template:
   after 2 s. With that fix disabled, 9 of 10 runs of the MCP test file failed;
   with it, 12 of 12 passed.
 - Evidence (worktree, Node 24.11.0; the pre-merge tree also on 22.23.1):
-  - `run.sh setup`, `build` and `test` pass, with 567 tests after merging main.
+  - `run.sh setup`, `build` and `test` pass, with 568 tests after merging main.
   - The tests drive the SDK `Client` against a real daemon on 127.0.0.1
     (InMemoryTransport, fake clock), plus `hotline mcp` over stdio framing.
   - Mutation checks fail tests when the `askId` match, ask-text redaction or
@@ -596,7 +597,9 @@ Template:
     driving them calls their model APIs; live call.
 - Open issues or follow-ups:
   - HL-09: store specific no-answer reasons, and gate `urgent` on
-    `quietHours.allowUrgentCalls` and the rate limits.
+    `quietHours.allowUrgentCalls` and the rate limits. Before calling, check
+    that the ask is still open and its session not ended: an agent that gave
+    up while the daemon was unreachable cannot cancel its ask.
   - HL-10: add the instruction queue, and expire stale sessions (a killed
     server never ends its session).
   - HL-11: write the `docs/mcp.md` snippets.

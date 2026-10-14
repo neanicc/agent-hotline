@@ -145,21 +145,26 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
     if (closing.signal.aborted) void reply.header("connection", "close");
   });
 
+  /** Marks `ask` expired, with an audit entry, if it is still open and its time is up. */
+  const expireIfDue = (ask: Ask): boolean => {
+    if (
+      (ask.status !== "pending" && ask.status !== "in-flight") ||
+      clock().getTime() < Date.parse(ask.expiresAt)
+    ) {
+      return false;
+    }
+    if (store.setAskStatus(ask.id, "expired")) {
+      store.appendAudit("ask.expired", { kind: ask.kind }, clock(), {
+        askId: ask.id,
+        sessionId: ask.sessionId,
+      });
+    }
+    return true;
+  };
+
   /** The final outcome of `ask`, expiring it first if its time is up; undefined while it waits. */
   const outcomeOf = (ask: Ask): { ask: Ask; outcome?: AskOutcome } => {
-    let current = ask;
-    if (
-      (current.status === "pending" || current.status === "in-flight") &&
-      clock().getTime() >= Date.parse(current.expiresAt)
-    ) {
-      if (store.setAskStatus(current.id, "expired")) {
-        store.appendAudit("ask.expired", { kind: current.kind }, clock(), {
-          askId: current.id,
-          sessionId: current.sessionId,
-        });
-      }
-      current = store.getAsk(current.id) ?? current;
-    }
+    const current = expireIfDue(ask) ? (store.getAsk(ask.id) ?? ask) : ask;
     switch (current.status) {
       case "answered": {
         const answer = store.getAnswer(current.id);
@@ -250,6 +255,9 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
       return reply.code(404).send({ error: "unknown session" });
     }
     const { kind, urgent = false } = body.data;
+    // Expired asks must not keep counting against the caps below, even if nobody
+    // has polled them since (a killed agent, an undelivered notification).
+    for (const open of store.listAsks(["pending", "in-flight"])) expireIfDue(open);
     if (kind === "notify" && (body.data.options?.length ?? 0) > 0) {
       return reply
         .code(400)
