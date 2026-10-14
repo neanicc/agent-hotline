@@ -12,6 +12,12 @@ Never fabricate an entry; "not tested" is a valid result.
 - `hotline init` (owner number, PIN, quiet hours, voice), then `hotline doctor`
   until everything is green. `hotline voice set <voice id>` to pick a voice, or
   clone yours in ElevenLabs first.
+- Run `hotline doctor` on your Mac with the Keychain store (the default there)
+  and check for `PASS  keychain`. This is the only place the real
+  `/usr/bin/security` runs: tests and CI use a fake. The self-test adds, reads
+  back and deletes a throwaway item (service `agent-hotline-doctor-check`),
+  never your real credentials ([install.md](install.md#keychain-self-test)).
+  Record the line, PASS or FAIL with its exit codes, in the results below.
 - `hotline install claude` and `hotline install codex`, `hotline daemon`.
 
 ## Scenarios

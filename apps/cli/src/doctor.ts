@@ -14,6 +14,7 @@ import type { CliContext, Output } from "./cli.js";
 import { costLines, readUsage } from "./cost.js";
 import { ElevenLabsAdmin } from "./elevenlabs-admin.js";
 import { agentConfigFiles, type ConfigLocation, configLocation, readConfigFile } from "./install.js";
+import { keychainCheck, usesKeychain } from "./keychain-check.js";
 import { fetchFor, lastFour, secretStoreFor } from "./setup.js";
 
 /** `info` lines report, they never pass or fail: the cost estimate. */
@@ -30,7 +31,9 @@ export function doctorUsage(): string {
     "",
     "Checks the config, secrets (set or not, never their values), the daemon and its",
     "token, the Claude Code and Codex installs and their timeouts, the deployed",
-    "ElevenLabs agent and the webhook URL. Exits 1 if any check fails. Then prints",
+    "ElevenLabs agent and the webhook URL. With the Keychain store on macOS it also",
+    "adds, reads back and deletes a throwaway Keychain item (never a real secret).",
+    "Exits 1 if any check fails. Then prints",
     "an estimated monthly cost from the last 30 days in the local store, priced with",
     "the config's costs.* rate assumptions; it makes no network call for that.",
     "",
@@ -386,6 +389,7 @@ export async function runChecks(
   } catch (error) {
     checks.push({ status: "fail", name: "secret", detail: (error as Error).message });
   }
+  if (usesKeychain(context, config.secrets.store)) checks.push(await keychainCheck(context));
   checks.push(await daemonCheck(context, config, values.get("daemon.apiToken")));
   const away = await readAwayState(paths.away);
   checks.push(
