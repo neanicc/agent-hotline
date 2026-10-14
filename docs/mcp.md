@@ -79,8 +79,9 @@ so the daemon can start after the agent. It never creates the token.
 
 ## Config snippets
 
-`hotline install claude|codex` (HL-11) writes these entries, keeps a backup and
-prints a diff. Until then, add them by hand. Until packaging (HL-15) puts
+`hotline install claude|codex` writes these entries, keeps a backup and prints
+a diff, and `hotline doctor` checks the timeouts below; see
+[install.md](install.md). To add them by hand before packaging (HL-15) puts
 `hotline` on your `PATH`, use `node` as the command and put
 `/absolute/path/to/apps/cli/dist/main.js` first in the arguments.
 

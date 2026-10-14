@@ -19,7 +19,8 @@
   "dependencies": {
     "@hotline/agents": "workspace:*",
     "@hotline/core": "workspace:*",
-    "@hotline/daemon": "workspace:*"
+    "@hotline/daemon": "workspace:*",
+    "@hotline/providers": "workspace:*"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.31.0"

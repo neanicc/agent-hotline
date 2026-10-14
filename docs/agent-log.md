@@ -1437,3 +1437,126 @@ Template:
   the model treats as a yes. A human must decide on both and apply the change.
   Today's daemon check would also refuse some of these flows, for example a
   "hmm" before the confirmed yes, until that separate ticket lands.
+
+## 2026-10-14 — HL-11 Installer and doctor
+
+- Decision / change: `hotline init`, `install`, `doctor`, `voice list|set|apply`
+  and `test-call` in `apps/cli` (setup guide: `docs/install.md`); `away on|off`
+  from HL-06 is listed in the usage and the guide.
+  - `init` writes the 0700 home, the 0600 config with the PIN's scrypt hash
+    (`hashPin`), and credentials in the secret store. Settings come from flags
+    or prompts; the PIN and credentials only from no-echo prompts or
+    `HOTLINE_*` environment variables, never flags, because process arguments
+    are visible to other users. A PIN shorter than 6 digits warns. `init`
+    generates `elevenlabs.toolSecret`. It makes no network call.
+  - ElevenLabs provisioning is a separate `hotline voice apply` (carry-over
+    from HL-08): workspace secret, four tools and the agent from
+    `hotlineToolConfigs` and `hotlineAgentConfig`, created once and updated
+    (PATCH) afterwards. The ids are saved in the config as each is created
+    (new optional `voice.toolSecretId` and `voice.toolIds` in core's config
+    schema), so a failure part way never orphans one. `voice set` validates
+    with `isVoiceId` before saving or sending, then re-applies. The client
+    lives in `apps/cli/src/elevenlabs-admin.ts`, not `packages/providers`,
+    to stay clear of HL-14b's files; moving it is a follow-up.
+  - `install` edits only Hotline's entries (identified by the
+    `hook <agent> <event>` command or the `hotline` server name), with a
+    timestamped 0600 backup and a printed diff, `--dry-run` and `--uninstall`.
+    Idempotent: an entry that is already right stays in place. Codex's MCP
+    table sits in a marked TOML block (no TOML dependency); a hand-written
+    `[mcp_servers.hotline]` is refused, never edited. Symlinked configs are
+    refused. Under the test runner or `HOTLINE_TEST_MODE=1`, `--home` is
+    required and `--project` must sit inside it; the Keychain needs an
+    injected exec and HTTP an injected fetch, otherwise the command fails.
+  - `doctor` checks the config, secret presence (never values), the daemon's
+    `/v1/health` with the token on 127.0.0.1, away mode, hook waits against
+    hook timeouts, Codex `tool_timeout_sec` and Claude's per-server timeout
+    and `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` against `policy.askTimeoutMinutes`,
+    the deployed agent's `definition-v<n>` tag against
+    `AGENT_DEFINITION_VERSION`, its voice and tools, and `tunnel.publicUrl`.
+    Exit 1 on any FAIL. A stopped daemon is a WARN.
+  - `test-call` refuses without config, agent id, phone number id and API
+    key, prints that it will ring the owner's phone (last four digits), and
+    asks for `yes` unless `--yes`. With `voice.provider: fake` it uses the
+    fake provider and nothing rings.
+- Evidence (worktree, Node 24.11.0):
+  - `scripts/ci/run.sh build` and `test` pass: 1277 tests in 51 files. New:
+    agent-config (14), install (11), init (9), voice and test-call (11),
+    doctor (6), text-diff (3), core config (1).
+  - The scenario suite does not exist yet (HL-12); the eval stage prints
+    NOT RUN.
+  - Real agent integration, temporary home only (`HOME` / `CODEX_HOME`
+    pointed at a scratch directory): after `hotline install` from the built
+    CLI, `codex mcp get hotline` (Codex 0.146.0) shows the server with
+    `tool_timeout_sec: 2100`, and `claude mcp get hotline` (Claude Code
+    2.1.299) shows it at user scope and connected. A second install reported
+    both Codex files unchanged. The built CLI ran `init`, `away on`, `doctor`
+    (12 pass, 2 warn for the not-yet-started daemon, exit 0), `test-call` on
+    the fake provider and `install codex --uninstall`. No model calls, no
+    Codex `/hooks` trust step, no real ElevenLabs or Twilio request.
+  - Live call: not done (human, docs/live-check.md).
+- Greptile review fixes on PR #45:
+  - `voice apply` now PATCHes the existing workspace secret with the current
+    local tool secret on every run (`PATCH /v1/convai/secrets/{id}`), so
+    changing stores or re-running `init` cannot strand a stale secret.
+  - Hook ownership no longer depends on the launcher: any command shaped
+    exactly `<program> hook <agent> <event>` plus Hotline's own options is
+    Hotline's, for install, uninstall and doctor alike.
+  - The Codex check recognises `mcp_servers.hotline` in every TOML form
+    (quoted names, `hotline = {...}` under `[mcp_servers]`, dotted and inline
+    keys) and refuses to edit; doctor reads `tool_timeout_sec` from them.
+  - `doctor` fails when the agent lacks any of the four tools or their ids
+    are not recorded; `voice list` follows `next_page_token` (10 pages at
+    most, then says so); a cancelled prompt rejects instead of hanging; the
+    diff falls back to a block replacement past 1,000,000 table cells.
+  - Each fix has a test; `scripts/ci/run.sh build` and `test` pass after
+    catching up with main (HL-14b, definition v3): 1297 tests in 53 files.
+- Staff review fixes on PR #45 (heads 517d927 and a4ddf9a):
+  - `doctor` reads each tool (`GET /v1/convai/tools/{id}`) and fails when its
+    URL is not `<tunnel.publicUrl>/hooks/el/tools/<name>` or its header uses
+    another secret id than `voice.toolSecretId`.
+  - `test-call` bypasses the daemon's call policy by design, so it keeps a
+    two-minute cooldown (`test-call.json`); the bypass is documented. The
+    daemon already ignores and audits a post-call for an unknown conversation
+    (`voice.post-call-ignored`, covered in `orchestration.test.ts`).
+  - Hook ownership needs `hook` after a launcher that is `hotline`, an
+    absolute path or `node <file>.js`; a bare `myguard hook ...` is never
+    Hotline's.
+  - `init --force` refuses an unreadable config instead of dropping its ids;
+    `voice set` says "saved, but not applied" when the re-apply fails;
+    backups are created 0600 with `wx` instead of copy-then-chmod.
+  - Not changed: `doctor` still sends the token to whatever holds the
+    daemon's port on 127.0.0.1, the same trust the MCP server and hooks
+    already place in that port (docs/mcp.md).
+- Staff review fixes on PR #45 (head 0c7d791):
+  - The printed install diff masks credential-looking values (JSON and TOML
+    keys like `token`, `secret`, `key`, `auth`; anything after `Bearer`), so
+    a reformatted `~/.claude.json` never shows other servers' tokens.
+  - `install` re-reads each file just before replacing it and aborts that
+    file if it changed (Claude Code rewrites `~/.claude.json` while running).
+    No automated test covers the race itself: there is no seam between the
+    two reads, and adding one only for a test was not worth it.
+  - An absolute-path launcher is Hotline's only when its file name contains
+    `hotline` or it is this run's `--command`.
+  - The test-call cooldown fails closed on an untrusted or unreadable stamp.
+  - 1304 tests in 53 files pass (`scripts/ci/run.sh build` and `test`).
+- Staff review fixes on PR #45 (head 7182d3c):
+  - Hook ownership is exact: `hotline`, this run's `--command`, an absolute
+    path to a file named `hotline`, or `node .../apps/cli/dist/main.js`.
+    Other wrappers need the same `--command` again; `doctor` takes it too.
+  - `install` checks for a concurrent write before writing the backup, so
+    an aborted run leaves no stray backup.
+  - `init --force` names the old store when `--secret-store` changes, and
+    the docs say the `HOTLINE_*` variables are for scripted setup only.
+- Staff review fixes on PR #45 (head 7558af3): `init` tells the owner to
+  run `hotline voice apply` when it generates a new tool secret for an
+  already deployed agent (doctor can compare only the secret id, not its
+  value); `deployAgent` names an id it created but could not record. Left as
+  is: a failed real test call still starts the 2-minute cooldown (safe).
+- Open issues or follow-ups:
+  - `doctor` does not show the monthly cost estimate from plan section 8 yet.
+  - Move the ElevenLabs management client into `packages/providers` once
+    HL-14b has landed.
+  - Importing the Twilio number into ElevenLabs is manual
+    (`--agent-phone-number-id`); `voice apply` could do it.
+  - Clearing `voice.voiceId` does not reset the deployed agent's voice: the
+    agent body omits `tts` when no voice is set.
