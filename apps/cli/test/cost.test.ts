@@ -148,7 +148,7 @@ describe("README cost table", () => {
       join(dirname(fileURLToPath(import.meta.url)), "../../../README.md"),
       "utf8",
     );
-    const section = readme.slice(readme.indexOf("## Costs"), readme.indexOf("## Development"));
+    const section = readme.slice(readme.indexOf("## Costs"), readme.indexOf("## Build from source"));
     const r = DEFAULT_COST_RATES;
     for (const text of [
       `$${r.twilioNumberPerMonth} / month`,

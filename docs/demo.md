@@ -15,7 +15,7 @@ the owner's own Twilio and ElevenLabs accounts, tunnel and phone, set up as in
 ## Before recording
 
 - Build the command once: `pnpm run package`, then link
-  `dist/hotline/bin/hotline` onto your `PATH` ([README](../README.md#setup)).
+  `dist/hotline/bin/hotline` onto your `PATH` ([README](../README.md#install)).
 - Use a terminal with a large font and a clean prompt. Close anything that shows
   real phone numbers, tokens or `.env` files.
 - The fake scenes use a scratch home so the recording never shows your real
