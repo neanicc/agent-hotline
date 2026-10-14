@@ -1850,12 +1850,10 @@ Template:
     to ask 1, since the turn must be recognised as reading that ask and no
     other. Stricter ordering would text these asks for no safety gain.
   - Long asks: a turn also reads an ask whose text has more than 8 key words
-    when it names at least 4 of them (`LONG_ASK_KEY_WORDS`); the session name
-    and tool alone never do. To keep ties from turning into matches, a
-    candidate whose matched words are a strict subset of another candidate's
-    drops out, candidates matched on the same words fall back to the larger
-    share of their own key words (equal share reads none), and candidates
-    matched on different words (a turn reading two asks) read none.
+    when it names at least 4 of them that no other ask on the call has
+    (`LONG_ASK_KEY_WORDS`); the session name and tool alone never do. (The
+    first version counted any text words and broke ties by subset and share;
+    the security review below replaced that.)
   - Doubt words added, all fail closed: `hm`, `hmmm`, `kinda`, `sorta`,
     `whatever`, `meh`, `suppose`, `nuh`, `huh`, `pardon`, `hello`, `repeat`,
     and the phrases "uh uh" and "uh oh". "Mm-hmm" and "uh-huh" are treated as
@@ -1891,11 +1889,14 @@ Template:
     "refuses a high-risk allow without the PIN", ask 2 in "a yes said after a
     different ask") are played as read-back steps; their results are
     unchanged.
-- Evidence: see the PR's Validation section. Mutation checks, each reverted:
-  no read-back required (76 tests fail), the first reading counted as a
-  read-back (9), no ask-for-yes cue (1), no doubt check after the read-back
-  (67), doubt before the read-back counted (5), no long-ask rule (3), no
-  subset rule (9), no "mm-hmm" handling (4).
+- Evidence: see the PR's Validation section. Mutation checks on a245577,
+  each reverted: no read-back required (76 tests fail), the first reading
+  counted as a read-back (9), no ask-for-yes cue (1), no doubt check after
+  the read-back (67), doubt before the read-back counted (5), no long-ask
+  rule (3), no subset rule (9, since replaced), no "mm-hmm" handling (4).
+  After the security fixes: the first reading counted (9), no ask-for-yes
+  cue (1), no doubt check after the read-back (65), doubt before the
+  read-back counted (5), no long-ask rule (2).
 - Risk, accepted by the owner's direction: with no yes word, a voice model
   that reads the request back and then submits allow on a neutral reply
   ("I'm driving") would be confirmed; so would a refusal in another language
@@ -1908,3 +1909,43 @@ Template:
   - The fake voice provider's `allows()` still plays a v3 model (no
     read-back), which the daemon now refuses; tests that want an approval use
     `confirms()` or a `read-back` step.
+- Security review of a245577 (relayed by the autopilot coordinator), both
+  fixed before the PR was reviewed:
+  - Ask attribution hijack: the long-ask relaxation let an agent-written ask
+    sharing another's words ("pnpm test" and "pnpm test; also git push
+    --force") take over its reading or read-back. Attribution is now strict
+    and unique (`readingOf`). With other asks on the call, a turn reads an
+    ask only if it names every key word no other ask has and, for a
+    permission request, every command and tool token no other ask has
+    (short ones such as `rm` and `f` included). A candidate with no word of
+    its own (identical asks, or containment) makes the turn read nothing, as
+    does more than one match. The long-ask rule counts only words no other
+    ask has, and excuses only the key-word rule, never the command-token
+    rule. Decision: alone on a call, the share rule alone applies, since
+    nothing can be hijacked, so the persona's own short read-back ("Allow
+    pnpm test in demo-app? Yes?") still works. Cost: with several asks, a
+    read-back must name the full session name when sessions differ and every
+    differing command token, so a short read-back of a long command next to
+    another ask fails closed and is texted.
+  - Noise approval: with no yes word, filler or noise after a read-back
+    would have approved. The reply to the read-back is now refused when it is
+    empty, only fillers (`um`, `uh`, `er`, `mm`, `hmm`, `oh`, ...), has a
+    transcriber marker (any bracket: `[inaudible]`, `(noise)`, `<unk>`), is
+    longer than `MAX_REPLY_WORDS` (8), or only repeats the read-back's words.
+    "Mm-hmm", "uh-huh" and "mhm" count as a yes only as one hyphenated sound.
+  - Open decision for the owner: whether a reply must also hold a casual yes.
+    `isAffirmative(reply)` is the one switch. It returns true today
+    (`REQUIRE_CASUAL_YES = false`, following the owner's "no keyword list may
+    reject a natural yes"), so unrelated chatter ("the dog is barking") still
+    approves after a read-back. `hasCasualYes` holds the generous list;
+    tests cover both settings.
+  - Changed expectations: the four "Just to confirm: git push origin main via
+    Bash?" re-readings in `voice-confirm.test.ts` now name the session ("...
+    for Claude in demo-app?"), since PUSH and INSTALL come from different
+    sessions. The long-ask tests that had PUSH next to the long permission
+    request now expect nothing to be read from the short read-back, and the
+    long-ask approval runs with the long ask alone.
+  - Mutation checks, each reverted: no containment rule (2 tests fail), no
+    distinct-word rule (1), no command-token rule (2), no marker rule (5), no
+    filler rule (6), no length rule (1), no echo rule (4), casual yes
+    required (5).

@@ -311,6 +311,7 @@ export class VoiceCalls {
     return {
       text: ask?.text ?? "",
       nickname,
+      ...(ask === undefined ? {} : { kind: ask.kind }),
       options: ask?.options ?? [],
       ...(ask?.toolName === undefined ? {} : { toolName: ask.toolName }),
     };

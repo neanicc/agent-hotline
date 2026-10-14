@@ -337,17 +337,32 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
   answer must pass `confirmVoiceDecision` (`voice-confirm.ts`):
   - the agent turns that read the ask are found by their key words (the
     ask's text, session name and tool, minus very common words; the call's
-    first agent turn, the fixed greeting, never counts). A turn is a candidate
-    for an ask when it holds at least half of that ask's key words, or, for a
-    long ask (more than 8 key words in its text), at least 4 of its text's key
-    words, so a one-sentence read-back of a long ask is still recognised; the
-    session name and tool alone never make a long ask's reading. A candidate
-    whose matched words are all matched by another candidate that matches more
-    drops out (a read-back naming `Read` reads the `Read` ask, not the `Write`
-    one on the same file). One candidate left is read. Several left that the
-    turn matched on exactly the same words: the one with the larger share of
-    its own key words is read, and an equal share reads none. Several left on
-    different words (a turn reading two asks at once) read none. The ask's windows are the person's turns right
+    first agent turn, the fixed greeting, never counts). Attribution is strict
+    and unique, because asks are written by agents and one could be written to
+    take over another's reading ("pnpm test" and "pnpm test; also git push
+    --force"). A turn is a candidate for an ask when it holds at least half of
+    that ask's key words, or, for a long ask (more than 8 key words in its
+    text), at least 4 of the key words in its text that no other ask on the
+    call has, so a one-sentence read-back of a long ask is still recognised;
+    the session name and tool alone never make a long ask's reading. With
+    other asks on the call:
+    - if any candidate has no word of its own (identical asks, or one whose
+      words are all inside another's), the turn reads nothing;
+    - a candidate is read only if the turn names every key word no other ask
+      on the call has (the session name included when the sessions differ; a
+      long ask that met the long-ask rule is excused from naming them all),
+      and, for a permission request, every token of its command and tool name
+      that no other ask has, short ones included (`rm`, `rf`, `f`; only `a`,
+      `an`, `to`, `in`, `of`, `on`, `at`, `by`, `it`, `is`, `or`, `as`, `be`
+      and the very common words are skipped). So "git push" never reads "git
+      push -f", and a read-back naming `Read` reads the `Read` ask, not the
+      `Write` one on the same file;
+    - exactly one such candidate is read; more than one reads nothing.
+    Alone on a call, an ask has nothing to be told apart from and the share
+    rule alone applies, so the persona's own example ("Allow pnpm test in
+    demo-app? Yes?") is recognised. With several asks, a read-back that leaves
+    out a distinguishing word (often the agent part of the session name, or a
+    long command's tail) reads nothing, and the ask is texted. The ask's windows are the person's turns right
     after each such reading, up to the next agent turn of any kind: an agent
     turn not recognised as reading this ask (a paraphrase, a tie, another ask,
     small talk) always closes the window, and a re-reading opens a new one. The
@@ -382,8 +397,20 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
     voice agent submitted for the "no" still wins, see above). No read-back, a
     read-back of a different ask, a read-back with no reply, or a statement
     repeating the request ("Okay, it will run pnpm test.") is no approval: the
-    ask stays open and is texted. The voice model's own judgement still
-    decides whether to submit the allow; the daemon only refuses one the
+    ask stays open and is texted. The reply to the read-back (the owner's
+    turns in its window) must also be an answer, not noise: not empty, not
+    only fillers (`um`, `uh`, `er`, `mm`, `hmm`, `oh`, ...), with no
+    transcriber marker (`[inaudible]`, `(noise)`, `<unk>`: any bracket), at
+    most `MAX_REPLY_WORDS` (8) words, and not only the read-back's own words
+    said back ("git push origin main", "push"; the read-back's "yes?" does not
+    count as words to echo, so "yes" approves). Last comes `isAffirmative`:
+    today it accepts every reply that passed those checks
+    (`REQUIRE_CASUAL_YES` is off, as the owner directed), so unrelated chatter
+    ("the dog is barking") still approves after a read-back. Whether to
+    require a casual yes (`hasCasualYes`: a generous list, "yeah", "of
+    course", "go ahead", "you bet", "mm-hmm", ...) is an open decision for the
+    owner; switching is that one constant. The voice model's own judgement
+    still decides whether to submit the allow; the daemon only refuses one the
     transcript does not back.
   "Sounds doubtful" (`soundsDoubtful`) means refusal, negation, hesitation,
   delay or correction: words such as `no`, `not`, `never`, `wait`, `hold`,
@@ -396,8 +423,9 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
   `decline`, `pass`, `block`, `veto`, `rather`, ...), the phrases "hang on",
   "hold on", "not yet", "no way", "never mind", "uh uh" and "uh oh", and
   questions (a `?`, or `what`, `why`, `how`, `which`, ..., since speech
-  recognition often drops the question mark). "Mm-hmm" and "uh-huh" are a yes,
-  not a "hmm" or "huh". A question asked before the owner's answer ("what does
+  recognition often drops the question mark). "Mm-hmm", "uh-huh" and "mhm",
+  written as one hyphenated sound, are a yes, not a "hmm" or "huh"; "mm,
+  hmm" is a hesitation. A question asked before the owner's answer ("what does
   it push?") does not count against a later yes; one in the answer itself or
   after it does. Idioms that carry a negation word ("no problem", "why not")
   still sound doubtful: a transcript without commas cannot tell "no problem"

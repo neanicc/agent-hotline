@@ -1,6 +1,16 @@
 import type { TranscriptTurn } from "@hotline/providers";
 import { describe, expect, it } from "vitest";
-import { answerWindows, confirmVoiceDecision, type ReadAsk, readings, soundsDoubtful } from "../src/index.js";
+import {
+  answerWindows,
+  confirmVoiceDecision,
+  hasCasualYes,
+  isAffirmative,
+  MAX_REPLY_WORDS,
+  REQUIRE_CASUAL_YES,
+  type ReadAsk,
+  readings,
+  soundsDoubtful,
+} from "../src/index.js";
 
 const PUSH: ReadAsk = { text: "git push origin main", nickname: "Claude in demo-app", toolName: "Bash" };
 const INSTALL: ReadAsk = { text: "npm install left-pad", nickname: "Codex in api-server", toolName: "Bash" };
@@ -104,6 +114,8 @@ describe("readings of long asks", () => {
     ...LONG,
     text: "Run the database migration for the billing service, then seed the staging tables from production snapshots and page the on-call engineer",
   };
+  /** The same long text as a question: no command tokens to name. */
+  const LONG_QUESTION: ReadAsk = { text: LONG.text, nickname: "Codex in api-server", kind: "question" };
   const SHORT_BACK = agent(
     "Allow Bash to run the billing migration and seed staging for Claude in demo-app? Yes?",
   );
@@ -111,8 +123,16 @@ describe("readings of long asks", () => {
   it("recognises a short read-back that names a few of a long ask's words", () => {
     // It names 8 of the ask's 17 key words, under half, but 4 of them come from the text.
     expect(readings([GREETING, SHORT_BACK], [LONG])).toEqual([undefined, 0]);
-    // Also next to a short ask from the same session, which the read-back half matches by name and tool.
-    expect(readings([GREETING, SHORT_BACK], [PUSH, LONG])).toEqual([undefined, 1]);
+    // A long question next to another ask: four of its own words are enough.
+    const question = agent("So, billing migration, seed staging, worker pool: which one?");
+    expect(readings([GREETING, question], [PUSH, LONG_QUESTION])).toEqual([undefined, 1]);
+  });
+
+  it("next to another ask, a long permission request needs every command word the other lacks", () => {
+    // The short read-back leaves out "anonymised", "fixtures", "restart", ...: it reads nothing.
+    expect(readings([GREETING, SHORT_BACK], [PUSH, LONG])).toEqual([undefined, undefined]);
+    const full = agent(`Allow Bash to ${LONG.text} for Claude in demo-app? Yes?`);
+    expect(readings([GREETING, full], [PUSH, LONG])).toEqual([undefined, 1]);
   });
 
   it("never reads a long ask from its session name and tool alone, or from too few of its words", () => {
@@ -125,25 +145,92 @@ describe("readings of long asks", () => {
 
   it("reads none when a short read-back matches two long asks equally", () => {
     expect(readings([GREETING, SHORT_BACK], [LONG, OTHER_LONG])).toEqual([undefined, undefined]);
-    // A word only one of them has tells them apart.
+    // Naming everything only one of them has tells them apart.
     const named = agent(
-      "Allow the billing migration, seed staging with the fixtures, for Claude in demo-app? Yes?",
+      "Allow the billing migration, seed staging with the anonymised fixtures and restart the worker pool, for Claude in demo-app? Yes?",
     );
     expect(readings([GREETING, named], [LONG, OTHER_LONG])).toEqual([undefined, 0]);
+    // One of its words is not enough.
+    const one = agent(
+      "Allow the billing migration, seed staging with the fixtures, for Claude in demo-app? Yes?",
+    );
+    expect(readings([GREETING, one], [LONG, OTHER_LONG])).toEqual([undefined, undefined]);
   });
 
   it("approves a long ask after its short read-back", () => {
     const reading = agent(`Claude in demo-app wants to use Bash: ${LONG.text}. Okay?`);
     const transcript = [GREETING, reading, owner("sure"), SHORT_BACK, owner("yep, do it")];
     expect(
-      confirmVoiceDecision({
-        transcript,
-        asks: [PUSH, LONG],
-        index: 1,
-        decision: allow,
-        ownerWords: "yep do it",
-      }),
+      confirmVoiceDecision({ transcript, asks: [LONG], index: 0, decision: allow, ownerWords: "yep do it" }),
     ).toEqual({ confirmed: true, excerpt: "yep, do it" });
+  });
+});
+
+describe("strict, unique attribution between asks", () => {
+  // An agent-written ask that shares another's words must never take over its reading.
+  const TESTS: ReadAsk = { text: "pnpm test", nickname: "Claude in demo-app", toolName: "Bash" };
+  const TESTS_AND_PUSH: ReadAsk = { ...TESTS, text: "pnpm test; also git push --force" };
+  const READ_TESTS = agent("Claude in demo-app wants to use Bash: pnpm test. Okay?");
+  const BACK_TESTS = agent("Allow Bash to pnpm test for Claude in demo-app? Yes?");
+  const BACK_BOTH = agent("Allow Bash to pnpm test; also git push --force for Claude in demo-app? Yes?");
+
+  it.each([
+    ["the plain ask first", [TESTS, TESTS_AND_PUSH]],
+    ["the longer ask first", [TESTS_AND_PUSH, TESTS]],
+  ])("reads nothing when one ask contains another (%s)", (_, asks) => {
+    for (const turn of [READ_TESTS, BACK_TESTS, BACK_BOTH]) {
+      expect(readings([GREETING, turn], asks)).toEqual([undefined, undefined]);
+    }
+    // So no yes after any of them approves either ask.
+    const transcript = [GREETING, READ_TESTS, owner("sure"), BACK_TESTS, owner("yes")];
+    for (const index of [0, 1]) {
+      expect(
+        confirmVoiceDecision({ transcript, asks, index, decision: allow, ownerWords: "yes" }).confirmed,
+      ).toBe(false);
+    }
+  });
+
+  it.each([
+    ["first", 0],
+    ["second", 1],
+  ])("never lets a read-back of the plain ask approve the forced push (it is %s)", (_, at) => {
+    const push: ReadAsk = { ...TESTS, text: "git push --force" };
+    const asks = at === 0 ? [push, TESTS] : [TESTS, push];
+    const transcript = [GREETING, READ_TESTS, owner("sure"), BACK_TESTS, owner("yes")];
+    expect(readings(transcript, asks)).toEqual([undefined, 1 - at, undefined, 1 - at, undefined]);
+    expect(
+      confirmVoiceDecision({ transcript, asks, index: at, decision: allow, ownerWords: "yes" }).confirmed,
+    ).toBe(false);
+  });
+
+  it("needs every command token that tells the asks apart, short ones included", () => {
+    const push: ReadAsk = { ...TESTS, text: "git push" };
+    const force: ReadAsk = { ...TESTS, text: "git push -f" };
+    // "f" is the only difference; a read-back without it reads nothing, and "git push" itself is contained.
+    expect(
+      readings([GREETING, agent("Allow Bash to git push -f for Claude in demo-app? Yes?")], [push, force]),
+    ).toEqual([undefined, undefined]);
+    const rm: ReadAsk = { ...TESTS, text: "rm -rf build" };
+    const ls: ReadAsk = { ...TESTS, text: "ls build" };
+    expect(
+      readings([GREETING, agent("Allow Bash to rm -rf build for Claude in demo-app? Yes?")], [rm, ls]),
+    ).toEqual([undefined, 0]);
+    expect(
+      readings([GREETING, agent("Allow Bash to remove build for Claude in demo-app? Yes?")], [rm, ls]),
+    ).toEqual([undefined, undefined]);
+  });
+
+  it("needs every key word that tells the asks apart, the session name included", () => {
+    // PUSH and INSTALL come from different sessions: a read-back must name the session too.
+    const noName = agent("Allow git push origin main? Yes?");
+    expect(readings([GREETING, noName], [PUSH, INSTALL])).toEqual([undefined, undefined]);
+    // Alone on a call there is nothing to tell apart, so the share rule alone applies.
+    expect(readings([GREETING, noName], [PUSH])).toEqual([undefined, 0]);
+  });
+
+  it("reads nothing from identical asks", () => {
+    const transcript = [GREETING, READ_TESTS, owner("sure"), BACK_TESTS, owner("yes")];
+    expect(readings(transcript, [TESTS, { ...TESTS }])).toEqual(transcript.map(() => undefined));
   });
 });
 
@@ -401,12 +488,12 @@ describe("confirmVoiceDecision", () => {
     const backed = [GREETING, READ_PUSH, owner("sure"), BACK_PUSH, owner("yes")];
     expect(confirm([...backed, owner("no")], 0, "yes").confirmed).toBe(false);
     expect(confirm([...backed, owner("wait")], 0, "yes").confirmed).toBe(false);
-    const reRead = agent("Just to confirm: git push origin main via Bash?");
+    const reRead = agent("Just to confirm: git push origin main via Bash for Claude in demo-app?");
     expect(confirm([...backed, reRead, owner("no, don't")], 0, "yes").confirmed).toBe(false);
   });
 
   it("lets a question before the yes stand, but a question after it takes the yes back", () => {
-    const reRead = agent("Just to confirm: git push origin main via Bash?");
+    const reRead = agent("Just to confirm: git push origin main via Bash for Claude in demo-app?");
     expect(
       confirm(
         [GREETING, READ_PUSH, owner("what does it push?"), reRead, owner("yes, push it")],
@@ -419,7 +506,7 @@ describe("confirmVoiceDecision", () => {
   });
 
   it("counts doubt only from the read-back on: 'no', a read-back, then 'okay yes' approves", () => {
-    const reRead = agent("Just to confirm: git push origin main via Bash?");
+    const reRead = agent("Just to confirm: git push origin main via Bash for Claude in demo-app?");
     expect(
       confirm([GREETING, READ_PUSH, owner("no"), reRead, owner("okay yes")], 0, "okay yes").confirmed,
     ).toBe(true);
@@ -432,7 +519,7 @@ describe("confirmVoiceDecision", () => {
   });
 
   it("doubt after the read-back blocks, and a read-back with no reply approves nothing", () => {
-    const reRead = agent("Just to confirm: git push origin main via Bash?");
+    const reRead = agent("Just to confirm: git push origin main via Bash for Claude in demo-app?");
     expect(confirm([GREETING, READ_PUSH, owner("yes"), reRead, owner("hmm")], 0, "yes").confirmed).toBe(
       false,
     );
@@ -601,5 +688,106 @@ describe("confirmVoiceDecision for options and done", () => {
     expect(done("that's it for today")).toBe(true);
     expect(done("nothing, thanks")).toBe(true);
     expect(done("now write the tests")).toBe(false);
+  });
+});
+
+describe("noise in reply to a read-back is never a yes", () => {
+  const reply = (...said: string[]) =>
+    confirmVoiceDecision({
+      transcript: [GREETING, READ_PUSH, owner("sure"), BACK_PUSH, ...said.map(owner), agent("Got it.")],
+      asks: [PUSH, INSTALL],
+      index: 0,
+      decision: allow,
+      ownerWords: said.join(" "),
+    });
+
+  it.each(["um", "uh", "hmm", "er", "mm", "um, uh", "Mm, hmm.", "oh"])("rejects the filler %j", (said) => {
+    expect(reply(said).confirmed).toBe(false);
+  });
+
+  it.each(["[inaudible]", "(noise)", "<unk>", "yes [inaudible]", "[laughs] sure"])(
+    "rejects a reply with the transcriber's marker %j",
+    (said) => {
+      expect(reply(said)).toEqual({
+        confirmed: false,
+        reason: "the owner's reply to the read-back was not made out",
+      });
+    },
+  );
+
+  it("rejects an empty reply", () => {
+    expect(reply("").confirmed).toBe(false);
+    expect(reply("   ").confirmed).toBe(false);
+  });
+
+  it(`rejects a reply longer than ${MAX_REPLY_WORDS} words`, () => {
+    expect(reply("yeah sure go ahead and push it to main now")).toEqual({
+      confirmed: false,
+      reason: "the owner's reply to the read-back is too long to be a clear yes",
+    });
+    expect(reply("yeah sure go ahead and push it now").confirmed).toBe(true);
+  });
+
+  it.each(["git push origin main", "Claude in demo-app", "push", "allow bash to git push"])(
+    "rejects a reply that only repeats the read-back: %j",
+    (said) => {
+      expect(reply(said)).toEqual({ confirmed: false, reason: "the owner only repeated the read-back" });
+    },
+  );
+
+  it.each(["yes, push it", "yes", "okay, git push origin main"])(
+    "takes %j, which says more than the read-back",
+    (said) => {
+      expect(reply(said).confirmed).toBe(true);
+    },
+  );
+
+  it("takes unrelated chatter while a casual yes is not required (open decision for the owner)", () => {
+    // REQUIRE_CASUAL_YES is off: only the negative checks apply, as the owner directed.
+    expect(REQUIRE_CASUAL_YES).toBe(false);
+    expect(reply("the dog is barking").confirmed).toBe(true);
+  });
+});
+
+describe("isAffirmative: the one switch for requiring a casual yes", () => {
+  const NATURAL = [
+    "of course",
+    "absolutely",
+    "do it",
+    "go for it",
+    "send it",
+    "for sure",
+    "yeah go ahead",
+    "mm-hmm",
+    "uh-huh",
+    "mhm",
+    "you bet",
+    "sounds good",
+    "please do",
+    "yep",
+    "ok",
+  ];
+  const CHATTER = ["the dog is barking", "I'm driving", "in a meeting", "the kids are home"];
+
+  it.each([...NATURAL, ...CHATTER])("accepts %j today, when only the negative checks apply", (said) => {
+    expect(isAffirmative(said)).toBe(true);
+  });
+
+  it.each(NATURAL)("with a casual yes required, still accepts %j", (said) => {
+    expect(hasCasualYes(said)).toBe(true);
+    expect(isAffirmative(said, true)).toBe(true);
+  });
+
+  it.each(CHATTER)("with a casual yes required, rejects %j", (said) => {
+    expect(hasCasualYes(said)).toBe(false);
+    expect(isAffirmative(said, false)).toBe(true);
+    expect(isAffirmative(said, true)).toBe(false);
+  });
+
+  it("does not take a bare hmm or huh as the yes sound", () => {
+    expect(hasCasualYes("hmm")).toBe(false);
+    expect(hasCasualYes("huh")).toBe(false);
+    expect(soundsDoubtful("mm, hmm")).toBe(true);
+    expect(soundsDoubtful("mm-hmm")).toBe(false);
   });
 });

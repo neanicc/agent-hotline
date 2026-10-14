@@ -18,8 +18,14 @@
 //   it", "send it" all approve), but the reply and everything the owner says
 //   about the ask after the read-back must hold no refusal, hedge or doubt and
 //   no question back. Doubt before the read-back ("hmm") does not count against
-//   a clear reply after it. No read-back, or a read-back of another ask, is no
-//   approval.
+//   a clear reply after it. The reply must be an answer, not noise (fillers, a
+//   transcriber's "[inaudible]", a long ramble, the read-back said back), and
+//   pass `isAffirmative`, which today accepts all such replies. No read-back,
+//   or a read-back of another ask, is no approval.
+// - Which ask a turn reads is attributed strictly (`readingOf`): with several
+//   asks on the call, the turn must name every word that tells its ask apart,
+//   and anything ambiguous (identical asks, one contained in another, two
+//   matches) reads nothing.
 // - A free-text decision (a question's answer, a stop's next instruction) must
 //   itself be words the owner said, since it becomes the agent's next input.
 // - Anything the owner said about the ask after those words may take it back:
@@ -33,13 +39,15 @@
 // Everything here fails closed: an ask whose reading cannot be found in the
 // transcript, or words found in the wrong place, is not confirmed, and the ask
 // stays unanswered (call policy then texts it). Pure: no I/O, no clock.
-import type { Decision } from "@hotline/core";
+import type { AskKind, Decision } from "@hotline/core";
 import { ownerSaid, type TranscriptTurn } from "@hotline/providers";
 
 /** One ask as it was read out on the call, for finding its reading in the transcript. */
 export interface ReadAsk {
   text: string;
   nickname: string;
+  /** Without it, an ask with a tool name counts as a permission request. */
+  kind?: AskKind;
   toolName?: string;
   /** A question's options, for checking that the owner named the one submitted. */
   options?: readonly string[];
@@ -49,10 +57,19 @@ export interface ReadAsk {
 export const READING_MIN_SHARE = 0.5;
 /**
  * An ask whose text has more key words than this is long: a turn that names
- * half this many of its text's key words also reads it, so a one-sentence
- * read-back of a long ask is still recognised.
+ * half this many of its text's key words that no other ask on the call has
+ * also reads it, so a one-sentence read-back of a long ask is still recognised.
  */
 export const LONG_ASK_KEY_WORDS = 8;
+/** A reply to a read-back longer than this many words is not taken as a yes. */
+export const MAX_REPLY_WORDS = 8;
+/**
+ * Whether a reply to a read-back must also hold a casual yes (`hasCasualYes`)
+ * to approve. Off: the owner directed that no keyword list may reject a
+ * natural yes, so only the negative checks apply. Whether to turn it on is an
+ * open decision for the owner (HL-09c); switching is this one constant.
+ */
+export const REQUIRE_CASUAL_YES = false;
 /** Ask text the voice agent was given is cut to this many characters (`callVariables`). */
 const READ_TEXT_LENGTH = 300;
 /** Owner turns kept as the stored excerpt, at most. The contract allows 2000 characters. */
@@ -84,8 +101,28 @@ const DOUBT_WORDS = wordSet(
     "havent hasnt hadnt aint mustnt neednt mightnt shant",
   ].join(" "),
 );
-/** Spoken yeses that contain a doubt word on their own ("mm-hmm", "uh-huh"). */
-const AFFIRMING_SOUNDS = ["mm hmm", "mm hm", "m hmm", "uh huh"];
+/**
+ * Spoken yeses that contain a filler or doubt word on their own, as a
+ * transcriber writes them: hyphenated ("Mm-hmm", "uh-huh") or "mhm". "Mm, hmm"
+ * or a bare "hmm" stays a hesitation.
+ */
+const AFFIRMING_SOUND = /(?<![\p{L}\p{N}])(?:m+-h+m+|mm-hm|uh-huh|mhm)(?![\p{L}\p{N}])/gu;
+/** Sounds that are not an answer on their own: a reply of only these is noise. */
+const FILLERS = wordSet("um umm uhm uh uhh er erm ah ahh oh eh mm mmm hmm hm hmmm");
+/** What a transcriber writes for speech it could not make out: "[inaudible]", "(noise)", "<unk>". */
+const TRANSCRIBER_MARKER = /[[\]()<>{}]/;
+/**
+ * A generous list of casual yeses, for `hasCasualYes`. Not required today
+ * (`REQUIRE_CASUAL_YES`); "of course", "go ahead", "for sure", "you bet",
+ * "sounds good" and "do it" are covered by their words.
+ */
+const CASUAL_YES = wordSet(
+  [
+    "yes yeah yep yup yea ya yah yas aye sure ok okay okey alright allright fine affirmative",
+    "approve approved allow allowed go proceed continue absolutely definitely certainly totally course",
+    "do send ship push please correct right bet cool great perfect good indeed agreed deal mhm",
+  ].join(" "),
+);
 /** How the owner may name option N (index N - 1). "one" is too common ("the second one") to name option 1 against another. */
 const NUMBER_WORDS = "one two three four five six seven eight nine".split(" ");
 const ORDINALS = "first second third fourth fifth sixth seventh eighth ninth".split(" ");
@@ -128,11 +165,9 @@ function tokens(text: string): string[] {
 export function soundsDoubtful(text: string, questions = true): boolean {
   const plain = normalized(text);
   if (plain.includes("n't")) return true;
-  const all = tokens(text);
   // "Mm-hmm" and "uh-huh" are a yes, though "hmm" and "huh" alone are not.
-  let joined = ` ${all.join(" ")} `;
-  for (const sound of AFFIRMING_SOUNDS) joined = joined.replaceAll(` ${sound} `, " ");
-  const words = joined.split(" ").filter((word) => word.length > 0);
+  const words = tokens(plain.replace(AFFIRMING_SOUND, " "));
+  const joined = ` ${words.join(" ")} `;
   if (words.some((word) => word === "t" || DOUBT_WORDS.has(word))) return true;
   // A question is never an approval ("okay, what does it do"; speech recognition
   // often drops the question mark). `questions: false` is for turns before the
@@ -143,70 +178,108 @@ export function soundsDoubtful(text: string, questions = true): boolean {
 
 const isKey = (word: string) => word.length >= 3 && !COMMON.has(word);
 
+/** Short words that never tell two commands apart in a read-back. */
+const FILLER_COMMAND_WORDS = wordSet("a an to in of on at by it is or as be");
+
 interface AskKeys {
   /** Every word that identifies the ask: its text, session name and tool. */
   all: ReadonlySet<string>;
-  /** The ones from its text alone. */
-  text: ReadonlySet<string>;
+  /** The key words no other ask on the call has; a reading must name them all. */
+  distinct: ReadonlySet<string>;
+  /** Of those, the ones from its text, for the long-ask rule. */
+  distinctText: ReadonlySet<string>;
+  /** Whether its text has more than `LONG_ASK_KEY_WORDS` key words. */
+  long: boolean;
+  /**
+   * For a permission request on a call with other asks: every token of its
+   * command and tool name, short ones included ("rm", "f"), that no other ask
+   * has. A reading must name them all, so "git push" never reads "git push -f".
+   */
+  command: ReadonlySet<string>;
 }
-
-/** The words that identify an ask when the agent reads it out. */
-function keyWords(ask: ReadAsk): AskKeys {
-  const fromText = tokens(ask.text.slice(0, READ_TEXT_LENGTH));
-  const every = [...fromText, ...[ask.nickname, ask.toolName ?? ""].flatMap(tokens)];
-  const all = new Set(every.filter(isKey));
-  return { all: all.size > 0 ? all : new Set(every), text: new Set(fromText.filter(isKey)) };
-}
-
-const subset = (a: ReadonlySet<string>, b: ReadonlySet<string>) => [...a].every((word) => b.has(word));
 
 /**
- * Which ask one agent turn reads, or undefined. An ask is a candidate when the
- * turn holds at least `READING_MIN_SHARE` of its key words, or, for a long ask,
- * half of `LONG_ASK_KEY_WORDS` of its text's key words. Of the candidates, one
- * whose matched words are all matched by another, which matches more, drops out
- * (the turn says nothing that is only that ask's). If one is left it is read. If
- * several are left and the turn matched the same words of each, the one with
- * the larger share of its own key words is read; otherwise (a turn reading two
- * asks, or a tie) none is.
+ * The words that identify each ask on a call when the agent reads it out,
+ * worked out against the other asks so that a reading is attributed strictly.
+ */
+function keyWords(asks: readonly ReadAsk[]): AskKeys[] {
+  const parts = asks.map((ask) => {
+    const text = tokens(ask.text.slice(0, READ_TEXT_LENGTH));
+    const tool = tokens(ask.toolName ?? "");
+    const every = [...text, ...tokens(ask.nickname), ...tool];
+    const keys = new Set(every.filter(isKey));
+    return {
+      all: keys.size > 0 ? keys : new Set(every),
+      textKeys: new Set(text.filter(isKey)),
+      commandWords: new Set([...text, ...tool].filter((w) => !COMMON.has(w) && !FILLER_COMMAND_WORDS.has(w))),
+      permission: ask.kind === "permission" || (ask.kind === undefined && ask.toolName !== undefined),
+    };
+  });
+  return parts.map((part, i) => {
+    const others = parts.filter((_, j) => j !== i);
+    const distinct = new Set([...part.all].filter((word) => !others.some((other) => other.all.has(word))));
+    const command =
+      part.permission && others.length > 0
+        ? new Set([...part.commandWords].filter((w) => !others.some((other) => other.commandWords.has(w))))
+        : new Set<string>();
+    return {
+      all: part.all,
+      distinct,
+      distinctText: new Set([...part.textKeys].filter((word) => distinct.has(word))),
+      long: part.textKeys.size > LONG_ASK_KEY_WORDS,
+      command,
+    };
+  });
+}
+
+const covers = (said: ReadonlySet<string>, words: ReadonlySet<string>) =>
+  [...words].every((w) => said.has(w));
+
+/**
+ * Which ask one agent turn reads, or undefined. Attribution is strict and
+ * unique, since asks are written by agents and one could be written to take
+ * over another's reading:
+ *
+ * - An ask is a candidate when the turn holds at least `READING_MIN_SHARE` of
+ *   its key words, or, for a long ask, half of `LONG_ASK_KEY_WORDS` of the key
+ *   words in its text that no other ask on the call has.
+ * - With other asks on the call, a candidate that has no word of its own (its
+ *   words are all another ask's: identical asks, or one contained in another)
+ *   makes the turn read nothing.
+ * - A candidate is read only if the turn names every key word no other ask has
+ *   (a long ask that met the long-ask rule is excused from naming them all),
+ *   and, for a permission request, every command and tool token no other ask
+ *   has. Exactly one such candidate is read; more than one reads nothing.
  */
 function readingOf(said: ReadonlySet<string>, keys: readonly AskKeys[]): number | undefined {
+  const alone = keys.length === 1;
   const candidates = keys.flatMap((key, ask) => {
     if (key.all.size === 0) return [];
-    const matched = new Set([...key.all].filter((word) => said.has(word)));
-    const textMatched = [...key.text].filter((word) => said.has(word)).length;
-    const share = matched.size / key.all.size;
-    const long =
-      key.text.size > LONG_ASK_KEY_WORDS && textMatched >= Math.ceil(LONG_ASK_KEY_WORDS * READING_MIN_SHARE);
-    return share >= READING_MIN_SHARE || long ? [{ ask, matched, share }] : [];
+    const share = [...key.all].filter((word) => said.has(word)).length / key.all.size;
+    const named = [...key.distinctText].filter((word) => said.has(word)).length;
+    const long = key.long && named >= Math.ceil(LONG_ASK_KEY_WORDS * READING_MIN_SHARE);
+    return share >= READING_MIN_SHARE || long ? [{ ask, key, long }] : [];
   });
-  const left = candidates.filter(
-    (c) =>
-      !candidates.some((other) => other.matched.size > c.matched.size && subset(c.matched, other.matched)),
+  if (!alone && candidates.some(({ key }) => key.distinct.size === 0 && key.command.size === 0)) {
+    return undefined;
+  }
+  const read = candidates.filter(
+    ({ key, long }) => alone || ((long || covers(said, key.distinct)) && covers(said, key.command)),
   );
-  const [first, ...rest] = left;
-  if (first === undefined) return undefined;
-  if (rest.length === 0) return first.ask;
-  const sameWords = rest.every(
-    (c) => c.matched.size === first.matched.size && subset(c.matched, first.matched),
-  );
-  if (!sameWords) return undefined;
-  const best = Math.max(...left.map((c) => c.share));
-  const top = left.filter((c) => c.share === best);
-  return top.length === 1 ? top[0]?.ask : undefined;
+  return read.length === 1 ? read[0]?.ask : undefined;
 }
 
 /**
  * For each transcript turn, the index of the ask it reads out, or undefined
- * (see `readingOf`; a tie reads none). The call's first agent turn is the fixed
- * greeting and never reads an ask, so an ask written to look like the greeting
- * cannot pull the owner's reply to it into its window.
+ * (see `readingOf`; anything ambiguous reads none). The call's first agent turn
+ * is the fixed greeting and never reads an ask, so an ask written to look like
+ * the greeting cannot pull the owner's reply to it into its window.
  */
 export function readings(
   transcript: readonly TranscriptTurn[],
   asks: readonly ReadAsk[],
 ): (number | undefined)[] {
-  const keys = asks.map(keyWords);
+  const keys = keyWords(asks);
   const firstAgent = transcript.findIndex((turn) => turn.role === "agent");
   return transcript.map((turn, index) => {
     if (turn.role !== "agent" || index === firstAgent) return undefined;
@@ -328,10 +401,48 @@ export interface ConfirmInput {
   ownerWords: string;
 }
 
+/** Whether `reply` holds a casual yes from a generous list ("yeah", "of course", "go ahead", "mm-hmm"). */
+export function hasCasualYes(reply: string): boolean {
+  const plain = normalized(reply);
+  return plain.search(AFFIRMING_SOUND) >= 0 || tokens(plain).some((word) => CASUAL_YES.has(word));
+}
+
 /**
- * An `allow`: the owner's words are their reply to a read-back of this ask, and
- * nothing the owner said about the ask from that read-back on sounds doubtful
- * or asks a question back.
+ * The affirmative check on a reply to a read-back, run after the negative ones
+ * (doubt, a question back, noise). Today it accepts every reply that passed
+ * those (`REQUIRE_CASUAL_YES` is off, as the owner directed); with it on, the
+ * reply must also hold a casual yes. Pending the owner's decision (HL-09c).
+ */
+export function isAffirmative(reply: string, requireCasualYes = REQUIRE_CASUAL_YES): boolean {
+  return !requireCasualYes || hasCasualYes(reply);
+}
+
+/**
+ * Why a reply to a read-back is noise, not an answer, or undefined: nothing
+ * said, only fillers ("um", "hmm"), a transcriber's marker ("[inaudible]"),
+ * more than `MAX_REPLY_WORDS` words, or the request's words said back with
+ * nothing else ("pnpm test in demo-app").
+ */
+function replyNoise(reply: string, readBack: string, askWords: ReadonlySet<string>): string | undefined {
+  if (TRANSCRIBER_MARKER.test(reply)) return "the owner's reply to the read-back was not made out";
+  const plain = normalized(reply);
+  const words = tokens(plain.replace(AFFIRMING_SOUND, " yes "));
+  if (words.every((word) => FILLERS.has(word))) return "the owner's reply to the read-back is not an answer";
+  if (words.length > MAX_REPLY_WORDS)
+    return "the owner's reply to the read-back is too long to be a clear yes";
+  // The read-back's own "yes?" or "confirm" is the agent asking, not words to echo.
+  const back = new Set(tokens(readBack).filter((word) => !ASKS_FOR_YES.has(word)));
+  const said = words.filter((word) => !FILLERS.has(word));
+  if (said.every((word) => back.has(word)) && said.some((word) => askWords.has(word))) {
+    return "the owner only repeated the read-back";
+  }
+  return undefined;
+}
+
+/**
+ * An `allow`: the owner's words are their reply to a read-back of this ask, the
+ * reply is an answer rather than noise, and nothing the owner said about the
+ * ask from that read-back on sounds doubtful or asks a question back.
  */
 function confirmAllow(
   transcript: readonly TranscriptTurn[],
@@ -339,6 +450,7 @@ function confirmAllow(
   index: number,
   windows: readonly ReadingWindow[],
   ownerWords: string,
+  askWords: ReadonlySet<string>,
 ): VoiceConfirmation {
   const backs = windows.filter((window) => isReadBack(transcript, read, index, window.at));
   if (backs.length === 0) return { confirmed: false, reason: "the request was not read back for a yes" };
@@ -354,6 +466,14 @@ function confirmAllow(
   if (after.some((turn) => soundsDoubtful(turn.message))) {
     return { confirmed: false, reason: "the owner's reply to the read-back is not a clear yes" };
   }
+  const back = backs[match.window];
+  const reply = ownerTurns(back?.turns ?? [])
+    .map((turn) => turn.message)
+    .join(" ");
+  const noise = replyNoise(reply, transcript[back?.at ?? -1]?.message ?? "", askWords);
+  if (noise !== undefined) return { confirmed: false, reason: noise };
+  if (!isAffirmative(reply))
+    return { confirmed: false, reason: "the owner's reply to the read-back is not a yes" };
   return { confirmed: true, excerpt: match.text.slice(0, MAX_EXCERPT) };
 }
 
@@ -368,7 +488,10 @@ export function confirmVoiceDecision({
   const read = readings(transcript, asks);
   const opened = readingWindows(transcript, read, index);
   if (opened.length === 0) return { confirmed: false, reason: "the ask's reading is not in the transcript" };
-  if (decision.type === "allow") return confirmAllow(transcript, read, index, opened, ownerWords);
+  if (decision.type === "allow") {
+    const askWords = keyWords(asks)[index]?.all ?? new Set<string>();
+    return confirmAllow(transcript, read, index, opened, ownerWords, askWords);
+  }
   const windows = opened.map((window) => window.turns);
   const match = matchingTurns(ownerWords, windows);
   if (match === undefined) {
