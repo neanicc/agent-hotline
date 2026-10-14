@@ -173,6 +173,9 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
       log,
       version: options.version,
       webhookRoutes: sms.routes,
+      clock,
+      askTimeoutMinutes: config.policy.askTimeoutMinutes,
+      nicknames: config.nicknames,
     });
     if (sms.off !== undefined) daemon.log.info({ reason: sms.off }, "sms webhook off");
     store.appendAudit(

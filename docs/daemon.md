@@ -39,7 +39,41 @@ on first start in the configured secret store (the Keychain on macOS, else the
 `0600` secrets file) and reused after that. The MCP server and hook adapters read
 it from the same store.
 
-Routes today: `GET /v1/health` returns `{"ok": true, "version": "..."}`.
+Routes today (`agent-routes.ts`; the MCP server in [mcp.md](mcp.md) is the client):
+
+| Route | Does |
+| --- | --- |
+| `GET /v1/health` | `{"ok": true, "version": "..."}` |
+| `POST /v1/sessions` | Registers `{agent, cwd, agentSessionId?}` and returns `{session}` (201). A live session with the same agent and `agentSessionId` is reused (200) |
+| `POST /v1/sessions/:sessionId/asks` | Queues `{kind: "question" \| "notify", text, options?, urgent?}` and returns `{ask}` (201). Text and options are redacted before they are stored. The ask expires after `policy.askTimeoutMinutes`. A session with 3 open questions or 10 open notifications, or all sessions with 10 or 30, gets `429` (audited as `ask.refused`). `urgent` is the agent's request only; call policy decides |
+| `GET /v1/asks/:askId/outcome?waitSeconds=0..30` | `{state: "waiting", ask}` or `{state: "final", ask, outcome}`, waiting up to `waitSeconds` for a change |
+| `POST /v1/asks/:askId/cancel` | Cancels an ask that is still open: `{cancelled}` |
+| `POST /v1/sessions/:sessionId/end` | Marks the session `ended` and cancels its open asks: `{ended}`. An ended session takes no new asks (`404`) |
+| `GET /v1/sessions/:sessionId/inbox` | `{session, instructions, asks}`: owner instructions (always empty until HL-10 adds the queue) and the 20 newest asks with their outcomes |
+
+Bodies are strict: an unknown field, a relative `cwd`, a `permission` or `stop`
+kind (HL-06 adds them) or more than 9 options gets `400` with the failing paths,
+never the values. An unknown session or ask gets `404`.
+
+Before counting against the caps, every open ask past its `expiresAt` is marked
+`expired`, so asks nobody polls (a killed agent, an undelivered notification)
+stop blocking new ones. The routes do not check that an ask belongs to the
+caller's session: the per-install token is the only boundary, and any holder
+of it can act on any session.
+
+An outcome is `answered` only when the store holds the answer, which
+`recordAnswer` accepted after `answerProblem` passed. An open ask whose
+`expiresAt` has passed on the daemon's clock is marked `expired` when it is next
+read and reported as `no-answer` with reason `timeout`, and `cancelled` as
+`no-answer` with reason `cancelled`. Nothing else produces an outcome.
+
+The store tells listeners about every committed status change
+(`onAskChange`), so a waiting outcome request returns as soon as the ask is
+answered, expires or is cancelled, and the session's state follows its asks
+(`waiting-on-human` while it has an open question, else `working`). On
+shutdown, waiting requests return at once. Agent API connections still open
+2 seconds later are closed: a client that aborted a long poll could otherwise
+hold the shutdown until the keep-alive timeout.
 
 ### Webhooks
 
@@ -198,6 +232,8 @@ message, request fields, error stacks and bindings are all covered:
 
 On the first SIGINT or SIGTERM the daemon writes `daemon.stopping` to the audit
 log and stops both listeners. In-flight requests can finish; new ones get `503`.
+On the agent API, waiting outcome requests return at once, and connections still
+open after 2 seconds are closed.
 It then closes the database and exits 0. If requests are still running after
 10 seconds, it gives up and exits 1. A second signal during shutdown gets Node's
 default handling, which ends the process at once.

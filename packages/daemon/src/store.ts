@@ -8,7 +8,17 @@
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { Answer, Ask, type AskStatus, answerProblem, CallRecord, Id, Session } from "@hotline/core";
+import {
+  type AgentKind,
+  Answer,
+  Ask,
+  type AskKind,
+  type AskStatus,
+  answerProblem,
+  CallRecord,
+  Id,
+  Session,
+} from "@hotline/core";
 import { privatePathProblem } from "./private-file.js";
 import { createRedactor, type Redactor } from "./redact.js";
 
@@ -187,8 +197,12 @@ interface Schema<T> {
   safeParse(input: unknown): { success: true; data: T } | { success: false };
 }
 
+/** Told the id of an ask whose status changed, after the change is committed. */
+export type AskChangeListener = (askId: string) => void;
+
 export class HotlineStore {
   private closed = false;
+  private readonly askListeners = new Set<AskChangeListener>();
 
   constructor(
     private readonly db: DatabaseSync,
@@ -229,6 +243,17 @@ export class HotlineStore {
     return row === undefined ? undefined : this.decode(Session, "session", row);
   }
 
+  /** The live (not `ended`) session of `agent` with the agent's own session id, if any. */
+  findLiveSession(agent: AgentKind, agentSessionId: string): Session | undefined {
+    return this.db
+      .prepare(
+        "SELECT id, record FROM sessions WHERE agent_session_id = ? AND state != 'ended' ORDER BY last_seen_at DESC, id",
+      )
+      .all(agentSessionId)
+      .map((row) => this.decode(Session, "session", row))
+      .find((session) => session.agent === agent);
+  }
+
   listSessions(): Session[] {
     return this.db
       .prepare("SELECT id, record FROM sessions ORDER BY last_seen_at DESC, id")
@@ -263,6 +288,40 @@ export class HotlineStore {
     return row === undefined ? undefined : this.decode(Ask, "ask", row);
   }
 
+  /**
+   * How many asks of `kind` are still `pending` or `in-flight`, in one session or,
+   * with `sessionId` undefined, in all of them.
+   */
+  countOpenAsks(sessionId: string | undefined, kind: AskKind): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS open FROM asks WHERE (? IS NULL OR session_id = ?)
+         AND status IN ('pending', 'in-flight') AND json_extract(record, '$.kind') = ?`,
+      )
+      .get(sessionId ?? null, sessionId ?? null, kind);
+    return Number(row?.open ?? 0);
+  }
+
+  /** The newest `limit` asks of one session, newest first. */
+  listSessionAsks(sessionId: string, limit: number): Ask[] {
+    return this.db
+      .prepare("SELECT id, record FROM asks WHERE session_id = ? ORDER BY created_at DESC, id DESC LIMIT ?")
+      .all(sessionId, limit)
+      .map((row) => this.decode(Ask, "ask", row));
+  }
+
+  /**
+   * Calls `listener` with an ask's id each time `setAskStatus` or `recordAnswer`
+   * changes that ask, after the transaction commits. Returns a function that stops
+   * listening. A listener that throws affects neither the write nor other listeners.
+   */
+  onAskChange(listener: AskChangeListener): () => void {
+    this.askListeners.add(listener);
+    return () => {
+      this.askListeners.delete(listener);
+    };
+  }
+
   /** Asks in creation order, optionally only those with one of `statuses`. */
   listAsks(statuses?: readonly AskStatus[]): Ask[] {
     const rows =
@@ -286,12 +345,14 @@ export class HotlineStore {
     if ((status as AskStatus) === "answered") {
       throw new StoreError("An ask is answered only through recordAnswer");
     }
-    return this.transaction(() => {
+    const changed = this.transaction(() => {
       const ask = this.getAsk(id);
       if (ask === undefined || (ask.status !== "pending" && ask.status !== "in-flight")) return false;
       this.writeAskStatus({ ...ask, status });
       return true;
     });
+    if (changed) this.askChanged(id);
+    return changed;
   }
 
   // Answers ----------------------------------------------------------------
@@ -313,6 +374,7 @@ export class HotlineStore {
         .run(record.askId, record.answeredAt, JSON.stringify(record));
       this.writeAskStatus({ ...ask, status: "answered" });
     });
+    this.askChanged(record.askId);
   }
 
   getAnswer(askId: string): Answer | undefined {
@@ -400,6 +462,16 @@ export class HotlineStore {
   }
 
   // Internals --------------------------------------------------------------
+
+  private askChanged(askId: string): void {
+    for (const listener of [...this.askListeners]) {
+      try {
+        listener(askId);
+      } catch {
+        // A listener's failure must not undo or hide a committed write.
+      }
+    }
+  }
 
   private writeAskStatus(ask: Ask): void {
     const record = Ask.parse(ask);

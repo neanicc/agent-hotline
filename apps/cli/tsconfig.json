@@ -6,5 +6,9 @@
     "tsBuildInfoFile": "dist/.tsbuildinfo"
   },
   "include": ["src"],
-  "references": [{ "path": "../../packages/core" }, { "path": "../../packages/daemon" }]
+  "references": [
+    { "path": "../../packages/core" },
+    { "path": "../../packages/daemon" },
+    { "path": "../../packages/agents" }
+  ]
 }
