@@ -28,8 +28,10 @@ decides anything itself.
   `no-answer` with reason `unclear`. The daemon builds `answered` only from an
   answer `recordAnswer` stored after `answerProblem` passed.
 - **Bounded asks.** A session may have at most 3 open questions and 10 open
-  notifications. Past that the daemon answers `429` and stores nothing, and
-  `ask_human` returns `no-answer`.
+  notifications, and all sessions together 10 and 30. Past that the daemon
+  answers `429` and stores nothing, and `ask_human` returns `no-answer`. When
+  `ask_human` gives up on an unreachable daemon, it also tries to cancel the ask,
+  so nobody is called about it if the daemon comes back.
 - **`urgent` is only a request.** The agent sets it, so a looping or
   prompt-injected agent can set it too. Call policy (HL-09) must honor it only
   when the owner turned on `quietHours.allowUrgentCalls`, and always within the

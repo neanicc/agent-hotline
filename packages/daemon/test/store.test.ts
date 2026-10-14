@@ -424,6 +424,10 @@ describe("ask change listeners", () => {
     expect(db.countOpenAsks("s1", "question")).toBe(2);
     expect(db.countOpenAsks("s1", "notify")).toBe(1);
     expect(db.countOpenAsks("s2", "question")).toBe(0);
+    db.putSession({ ...session, id: "s2", agentSessionId: "agent-session-2" });
+    db.addAsk(ask({ id: "a5", sessionId: "s2" }));
+    expect(db.countOpenAsks(undefined, "question")).toBe(3);
+    expect(db.countOpenAsks(undefined, "notify")).toBe(1);
   });
 
   it("find a live session by agent and agent session id", async () => {

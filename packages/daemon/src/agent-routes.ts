@@ -43,6 +43,8 @@ export const CLOSE_GRACE_MS = 2_000;
  * expired. Beyond this the daemon answers 429 and stores no ask.
  */
 export const MAX_OPEN_ASKS = { question: 3, notify: 10 } as const;
+/** The same across every session, so registering many sessions does not multiply the limit. */
+export const MAX_OPEN_ASKS_TOTAL = { question: 10, notify: 30 } as const;
 
 const ELLIPSIS = "…";
 
@@ -225,7 +227,8 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
           agent,
           ...(agentSessionId === undefined ? {} : { agentSessionId }),
           cwd,
-          nickname: defaultNickname(agent, cwd, nicknames),
+          // The folder name will be spoken to the owner, so it is redacted like ask text.
+          nickname: cut(redactor.text(defaultNickname(agent, cwd, nicknames)), 60),
           state: "working",
           registeredAt: now,
           lastSeenAt: now,
@@ -247,22 +250,29 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
       return reply.code(404).send({ error: "unknown session" });
     }
     const { kind, urgent = false } = body.data;
-    // A looping or prompt-injected agent must not be able to pile up asks.
-    if (store.countOpenAsks(session.id, kind) >= MAX_OPEN_ASKS[kind]) {
-      store.appendAudit("ask.refused", { kind, reason: "too many open asks" }, clock(), {
-        sessionId: session.id,
-      });
-      return reply.code(429).send({ error: "too many open asks for this session" });
-    }
-    // Redact before anything is stored, so no later step can forward the raw text.
-    const text = cut(redactor.text(body.data.text), MAX_ASK_TEXT);
-    const options =
-      kind === "question" ? (body.data.options ?? []).map((o) => cut(redactor.text(o), MAX_OPTION_TEXT)) : [];
     if (kind === "notify" && (body.data.options?.length ?? 0) > 0) {
       return reply
         .code(400)
         .send({ error: "invalid request", issues: ["options: only questions carry options"] });
     }
+    // A looping or prompt-injected agent must not be able to pile up asks, in one
+    // session or by registering many.
+    const scope =
+      store.countOpenAsks(session.id, kind) >= MAX_OPEN_ASKS[kind]
+        ? "session"
+        : store.countOpenAsks(undefined, kind) >= MAX_OPEN_ASKS_TOTAL[kind]
+          ? "all sessions"
+          : undefined;
+    if (scope !== undefined) {
+      store.appendAudit("ask.refused", { kind, reason: `too many open asks (${scope})` }, clock(), {
+        sessionId: session.id,
+      });
+      return reply.code(429).send({ error: `too many open asks (${scope})` });
+    }
+    // Redact before anything is stored, so no later step can forward the raw text.
+    const text = cut(redactor.text(body.data.text), MAX_ASK_TEXT);
+    const options =
+      kind === "question" ? (body.data.options ?? []).map((o) => cut(redactor.text(o), MAX_OPTION_TEXT)) : [];
     if (new Set(options).size !== options.length) {
       return reply
         .code(400)

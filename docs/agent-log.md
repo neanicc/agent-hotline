@@ -597,7 +597,8 @@ Template:
   12 of 12 passed, and the full suite passed 6 times in a row.
 - Evidence (automated, worktree, Node 24.11.0 and 22.23.1): `run.sh setup`,
   `build` (Biome, `tsc -b`, typecheck, CLI smoke) and `test` pass: 354 tests in
-  21 files, and 562 in 29 files after merging main with HL-03, HL-07 and HL-03b. They include 26 MCP tests through the SDK `Client` over
+  21 files, and 565 in 29 files after merging main with HL-03, HL-07 and HL-03b
+  and the review fixes. They include 26 MCP tests through the SDK `Client` over
   `InMemoryTransport` against a real daemon on 127.0.0.1 (temp store, fake
   clock), 8 `hotline mcp` CLI tests over stdio framing on in-process streams,
   14 daemon route tests and 2 store tests. Mutation checks: dropping the
@@ -625,6 +626,15 @@ Template:
     not just the newest 20 asks.
   - Session reuse looks up `agent_session_id` with `findLiveSession` instead of
     scanning every session.
+  - Second round (2 P2, 2 P3):
+    - Open asks are also capped across all sessions: 10 questions and 30
+      notifications. A Codex session never reuses a session, so per-session
+      caps alone could be multiplied by reconnecting.
+    - When `ask_human` gives up on an unreachable daemon, it now tries to
+      cancel the ask.
+    - The folder name in a default nickname is redacted, because it will be
+      spoken.
+    - The notify-options check runs before the cap.
 - Open issues or follow-ups: HL-09 should record the specific no-answer reason
   (`no-pickup`, `unclear`, `dropped`) on the ask. Today only `expired` maps to
   `timeout` and `cancelled` to `cancelled`. HL-10 should add the instruction

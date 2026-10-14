@@ -476,6 +476,16 @@ describe("relaying outcomes", () => {
     expect(result).toMatchObject({ outcome: "no-answer", askId: "ask-1", reason: "unclear" });
   });
 
+  it("cancels the ask, best effort, when it gives up on an unreachable daemon", async () => {
+    const scripted = new ScriptedDaemon(() => {
+      throw new DaemonError("unreachable", "down");
+    });
+    const { mcp } = await connect(scripted);
+    const result = resultJson(await mcp.callTool({ name: "ask_human", arguments: { question: "Go?" } }));
+    expect(result).toMatchObject({ outcome: "no-answer", askId: "ask-1", reason: "failed" });
+    expect(scripted.cancelled).toEqual(["ask-1"]);
+  });
+
   it("registers again once when the daemon has forgotten the session", async () => {
     const scripted = new ScriptedDaemon((ask) => answered(ask.id, { type: "text", text: "yes" }));
     scripted.createFailures.push(new DaemonError("not-found", "unknown session"));

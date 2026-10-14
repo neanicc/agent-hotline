@@ -288,14 +288,17 @@ export class HotlineStore {
     return row === undefined ? undefined : this.decode(Ask, "ask", row);
   }
 
-  /** How many of a session's asks of `kind` are still `pending` or `in-flight`. */
-  countOpenAsks(sessionId: string, kind: AskKind): number {
+  /**
+   * How many asks of `kind` are still `pending` or `in-flight`, in one session or,
+   * with `sessionId` undefined, in all of them.
+   */
+  countOpenAsks(sessionId: string | undefined, kind: AskKind): number {
     const row = this.db
       .prepare(
-        `SELECT COUNT(*) AS open FROM asks WHERE session_id = ? AND status IN ('pending', 'in-flight')
-         AND json_extract(record, '$.kind') = ?`,
+        `SELECT COUNT(*) AS open FROM asks WHERE (? IS NULL OR session_id = ?)
+         AND status IN ('pending', 'in-flight') AND json_extract(record, '$.kind') = ?`,
       )
-      .get(sessionId, kind);
+      .get(sessionId ?? null, sessionId ?? null, kind);
     return Number(row?.open ?? 0);
   }
 

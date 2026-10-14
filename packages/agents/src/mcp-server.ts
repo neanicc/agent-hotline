@@ -328,7 +328,11 @@ export function createHotlineMcpServer(options: HotlineMcpOptions): HotlineMcpSe
               if (extra.signal.aborted || (error instanceof DaemonError && error.kind === "aborted")) break;
               const delay = retryDelaysMs[failures];
               failures += 1;
-              if (delay === undefined) return json(noAnswer("failed", ask.id));
+              if (delay === undefined) {
+                // Best effort: if the daemon comes back, nobody should be called for an ask we gave up on.
+                await daemon.cancelAsk(ask.id).catch(() => false);
+                return json(noAnswer("failed", ask.id));
+              }
               await sleep(delay, extra.signal);
             }
           }

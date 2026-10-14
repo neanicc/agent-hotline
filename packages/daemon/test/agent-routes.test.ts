@@ -12,6 +12,7 @@ import {
   INBOX_ASK_LIMIT,
   type InboxResponse,
   MAX_OPEN_ASKS,
+  MAX_OPEN_ASKS_TOTAL,
   type OutcomeResponse,
   openStore,
   type StartDaemonOptions,
@@ -366,6 +367,29 @@ describe("agent API routes", () => {
       expect((await ask(daemon, session.id, { kind: "notify", text: `FYI ${i}` })).status).toBe(201);
     }
     expect((await ask(daemon, session.id, { kind: "notify", text: "Too many" })).status).toBe(429);
+  });
+
+  it("cap open asks across all sessions, so registering more sessions does not help", async () => {
+    const daemon = await start();
+    let created = 0;
+    for (let s = 0; created < MAX_OPEN_ASKS_TOTAL.question; s++) {
+      const session = await register(daemon, { cwd: `/work/app-${s}` });
+      for (let i = 0; i < MAX_OPEN_ASKS.question && created < MAX_OPEN_ASKS_TOTAL.question; i++, created++) {
+        expect((await ask(daemon, session.id, { kind: "question", text: `Q${s}.${i}?` })).status).toBe(201);
+      }
+    }
+    const fresh = await register(daemon, { cwd: "/work/fresh" });
+    const refused = await ask(daemon, fresh.id, { kind: "question", text: "Me too?" });
+    expect(refused.status).toBe(429);
+    expect(refused.json).toEqual({ error: "too many open asks (all sessions)" });
+    expect(daemon.store.countOpenAsks(undefined, "question")).toBe(MAX_OPEN_ASKS_TOTAL.question);
+  });
+
+  it("redact the folder name in a default nickname", async () => {
+    const daemon = await start();
+    const secret = `sk_${"live"}_${"x9".repeat(14)}`;
+    const session = await register(daemon, { cwd: `/work/${secret}` });
+    expect(daemon.store.getSession(session.id)?.nickname).toBe("Claude in [REDACTED]");
   });
 
   it("keep a session waiting while any question is open, however many asks came after it", async () => {
