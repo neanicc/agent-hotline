@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   ConfigError,
   DEFAULT_COST_RATES,
+  DEFAULT_VOICE_LLM,
+  isVoiceLlm,
   MAX_PIN_SCRYPT_LOG_N,
   MAX_PIN_SCRYPT_P,
   MAX_PIN_SCRYPT_R,
@@ -11,6 +13,7 @@ import {
   parseConfigText,
   parsePinHash,
   pinScryptMaxmem,
+  VOICE_LLMS,
 } from "../src/index.js";
 
 const PIN_HASH = `scrypt$15$8$1$${"s".repeat(22)}$${"h".repeat(43)}`;
@@ -48,6 +51,19 @@ describe("parseConfig", () => {
       costs: { ...DEFAULT_COST_RATES },
       nicknames: {},
     });
+  });
+
+  it("takes a documented voice.llm and refuses any other id", () => {
+    expect(DEFAULT_VOICE_LLM).toBe("claude-haiku-4-5");
+    for (const llm of VOICE_LLMS) {
+      expect(parseConfig({ ...minimal, voice: { llm } }).voice.llm).toBe(llm);
+      expect(isVoiceLlm(llm)).toBe(true);
+    }
+    // In ElevenLabs' API enum but not on its documented LLM list, so not allowed yet.
+    for (const llm of ["claude-haiku-5-5", "gpt-4o-mini", "claude-haiku-4-5 ", ""]) {
+      expect(issuesOf({ ...minimal, voice: { llm } }), llm).toEqual([expect.stringMatching(/^voice\.llm:/)]);
+      expect(isVoiceLlm(llm)).toBe(false);
+    }
   });
 
   it("takes cost rate overrides and refuses negative or non-numeric rates", () => {

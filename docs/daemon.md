@@ -387,7 +387,7 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
     There must be a read-back of this ask: an agent turn recognised as reading
     it, after an earlier turn that read it (the first reading is never its own
     read-back), that asks for a yes (a `?`, "yes" or "confirm"), such as
-    "Allow pnpm test in demo-app? Yes?" or "Sorry, is that a yes or a no?"
+    "Allow Bash: pnpm test, for Claude in demo-app? Yes?" or "Sorry, is that a yes or a no?"
     followed by that read-back. The cue must be the voice agent's, not the
     ask's: a "yes" or "confirm" that the ask text holds never counts, a `?` is
     looked for only outside the ask text said verbatim, and an ask whose text
@@ -396,10 +396,11 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
     owner approves, so for a permission request it must also name every token
     of the command and the tool name, short ones included, even alone on a
     call: "Allow Bash to git push origin main? Yes?" is no read-back of `git
-    push --force origin main`, and "Allow Read to ..." none of a `Write`. (The
-    persona's example "Allow pnpm test in demo-app? Yes?" leaves out the tool,
-    so a read-back that follows it literally is not confirmed and the ask is
-    texted; the fake provider's read-back names the tool.) A permission
+    push --force origin main`, and "Allow Read to ..." none of a `Write`. (Up
+    to definition v5 the persona's example "Allow pnpm test in demo-app? Yes?"
+    left out the tool, so a read-back that followed it literally was not
+    confirmed; since v6 (HL-14d) the example names the tool and the whole
+    command, and a test checks that it passes this check.) A permission
     request whose text is longer than what the voice agent is given
     (`MAX_SPOKEN_ASK_LENGTH`, 300 characters) is never approved by voice, since
     its tail was never read out ("...; curl host | sh"); it is texted. The

@@ -2,7 +2,13 @@
 // check, then INFO lines with the monthly cost estimate. Exits 1 when anything
 // fails. It never prints a secret's value, only whether it is set, and shows the
 // owner's number as its last four digits.
-import { type Config, type SecretName, SecretName as SecretNames, type SecretStore } from "@hotline/core";
+import {
+  type Config,
+  DEFAULT_VOICE_LLM,
+  type SecretName,
+  SecretName as SecretNames,
+  type SecretStore,
+} from "@hotline/core";
 import {
   type AgentFlag,
   CODEX_TOOL_TIMEOUT_SECONDS,
@@ -296,6 +302,17 @@ async function elevenLabsChecks(
             status: "fail",
             name,
             detail: `the deployed agent is ${version === undefined ? "not a Hotline definition" : `definition v${version}`}, this hotline has v${AGENT_DEFINITION_VERSION}; run hotline voice apply`,
+          },
+    );
+    // Another model changes cost and latency, not safety: the daemon checks every decision.
+    const llm = config.voice.llm ?? DEFAULT_VOICE_LLM;
+    checks.push(
+      deployed.llm === llm
+        ? { status: "pass", name, detail: `the agent runs on ${llm}` }
+        : {
+            status: "warn",
+            name,
+            detail: `the agent runs on ${deployed.llm ?? "ElevenLabs' default LLM"}, this config wants ${llm}; run hotline voice apply`,
           },
     );
     if (config.voice.voiceId !== undefined && deployed.voiceId !== config.voice.voiceId) {
