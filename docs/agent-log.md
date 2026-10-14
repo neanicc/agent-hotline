@@ -797,3 +797,19 @@ Template:
     once (`docs/daemon.md`).
   - Mutation checks, each reverted: presence-only post-call precheck (3 tests
     fail), no daily cap (1), splicing the stale list (1).
+- Sixth bot staff review on #33 (approve with nits, score 92): `runDaemon` now
+  records each PIN lockout as `voice.pin-lockout` in the audit log (P3). The
+  rest is the HL-09 hand-off, collected here:
+  - `submitAnswer` must resolve the conversation id to a call Hotline placed
+    and is still waiting on, else answer `not-recorded`; the route's
+    outbound/inbound classification alone is not enough (P2).
+  - Before recording any decision, confirm `ownerWords` with `ownerSaid`
+    against the post-call transcript, and treat a missing or late post-call
+    event as no answer.
+  - A high-risk allow needs `confirmation: "pin"` or a confirming text. Core's
+    `answerProblem` (HL-02) and the queue (HL-03) already refuse it otherwise;
+    keep a scenario where the model submits `allow` without the PIN (P2).
+  - Handlers must be idempotent per conversation and ask, since replay
+    memories reset on restart (P3).
+  - Map `unclear` to the queue's `unclear` event and `initiation-failure` to
+    `no-pickup` (busy, no-answer) or `failed`.

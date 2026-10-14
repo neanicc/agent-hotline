@@ -172,6 +172,8 @@ async function voiceWebhook(
     check: (pin) => verifyPin(pin, pinHash),
     clock,
     onVerified: (pin) => redactor.addShortSecret(pin),
+    // Recorded now; the inbound line (HL-10) also texts the owner about it.
+    onLockout: (direction) => store.appendAudit("voice.pin-lockout", { direction }, clock()),
   });
   const routes = elevenLabsRoutes({
     toolSecret,

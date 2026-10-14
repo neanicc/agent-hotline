@@ -276,6 +276,17 @@ describe("runDaemon", () => {
       body: raw,
     });
     expect(posted.status).toBe(200);
+    // Six wrong PINs on calls claiming the owner's number lock inbound PIN checks.
+    for (const conversation of ["conv_in_1", "conv_in_2", "conv_in_3"]) {
+      for (const pin of ["1111", "2222"]) {
+        await tool("verify_pin", {
+          conversation_id: conversation,
+          caller_id: OWNER,
+          called_number: "+15555550101",
+          pin,
+        });
+      }
+    }
 
     signals.emit("SIGTERM");
     expect(await exit).toBe(0);
@@ -285,6 +296,7 @@ describe("runDaemon", () => {
     expect(audit).toEqual([
       { event: "voice.answer", detail: JSON.stringify({ decision: "allow", recorded: false }) },
       { event: "voice.initiation-failure", detail: JSON.stringify({ reason: "busy" }) },
+      { event: "voice.pin-lockout", detail: JSON.stringify({ direction: "inbound" }) },
     ]);
     const text = lines.join("");
     expect(text).not.toContain(toolSecret);
