@@ -3149,3 +3149,73 @@ Template:
   - `docs/install.md` says that whole `ANTHROPIC_*` and `OPENAI_*` prefixes
     are withheld, so a custom endpoint setting does not reach the judge
     (P3).
+
+## 2026-10-14 — HL-13b Persist PIN budgets, alarm limit, held instructions and replay memories (#78)
+
+- Decision: migration 5 (appended; 1 to 4 unchanged) adds `pin_failures`,
+  `inbound_calls` and `tool_deliveries`. The `PinGate` counts wrong PINs
+  through a `PinFailureLog` (`storedPinFailures(store)` in the daemon,
+  memory in tests), so the 6-an-hour and 10-a-day budgets per direction hold
+  across a restart. Which calls proved the PIN and each call's own two
+  attempts stay in memory on purpose: a restart makes a call give the PIN
+  again (fails closed), and a call that was mid-guess gets its two attempts
+  back, still inside the stored budgets. A failure log that cannot be read
+  or written refuses the attempt without checking the PIN.
+- Decision: the forgery alarm's and each direction's lockout text's last send
+  time are in `daemon_state` (`security.forgery-texted-at`,
+  `inbound.lockout-texted-at`), merged with the run's own record so a store
+  error never allows extra texts.
+- Decision: held inbound instructions and each call's session numbering are
+  saved per call (`inbound_calls`) on every change, the instruction and the
+  owner's words redacted first, and loaded in the `InboundLine` constructor,
+  before any route serves. The post-call event confirms them against the
+  pulled transcript as usual; after a restart that is the redacted copy, so
+  an instruction with a secret in it fails closed. The row is deleted when
+  the event is handled or the call is forgotten (past its hour, which a
+  start also checks). A saved call that does not parse is deleted, audited
+  (`unreadable`) and texted about. The old `inbound.held` counts are still
+  read once, so the first start after upgrading tells the owner what a
+  pre-HL-13b run lost.
+- Decision: server-tool deliveries that changed state are kept in
+  `tool_deliveries` for their two hours, so a replayed `verify_pin` or
+  `send_instruction` after a restart gets the first response and does not
+  run again (with held instructions now persisted, a replayed
+  `send_instruction` could otherwise have held a duplicate). Deliveries still
+  running stay in memory. A store that cannot be read answers `busy`; one that
+  cannot be written keeps the delivery in memory for this run.
+- Decision: the post-call replay memory is not persisted. A replay after a
+  restart (it needs a signature inside the 30 minute window) is pulled and
+  handled again and changes nothing: call orchestration's saved state ignores
+  it (`voice.post-call-ignored`, existing test in `orchestration.test.ts`),
+  the inbound line deleted the call's held instructions when it handled the
+  event and `addInstruction` is idempotent by id (new test in
+  `inbound-line.test.ts`), and the inbound call record is an upsert.
+- Decision (issue P3, done here): the SMS route and each server tool get
+  `maxInFlight` 8 and a 5 second body deadline, as the post-call route has.
+  The other P3 (count texts sent outside the queue against `textsPerHour`
+  and `textsPerDay`) touches call policy and is left as a follow-up.
+- `docs/security.md` is not on main yet (HL-13, PR #77, is open), so the
+  residual-risk and follow-up notes went into `docs/daemon.md`; updating
+  security.md's "Accepted residual risks" and "Follow-ups" for HL-13b is a
+  follow-up once #77 lands.
+- Evidence: `scripts/ci/run.sh build` (lint, typecheck) and `test` pass.
+  New tests reopen the store (`persisted-limits.test.ts`: migration from
+  schema 4, hourly and daily PIN budgets across reopens, a broken failure log
+  refusing unchecked, the forgery alarm and lockout text limits across a
+  reopen, tool deliveries), restart the whole daemon on the same home
+  (`restart-limits.test.ts`: the hourly budget and the daily cap hold across
+  restarts; a replayed guess after a restart is answered from the store and
+  not counted), and restart the inbound line (held instructions confirmed by
+  the next run's post-call event, session numbers and caps kept, expired and
+  unreadable saved calls texted once, pre-HL-13b counts). The old test that
+  expected a restart to drop held instructions now asserts that they are
+  kept. Route tests cover a replay after a restart, a broken delivery store,
+  and the new in-flight caps. Mutation checks, each reverted: the PIN log not
+  stored in `runDaemon` (3 tests fail), the delivery memory not stored (1),
+  the inbound line not restoring (5), the alarm or the lockout limit ignoring
+  the store (1 each), the in-flight caps removed (4). The scenario suite
+  could not be run locally (the sandbox refuses commands containing its
+  stage name); hosted CI runs it. No real call, text or credential was used.
+- Open issues or follow-ups: security.md update after #77; count out-of-queue
+  texts against the text rate limits; HL-13c (#80) retries processing records
+  and normalises the SMS body comparison in the same files.
