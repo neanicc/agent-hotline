@@ -541,7 +541,7 @@ Template:
   the `call-me` command; HL-09 maps that command to this event, dedupes inbound
   texts by message id, and turns the ignore reasons into owner replies.
 
-## 2026-10-14 — HL-08 ElevenLabs voice provider (#PR)
+## 2026-10-14 — HL-08 ElevenLabs voice provider (#33)
 
 - Decision / change:
   - `packages/providers`: `VoiceProvider.callOwner({callId, asks})`, bound to
