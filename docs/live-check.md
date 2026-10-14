@@ -21,7 +21,7 @@ scenario suite and the carry-over items on issue #17.
 [section 6](#6-cleanup-and-rollback) undoes everything.
 
 Budget about three hours and a few dollars of usage on top of the monthly fees
-([README costs](../README.md#costs)): roughly 25 short calls and 30 texts.
+([README costs](../README.md#costs)): roughly 45 short calls and 30 texts.
 
 ## Ground rules
 
@@ -120,7 +120,7 @@ folder name is what the voice says ("Claude in demo-app").
 
 ```sh
 mkdir -p ~/demo-app && cd ~/demo-app
-git init -q
+git init -q -b main
 printf '{"name":"demo-app","private":true,"scripts":{"test":"echo tests pass"}}\n' > package.json
 git add package.json && git commit -qm init
 git init -q --bare ~/demo-app-remote.git
@@ -244,13 +244,16 @@ Then edit `~/.hotline/config.json` and set, keeping everything else:
 
 ```json
 {
-  "rateLimits": { "callsPerHour": 10 },
+  "rateLimits": { "callsPerHour": 20, "callsPerDay": 60, "textsPerHour": 20, "textsPerDay": 60 },
   "policy": { "askTimeoutMinutes": 10, "maxConsecutiveContinuations": 2 }
 }
 ```
 
-- `callsPerHour: 10` (default 4) lets the steps follow each other without
-  waiting an hour.
+- The rate limits (defaults 4 and 20 calls, 10 and 50 texts) would otherwise
+  turn later calls into texts part way through: the run places about 45 calls,
+  counting the "what next?" calls of section 3, and sends about 30 texts. If a
+  step gets a text where it expects a call, look for `ask.not-called` in the
+  audit tail; a rate-limit reason means wait or raise the limit, not a FAIL.
 - `askTimeoutMinutes: 10` (default 30) makes the silence steps end in 10
   minutes.
 - `maxConsecutiveContinuations: 2` (default 5) lets L16 reach the cap in two
@@ -393,6 +396,11 @@ HOTLINE_PIN=480213 hotline init --non-interactive --owner +15555550100 \
   --voice-provider fake --sms-provider fake --secret-store file
 ```
 
+`480213` is a throwaway PIN for this scratch home only, which never answers a
+real call. Never reuse it, or any PIN written down here, as your real PIN: the
+real `hotline init` in P7 asks for it without echo, so it never lands in your
+shell history.
+
 Edit `$HOTLINE_HOME/config.json` and set `"policy": {"askTimeoutMinutes": 2}`,
 so a no-answer comes after two minutes, more than Codex's 60-second default
 tool timeout. Then, in the same terminal:
@@ -440,6 +448,9 @@ Record PASS or FAIL for each agent.
    Expected: no terminal prompt appears; the audit tail shows `ask.created`
    with `"kind":"permission"`; after about 2 minutes Claude Code reports the
    command was denied with "The owner did not approve this by phone."
+   When Claude Code then finishes its turn, its Stop hook waits on the fake
+   phone for about 2 more minutes before Claude Code goes idle; that is R5's
+   behaviour, not a hang.
 3. In Codex (`codex -a untrusted`), the same prompt. Expected: the same deny.
    The request is high risk (every Codex shell request is), which the audit
    entry's `"risk":"high"` shows.
@@ -472,6 +483,14 @@ stopwatch handy (L25).
 Unless a step says otherwise, check two things after every call: the audit
 tail has a `call.ended` entry with the `result` named in the step, and it has
 **no** `security.possible-forgery` or `security.unverified` entry (L26).
+
+**"What next?" calls.** From L4 on, away mode is on, so every time an agent
+finishes a turn its Stop hook phones you with a short summary and "what
+next?", and the agent waits for that answer. Unless the step says otherwise
+(L15 to L17 test these calls), answer each one with "that's it": the agent
+stops and no further call comes for that turn. Then type the step's next prompt. If you miss one, it
+ends as no answer after 10 minutes and the agent stops anyway. These calls
+are part of the run's budget and do not count as results.
 
 ### L1. Test call
 
@@ -787,11 +806,13 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST "$D/hooks/twilio/sms" \
   -H 'X-Twilio-Signature: bm90LWEtc2lnbmF0dXJl' --data 'Body=yes&From=%2B15555550100'
 curl -s -o /dev/null -w '%{http_code}\n' -X POST "$D/hooks/el/tools/submit_answer" \
   -H 'content-type: application/json' --data '{}'
+curl -s -o /dev/null -w '%{http_code}\n' -X POST "$D/hooks/el/post-call" \
+  -H 'content-type: application/json' --data '{"type":"post_call_transcription"}'
 curl -s -o /dev/null -w '%{http_code}\n' "$D/v1/health"
 ```
 
-Expected: `403`, `403`, and anything but `200` for the last (the agent API is
-not on the tunnel). The audit tail shows no state change.
+Expected: `403`, `403`, `403` (the post-call route has its own HMAC check),
+and anything but `200` for the last (the agent API is not on the tunnel). The audit tail shows no state change.
 
 ### L25. Voice model, latency and tools
 
@@ -932,7 +953,7 @@ Features merged (P2): #64 yes/no  #69 yes/no  #70 yes/no  #72 fix yes/no
 Plans: Twilio (upgraded) yes/no; ElevenLabs plan:
 Voice: library / clone / default      Voice model (doctor):
 Agent definition (doctor):            Reply judge (P7, P12): backend or off; judge credential (P14): login / API key
-Session settings (P10): callsPerHour= askTimeoutMinutes= maxConsecutiveContinuations=
+Session settings (P10): rateLimits= askTimeoutMinutes= maxConsecutiveContinuations=
 Doctor summary (P13):                 WARN lines:
 Latency (L25), typical seconds:       Sonnet 5.5 comparison:
 False no-answer (L27): misses / plain yeses =

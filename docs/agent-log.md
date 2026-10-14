@@ -2724,7 +2724,7 @@ Template:
     friction". The explanation of what is sent prints before the question,
     and an earlier `off` now defaults to no.
 
-## 2026-10-14 — HL-16 Live-call protocol
+## 2026-10-14 — HL-16 Live-call protocol (#74)
 
 - Decision / change: `docs/live-check.md` is now the owner's numbered
   protocol: prerequisites P1 to P13 (accounts, tunnel, Twilio and ElevenLabs
@@ -2742,9 +2742,10 @@ Template:
   fallback; the later owner direction on #57 (implemented by #70) makes
   `claude-haiku-4-5` the default. L25 measures the default and offers Sonnet
   5.5 as the comparison.
-- Session settings for the run (P10): `callsPerHour` 10, `askTimeoutMinutes`
-  10 and `maxConsecutiveContinuations` 2, with a copy of the config to restore
-  afterwards, so about 25 calls and the silence and cap steps fit in an
+- Session settings for the run (P10): raised rate limits (20 calls an hour,
+  60 a day, 20 texts an hour, 60 a day), `askTimeoutMinutes` 10 and
+  `maxConsecutiveContinuations` 2, with a copy of the config to restore
+  afterwards, so about 45 calls and the silence and cap steps fit in an
   afternoon. They are the owner's own config, not a code change.
 - R1 to R6 use a scratch `HOTLINE_HOME` with the file secret store: the
   Keychain store's service name is fixed (`agent-hotline`), so a scratch home
@@ -2777,3 +2778,12 @@ Template:
   `claude`/`codex` run against the daemon was used.
 - Open issues or follow-ups: the live run (owner); file one issue per failure
   it finds.
+- Review fixes (staff review and Greptile on #74):
+  - P10 raises all four rate limits for the run: the "what next?" calls bring
+    it to about 45 calls, past the default daily limit.
+  - Section 3 says to answer every "what next?" call with "that's it" unless
+    the step tests those calls.
+  - P3 creates `main` explicitly (`git init -b main`) for L9's push.
+  - L24 also posts an unsigned post-call webhook and expects 403.
+  - R1 says the scratch PIN is throwaway.
+  - The doc test also catches formatted and bare-digit phone numbers.

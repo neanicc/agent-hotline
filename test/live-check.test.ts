@@ -87,6 +87,23 @@ function brokenLinks(path: string, only?: (target: string) => boolean): string[]
   return problems;
 }
 
+/**
+ * Phone numbers as written: E.164 (also `%2B`-encoded), bare runs of 10 to 15
+ * digits, and North American numbers with spaces, dots, dashes or parentheses.
+ */
+function phoneNumbers(text: string): string[] {
+  const patterns = [
+    /\+\d{10,15}\b/g,
+    /%2B\d{10,15}\b/gi,
+    /(?<![\d.+B])\d{10,15}(?![\d.])/g,
+    /(?<![\d+])\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4}(?!\d)/g,
+  ];
+  return patterns.flatMap((pattern) => [...text.matchAll(pattern)].map((m) => m[0]));
+}
+
+/** The fake range tests and docs use: +1 555 555 0100 to 0199. */
+const isFakeNumber = (written: string) => /^1?555555(01\d\d)$/.test(written.replace(/%2B|\D/gi, ""));
+
 const STEP = /^### ([PRL]\d+)\. /;
 const steps = prose(live)
   .map((line) => STEP.exec(line)?.[1])
@@ -158,11 +175,15 @@ describe("docs/live-check.md", () => {
   });
 
   it("writes no phone number but the fake 555-01xx ones", () => {
-    const numbers = [
-      ...[...live.matchAll(/\+\d{10,15}\b/g)].map((m) => m[0]),
-      ...[...live.matchAll(/%2B(\d{10,15})\b/gi)].map((m) => `+${m[1]}`),
-    ];
+    const numbers = phoneNumbers(live);
     expect(numbers.length).toBeGreaterThan(0);
-    expect(numbers.filter((number) => !/^\+155555501\d\d$/.test(number))).toEqual([]);
+    expect(numbers.filter((written) => !isFakeNumber(written))).toEqual([]);
+  });
+
+  it("finds real-looking numbers in every written form", () => {
+    const real = ["+14165550199", "%2B14165550199", "4165550199", "(416) 555-0199", "416.555.0199"];
+    const found = phoneNumbers(`call ${real.join(" or ")} today`);
+    expect(found).toEqual(expect.arrayContaining(real));
+    expect(found.filter(isFakeNumber)).toEqual([]);
   });
 });
