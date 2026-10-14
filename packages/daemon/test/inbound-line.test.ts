@@ -417,6 +417,26 @@ describe("send_instruction", () => {
     expect(store.listInboundCalls()).toEqual([]);
   });
 
+  it("fails closed on an instruction redaction changed, when a restart came before its post-call event", async () => {
+    session("s-1", "Claude in demo-app");
+    line.getStatus(call());
+    expect(
+      line.sendInstruction({
+        ...call(),
+        sessionNumber: 1,
+        instruction: `use the key ${SECRET}`,
+        ownerWords: `session 1, use the key ${SECRET}`,
+      }),
+    ).toBe("queued");
+    const next = await restart();
+    // The saved copy is redacted, so the owner's words in the transcript no
+    // longer match it: nothing is queued, the owner is told, and no secret is stored.
+    await next.postCall(transcript("conv-1", `session 1, use the key ${SECRET}`), now, false);
+    expect(store.listInstructions()).toEqual([]);
+    expect(sms.sent.map((s) => s.text)).toEqual([expect.stringContaining("was not passed on")]);
+    expect(store.listAudit().find((e) => e.event === "voice.instruction-unconfirmed")).toBeDefined();
+  });
+
   it("tells the owner once about held instructions whose post-call event never came across a restart", async () => {
     session("s-1", "Claude in demo-app");
     line.getStatus(call());

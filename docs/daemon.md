@@ -262,7 +262,13 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
   `{"result": "busy"}` and does not run. `get_status` only
   reads, after the PIN, and runs every time. Remembered deliveries are kept in
   the store (`tool_deliveries`), so a replay after a restart also gets the
-  first response (HL-13b); deliveries still running are in memory.
+  first response (HL-13b); deliveries still running are in memory. Residual
+  risk: the key is a plain SHA-256 of the body, and a `verify_pin` body holds
+  the PIN, so for two hours a process that can read the database could find
+  the PIN by trying every 4 to 8 digit value against bodies it can guess
+  (the conversation id and call SID are also in the database). Such a
+  process can already read the config's scrypt `pinHash`, which a 4-digit
+  PIN does not resist either, so this adds little.
 - **Owner on the call:** the body's `caller_id` or `called_number`, which
   ElevenLabs fills from `system__caller_id` and `system__called_number`, must be
   `owner.phoneNumber`. Otherwise the answer is `{"result": "refused",

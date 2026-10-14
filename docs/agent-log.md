@@ -3247,6 +3247,12 @@ Template:
     call cannot throw past the audit and text about lost instructions.
   - Staff review P3s (SMS slots can delay a genuine text; two prunes and a
     count per tool call) are documented and left as they are.
+- Staff review of 6bb2854: (P2) a test now holds an instruction with a
+  redactable secret, restarts, and shows the post-call event queues nothing
+  and texts the owner (it fails closed, as documented). (P3) the residual
+  risk of the `tool_deliveries` key (a plain SHA-256 of a `verify_pin` body
+  that holds the PIN, kept two hours) is written up in `docs/daemon.md`. It
+  adds little over the scrypt `pinHash` such a reader already has.
 - Open issues or follow-ups: security.md update after #77; count out-of-queue
   texts against the text rate limits; HL-13c (#80) retries processing records
   and normalises the SMS body comparison in the same files.
