@@ -67,6 +67,7 @@ function clientFor(port: number, apiToken = token): DaemonClient {
 interface Connected {
   mcp: Client;
   settled: () => Promise<void>;
+  end: () => Promise<void>;
 }
 
 async function connect(
@@ -91,7 +92,7 @@ async function connect(
   const mcp = new Client({ name: clientName, version: "1.0.0" });
   await mcp.connect(clientSide);
   cleanups.push(() => mcp.close());
-  return { mcp, settled: () => hotline.settled() };
+  return { mcp, settled: () => hotline.settled(), end: () => hotline.end() };
 }
 
 async function waitFor<T>(probe: () => T | undefined, what: string, ms = 5_000): Promise<T> {
@@ -303,6 +304,17 @@ describe("hotline MCP server", () => {
     expect(running.store.getAsk(ask.id)?.status).toBe("cancelled");
   });
 
+  it("marks its session ended once the client has gone", async () => {
+    const running = await startTestDaemon();
+    const { mcp, end } = await connect(clientFor(running.apiPort));
+    await mcp.callTool({ name: "notify_human", arguments: { message: "Done." } });
+    const session = await waitFor(() => running.store.listSessions()[0], "the session");
+    await mcp.close();
+    await end();
+    expect(running.store.getSession(session.id)?.state).toBe("ended");
+    expect(running.store.listAsks(["pending"])).toEqual([]);
+  });
+
   it("forwards nothing secret: the daemon redacts the question before storing it", async () => {
     const running = await startTestDaemon();
     const { mcp } = await connect(clientFor(running.apiPort));
@@ -450,6 +462,10 @@ class ScriptedDaemon implements HotlineDaemon {
 
   async inbox(): Promise<Inbox> {
     throw new DaemonError("unreachable", "down");
+  }
+
+  async endSession(): Promise<boolean> {
+    return true;
   }
 }
 

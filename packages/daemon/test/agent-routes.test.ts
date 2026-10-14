@@ -121,6 +121,7 @@ describe("agent API routes", () => {
       ["GET", "/v1/sessions/id-1/inbox"],
       ["GET", "/v1/asks/id-1/outcome"],
       ["POST", "/v1/asks/id-1/cancel"],
+      ["POST", "/v1/sessions/id-1/end"],
     ] as const) {
       expect((await api(daemon, method, path, method === "POST" ? {} : undefined, "")).status).toBe(401);
       expect(
@@ -288,6 +289,24 @@ describe("agent API routes", () => {
       "ask.created",
       "ask.expired",
     ]);
+  });
+
+  it("end a session, cancelling its open asks and refusing new ones", async () => {
+    const daemon = await start();
+    const session = await register(daemon, { agentSessionId: "agent-session-9" });
+    const other = await register(daemon, { cwd: "/work/other" });
+    const { ask: mine } = await ask(daemon, session.id, { kind: "question", text: "Color?" });
+    const { ask: theirs } = await ask(daemon, other.id, { kind: "question", text: "Size?" });
+    expect((await api(daemon, "POST", `/v1/sessions/${session.id}/end`, {})).json).toEqual({ ended: true });
+    expect(daemon.store.getSession(session.id)?.state).toBe("ended");
+    expect(daemon.store.getAsk(mine.id)?.status).toBe("cancelled");
+    expect(daemon.store.getAsk(theirs.id)?.status).toBe("pending");
+    expect((await ask(daemon, session.id, { kind: "notify", text: "Hi" })).status).toBe(404);
+    expect((await api(daemon, "POST", `/v1/sessions/${session.id}/end`, {})).json).toEqual({ ended: false });
+    expect((await api(daemon, "POST", "/v1/sessions/nope/end", {})).status).toBe(404);
+    // The same agent session registering again gets a new live session.
+    const again = await register(daemon, { agentSessionId: "agent-session-9" });
+    expect(again.id).not.toBe(session.id);
   });
 
   it("cancel an ask the agent stopped waiting for", async () => {

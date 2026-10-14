@@ -48,6 +48,7 @@ Routes today (`agent-routes.ts`; the MCP server in [mcp.md](mcp.md) is the clien
 | `POST /v1/sessions/:sessionId/asks` | Queues `{kind: "question" \| "notify", text, options?, urgent?}` and returns `{ask}` (201). Text and options are redacted before they are stored. The ask expires after `policy.askTimeoutMinutes`. A session with 3 open questions or 10 open notifications, or all sessions with 10 or 30, gets `429` (audited as `ask.refused`). `urgent` is the agent's request only; call policy decides |
 | `GET /v1/asks/:askId/outcome?waitSeconds=0..30` | `{state: "waiting", ask}` or `{state: "final", ask, outcome}`, waiting up to `waitSeconds` for a change |
 | `POST /v1/asks/:askId/cancel` | Cancels an ask that is still open: `{cancelled}` |
+| `POST /v1/sessions/:sessionId/end` | Marks the session `ended` and cancels its open asks: `{ended}`. An ended session takes no new asks (`404`) |
 | `GET /v1/sessions/:sessionId/inbox` | `{session, instructions, asks}`: owner instructions (always empty until HL-10 adds the queue) and the 20 newest asks with their outcomes |
 
 Bodies are strict: an unknown field, a relative `cwd`, a `permission` or `stop`

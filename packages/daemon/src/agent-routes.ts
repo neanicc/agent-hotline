@@ -324,6 +324,31 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
     return response;
   });
 
+  app.post("/v1/sessions/:sessionId/end", async (request, reply) => {
+    const params = SessionParams.safeParse(request.params);
+    if (!params.success) return invalid(reply, params.error);
+    const session = store.getSession(params.data.sessionId);
+    if (session === undefined) return reply.code(404).send({ error: "unknown session" });
+    if (session.state === "ended") return { ended: false };
+    // Its open asks go too: nobody should be called for an agent that left.
+    const open = store.listAsks(["pending", "in-flight"]).filter((ask) => ask.sessionId === session.id);
+    for (const ask of open) {
+      if (store.setAskStatus(ask.id, "cancelled")) {
+        store.appendAudit("ask.cancelled", { kind: ask.kind, by: "session-end" }, clock(), {
+          askId: ask.id,
+          sessionId: session.id,
+        });
+      }
+    }
+    store.putSession({
+      ...(store.getSession(session.id) ?? session),
+      state: "ended",
+      lastSeenAt: clock().toISOString(),
+    });
+    store.appendAudit("session.ended", {}, clock(), { sessionId: session.id });
+    return { ended: true };
+  });
+
   app.post("/v1/asks/:askId/cancel", async (request, reply) => {
     const params = AskParams.safeParse(request.params);
     if (!params.success) return invalid(reply, params.error);

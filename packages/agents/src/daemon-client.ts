@@ -74,6 +74,8 @@ export interface HotlineDaemon {
   outcome(askId: string, waitSeconds: number, signal?: AbortSignal): Promise<OutcomeState>;
   cancelAsk(askId: string): Promise<boolean>;
   inbox(sessionId: string): Promise<Inbox>;
+  /** Marks the session ended and cancels its open asks. */
+  endSession(sessionId: string): Promise<boolean>;
 }
 
 export interface DaemonClientOptions {
@@ -89,6 +91,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const SessionResponse = z.object({ session: Session });
 const AskResponse = z.object({ ask: Ask });
 const CancelResponse = z.object({ cancelled: z.boolean() });
+const EndResponse = z.object({ ended: z.boolean() });
 
 function validPort(port: number): boolean {
   return Number.isInteger(port) && port >= 1 && port <= 65535;
@@ -147,6 +150,15 @@ export class DaemonClient implements HotlineDaemon {
       body: {},
       schema: CancelResponse,
     }).then((response) => response.cancelled);
+  }
+
+  endSession(sessionId: string): Promise<boolean> {
+    return this.call({
+      method: "POST",
+      path: `/v1/sessions/${encodeURIComponent(Id.parse(sessionId))}/end`,
+      body: {},
+      schema: EndResponse,
+    }).then((response) => response.ended);
   }
 
   inbox(sessionId: string): Promise<Inbox> {

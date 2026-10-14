@@ -163,6 +163,8 @@ export interface HotlineMcpServer {
   server: McpServer;
   /** Resolves when no tool call is running, including the cleanup of cancelled ones. */
   settled(): Promise<void>;
+  /** After the client has gone: waits for running calls, then tells the daemon the session ended. */
+  end(): Promise<void>;
 }
 
 export function createHotlineMcpServer(options: HotlineMcpOptions): HotlineMcpServer {
@@ -391,10 +393,19 @@ export function createHotlineMcpServer(options: HotlineMcpOptions): HotlineMcpSe
     },
   );
 
+  const settled = async () => {
+    while (inFlight.size > 0) await Promise.allSettled([...inFlight]);
+  };
   return {
     server,
-    async settled() {
-      while (inFlight.size > 0) await Promise.allSettled([...inFlight]);
+    settled,
+    async end() {
+      await settled();
+      const registered = session;
+      session = undefined;
+      const id = await registered?.catch(() => undefined);
+      // Best effort: a session the daemon never hears end from stays until HL-10 expires it.
+      if (id !== undefined) await daemon.endSession(id).catch(() => false);
     },
   };
 }
@@ -406,8 +417,9 @@ export interface RunStdioOptions extends HotlineMcpOptions {
 
 /**
  * Serves MCP over stdin and stdout until the client closes stdin. Resolves once
- * every in-flight tool call has finished; an `ask_human` still waiting is
- * cancelled on the daemon first, so nobody is phoned for an agent that left.
+ * every in-flight tool call has finished and the session is marked ended; an
+ * `ask_human` still waiting is cancelled on the daemon first, so nobody is phoned
+ * for an agent that left.
  * Nothing but MCP messages is ever written to stdout.
  */
 export async function runStdioMcpServer(options: RunStdioOptions): Promise<void> {
@@ -425,7 +437,7 @@ export async function runStdioMcpServer(options: RunStdioOptions): Promise<void>
   try {
     await hotline.server.connect(transport);
     await closed;
-    await hotline.settled();
+    await hotline.end();
   } finally {
     stdin.off("end", close);
     stdin.off("close", close);

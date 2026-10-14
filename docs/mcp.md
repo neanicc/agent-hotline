@@ -51,7 +51,16 @@ for Claude Code, `CLAUDE_CODE_SESSION_ID`. The daemon names it "Claude in
 <folder>" or "Codex in <folder>" unless `config.nicknames` has the folder. A
 registration with the same agent session id reuses the live session. If the
 daemon is not running yet, the next tool call registers. If the daemon has
-forgotten the session, the server registers again once.
+forgotten the session, the server registers again once. When the client closes
+the server, the server waits for running calls and then ends the session
+(`POST /v1/sessions/:id/end`), which cancels its open asks. A server that is
+killed cannot do that, so its session stays until the daemon expires stale
+sessions (HL-10).
+
+One known gap fails safe: if creating an ask times out on the client after
+the daemon stored it, `ask_human` reports `no-answer` while the ask stays open
+until it expires or the session ends. The owner may be asked, but the answer
+reaches no agent.
 
 The agent comes from `--agent claude|codex`. Without the flag it is guessed
 from the client's name (`claude…` or `…codex…`), and an unknown client gets
