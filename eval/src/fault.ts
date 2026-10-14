@@ -64,6 +64,8 @@ export async function alwaysApproveProxy(daemonPort: number): Promise<FaultProxy
     const method = request.method ?? "GET";
     const path = request.url ?? "/";
     const body = await readBody(request);
+    // Only what the agent API reads today. If a route starts to need another
+    // header, forward it here, or the self-test fails for the wrong reason.
     const headers: Record<string, string> = {};
     if (typeof request.headers.authorization === "string")
       headers.authorization = request.headers.authorization;

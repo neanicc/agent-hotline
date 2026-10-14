@@ -251,6 +251,8 @@ async function build(
       hooksUrl,
       toolSecret: TOOL_SECRET,
       webhookSecret: WEBHOOK_SECRET,
+      // The real fetch, but only ever to `hooksUrl`, the daemon's own 127.0.0.1 listener.
+      // The daemon's providers get `noNetwork`.
       fetch: globalThis.fetch as unknown as HttpFetch,
       clock: () => clock.now,
     });
