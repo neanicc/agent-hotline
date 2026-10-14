@@ -510,6 +510,28 @@ describe("repeated tool calls", () => {
     expect(answers).toHaveLength(1);
   });
 
+  it("answer PIN repeats from this run's memory when the store cannot keep them, spending nothing", async () => {
+    await app.close();
+    app = server({
+      deliveries: {
+        get: () => undefined,
+        put: () => {
+          throw new Error("disk full");
+        },
+        size: () => 0,
+        prune: () => {},
+      },
+    });
+    const guess = () => tool("verify_pin", { ...binding(), pin: "1111" });
+    expect((await guess()).json()).toMatchObject({ verified: false, attempts_left: 1 });
+    expect((await guess()).json()).toMatchObject({ verified: false, attempts_left: 1 });
+    // A right PIN is remembered too, and this run's gate has the call verified, so no recheck runs.
+    const right = () => tool("verify_pin", { ...binding(), pin: PIN });
+    expect((await right()).json()).toMatchObject({ verified: true, attempts_left: 1 });
+    expect((await right()).json()).toMatchObject({ verified: true, attempts_left: 1 });
+    expect(pins.isVerified("conv_1")).toBe(true);
+  });
+
   it("keep reading the status on every request", async () => {
     await tool("verify_pin", { ...binding(), pin: PIN });
     await tool("get_status", binding());

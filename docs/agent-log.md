@@ -3305,6 +3305,14 @@ Template:
     (confirmed), a different call SID or a time outside the call (not
     confirmed; each binding removed makes its test fail), and the existing
     live-tool test.
+- Staff review of e86792a: (P2) the suggestion to drop the saved-PIN
+  machinery and require the PIN again is not taken. Without it, a held
+  instruction on an inbound call can never be confirmed after a restart,
+  which is the ticket's third done-when item. It stays bound to the call SID
+  and window, and fails closed. (P2) A test now covers PIN repeats answered
+  from this run's fallback memory when the store cannot write. A key can be
+  counted in both the fallback and the store only after a recheck, which only
+  makes `busy` come sooner. The P3s are left as they are.
 - Open issues or follow-ups: bound `/hooks/twilio/sms` with reserved capacity
   for genuine Twilio requests; security.md update after #77; count out-of-queue
   texts against the text rate limits; HL-13c (#80) retries processing records
