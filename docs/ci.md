@@ -27,9 +27,10 @@ launcher: `--version` (must match `apps/cli/package.json`), `--help`, and with
 fake providers in a temporary home, `init`, `install claude` and `install codex`,
 `away status`, the daemon, `doctor` against it, an MCP `initialize` and
 `tools/list`, a Stop hook outside away mode, a permission hook in away mode
-that must deny when nobody answers, and a clean SIGTERM shutdown. The scenario stage reports `NOT RUN` and passes in CI
-until HL-12 adds the suite, but `eval --local` fails until then, so the
-acceptance gate cannot pass early.
+that must deny when nobody answers, and a clean SIGTERM shutdown. The scenario
+stage (HL-12) builds the tree, then runs every scenario in
+[eval.md](eval.md) and scores it against `eval/thresholds.toml`; it
+fails unless the runner prints `THRESHOLDS: PASS`.
 
 CI has no Twilio or ElevenLabs credentials and makes no real calls or texts.
 Action references are pinned to commit SHAs.

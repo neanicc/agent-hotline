@@ -16,7 +16,8 @@
     "format": "biome check --write",
     "clean": "tsc -b --clean",
     "package": "pnpm run build && node scripts/package.mjs",
-    "hotline": "node apps/cli/dist/main.js"
+    "hotline": "node apps/cli/dist/main.js",
+    "eval": "node --disable-warning=ExperimentalWarning eval/dist/main.js"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
