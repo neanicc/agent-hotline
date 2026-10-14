@@ -1,3 +1,4 @@
+import { DEFAULT_VOICE_LLM, VOICE_LLMS, type VoiceLlm } from "@hotline/core";
 import { describe, expect, it } from "vitest";
 import {
   AGENT_DEFINITION_VERSION,
@@ -96,7 +97,7 @@ describe("agent definition snapshot", () => {
   it("matches the reviewed prompt, first message and agent body", () => {
     // A failing snapshot means the voice agent's words changed: review the diff,
     // bump AGENT_DEFINITION_VERSION, then update the snapshot with `vitest -u`.
-    expect(AGENT_DEFINITION_VERSION).toBe(5);
+    expect(AGENT_DEFINITION_VERSION).toBe(6);
     expect(AGENT_FIRST_MESSAGE).toMatchSnapshot("first message");
     expect(AGENT_PROMPT).toMatchSnapshot("prompt");
     const body = structuredClone(agent);
@@ -214,10 +215,13 @@ describe("conversational approval (HL-14c)", () => {
     expect(decision && "description" in decision ? decision.description : "").not.toContain("unclear");
   });
 
-  it("reads every allow back in one short sentence with the ask's key words, and submits only after the reply", () => {
+  it("reads every allow back in one short sentence naming the tool and the whole command, and submits only after the reply", () => {
+    // HL-14d: HL-09c's daemon requires a permission read-back to name every command
+    // and tool token, so the example names the tool ("Bash") and the whole command.
     expect(AGENT_PROMPT).toContain(
-      `Before you submit any allow, read the request back in one short sentence that keeps the ask's key words, what it wants to do and the session name, and asks for a yes, such as "Allow pnpm test in demo-app? Yes?". Submit the allow only after the owner answers that read-back with a clear yes, and send that reply as owner_words.`,
+      `Before you submit any allow, read the request back in one short sentence that names the tool and the whole command as the ask gives them, keeps the ask's key words and the session name, and asks for a yes, such as "Allow Bash: pnpm test, for Claude in demo-app? Yes?". Submit the allow only after the owner answers that read-back with a clear yes, and send that reply as owner_words.`,
     );
+    expect(AGENT_PROMPT).not.toContain("Allow pnpm test in demo-app? Yes?");
     const submit = tools.find((tool) => tool.name === "submit_answer");
     const decision = submit?.api_schema.request_body_schema.properties.decision;
     expect(decision && "description" in decision ? decision.description : "").toContain(
@@ -315,6 +319,30 @@ describe("server tools", () => {
     expect(TOOL_BODIES.verify_pin.safeParse({ conversation_id: "conv_1" }).success).toBe(false);
     const extra = TOOL_BODIES.submit_answer.parse({ ...base, confirmation: "pin" });
     expect(extra).not.toHaveProperty("confirmation");
+  });
+});
+
+describe("voice-agent LLM (HL-14d)", () => {
+  const prompt = (config: ReturnType<typeof hotlineAgentConfig>) => config.conversation_config.agent.prompt;
+
+  it("sets the cheapest documented Claude model explicitly, with thinking off and default backups", () => {
+    expect(DEFAULT_VOICE_LLM).toBe("claude-haiku-4-5");
+    expect(prompt(agent).llm).toBe("claude-haiku-4-5");
+    expect(prompt(agent).thinking_budget).toBe(0);
+    expect(prompt(agent).backup_llm_config).toEqual({ preference: "default" });
+    expect(prompt(agent)).not.toHaveProperty("reasoning_effort");
+  });
+
+  it("takes any allowed voice.llm and refuses anything else before it is sent", () => {
+    expect([...VOICE_LLMS]).toEqual(["claude-haiku-4-5", "claude-sonnet-4-6", "claude-sonnet-5-5"]);
+    for (const llm of VOICE_LLMS) {
+      const config = hotlineAgentConfig({ toolIds: [], llm });
+      expect(prompt(config).llm).toBe(llm);
+      expect(prompt(config).backup_llm_config).toEqual({ preference: "default" });
+    }
+    for (const bad of ["claude-haiku-5-5", "gpt-4o", "", "CLAUDE-HAIKU-4-5"]) {
+      expect(() => hotlineAgentConfig({ toolIds: [], llm: bad as VoiceLlm }), bad).toThrow(TypeError);
+    }
   });
 });
 

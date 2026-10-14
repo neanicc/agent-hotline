@@ -130,12 +130,14 @@ users can read or write (it holds the PIN hash), so it must be mode `0600`.
 | `policy.maxConsecutiveContinuations` | 5 | Away-mode Stop continuations in a row (1–20) |
 | `voice.provider` | `elevenlabs` | or `fake` |
 | `voice.voiceId`, `agentId`, `agentPhoneNumberId` | unset | ElevenLabs ids: `voiceId` from `hotline voice set`, `agentId` from `hotline voice apply`, `agentPhoneNumberId` from `hotline init` |
+| `voice.llm` | unset (`claude-haiku-4-5`) | The voice agent's LLM, one of `VOICE_LLMS`: `claude-haiku-4-5`, `claude-sonnet-4-6`, `claude-sonnet-5-5`. Anything else is refused. Sent by `hotline voice apply` ([voice.md](voice.md#the-model)) |
 | `voice.toolSecretId`, `voice.toolIds` | unset | Ids (never values) of the ElevenLabs workspace secret and the four server tools, written by `hotline voice apply` so a re-apply updates them instead of creating new ones |
 | `sms.provider` | `twilio` | or `fake` |
 | `sms.fromNumber` | unset | The Twilio number |
 | `tunnel.publicUrl` | unset | Bare `https://` origin, no path, query or credentials |
 | `daemon.port` | 7341 | The agent API always binds 127.0.0.1 |
 | `secrets.store` | `auto` | `auto` = Keychain on macOS, file elsewhere; or `keychain`, `file` |
+| `judge.backend` | unset | The reply judge (HL-09d, [install guide](install.md#the-reply-judge)): `auto` (Claude Code CLI, then Codex CLI, then `anthropic.apiKey`), `claude-code`, `codex`, `anthropic-api`, or `off` (nothing is sent; unclear replies are texted). Unset means the owner has not chosen and works like `off`; `hotline init` asks once or takes `--judge` |
 | `nicknames` | `{}` | Repo folder name to spoken nickname |
 | `costs.twilioNumberPerMonth`, `twilioCallPerMinute`, `twilioTextPerSegment`, `twilioCarrierFeePerSegment` | 1.15, 0.014, 0.0083, 0.007 | Dollar rate assumptions for the `hotline doctor` cost estimate ([install guide](install.md#monthly-cost-estimate)). Each a number ≥ 0 |
 | `costs.elevenLabsPlanPerMonth`, `elevenLabsIncludedMinutes`, `elevenLabsPerMinute`, `llmPerMinute` | 6, 75, 0.08, 0.03 | Same; the defaults are `DEFAULT_COST_RATES`, which the README cost table quotes |
@@ -153,9 +155,10 @@ Unknown keys are rejected. A key that looks like a credential (`token`, `secret`
 
 ## Secrets (`secrets.ts`)
 
-Secrets never live in the config. `SecretName` lists them: `daemon.apiToken`,
-`elevenlabs.apiKey`, `elevenlabs.toolSecret`, `elevenlabs.webhookSecret`,
-`twilio.accountSid`, `twilio.authToken`. A value is one line of printable ASCII
+Secrets never live in the config. `SecretName` lists them: `anthropic.apiKey`
+(optional, the reply judge's fallback when neither agent CLI is installed),
+`daemon.apiToken`, `elevenlabs.apiKey`, `elevenlabs.toolSecret`,
+`elevenlabs.webhookSecret`, `twilio.accountSid`, `twilio.authToken`. A value is one line of printable ASCII
 (1–4096 chars).
 
 `SecretStore` has `get` (undefined when unset), `set` and `delete` (missing is
@@ -359,6 +362,12 @@ without it is not confirmed and the ask is texted
 ([daemon.md](daemon.md#call-orchestration)). `submit_answer` no longer
 offers the model `unclear`; the daemon still parses it from an agent on an
 older definition, and it still ends the ask as no answer.
+Version 6 (HL-14d) sets the model explicitly: `prompt.llm` is `voice.llm` or
+`DEFAULT_VOICE_LLM` (`claude-haiku-4-5`), with `thinking_budget: 0` and
+`backup_llm_config: {preference: "default"}`, and the read-back example names
+the tool and the whole command ("Allow Bash: pnpm test, for Claude in demo-app?
+Yes?"), since the daemon refuses a permission read-back that leaves either out
+([voice.md](voice.md#the-model)).
 `SAFETY_RULES` in the providers tests checks each rule word for word, and a
 snapshot covers the whole prompt, first message and agent body. See
 [voice.md](voice.md#the-persona). `hotlineAgentConfig` refuses a voice id that

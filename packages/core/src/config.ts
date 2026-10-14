@@ -118,7 +118,30 @@ export const DEFAULT_COST_RATES = {
   llmPerMinute: 0.03,
 } as const;
 
+/** Which reply judge backend to use; see `Config.judge`. */
+export const JudgeBackendChoice = z.enum(["auto", "claude-code", "codex", "anthropic-api", "off"]);
+export type JudgeBackendChoice = z.infer<typeof JudgeBackendChoice>;
+
 const rate = (fallback: number) => z.number().min(0).default(fallback);
+
+/**
+ * LLMs the voice agent may run on (`conversation_config.agent.prompt.llm`), each
+ * on both ElevenLabs' LLM page and its create-agent API reference (checked
+ * 2026-10-14): https://elevenlabs.io/docs/agents-platform/customization/llm and
+ * https://elevenlabs.io/docs/api-reference/agents/create. The voice agent only
+ * talks and calls tools, and the daemon checks every decision against the
+ * transcript, so a cheaper model costs friction, never safety.
+ */
+export const VOICE_LLMS = ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-sonnet-5-5"] as const;
+export const VoiceLlm = z.enum(VOICE_LLMS);
+export type VoiceLlm = z.infer<typeof VoiceLlm>;
+/** The cheapest documented Claude model; `voice.llm` overrides it. */
+export const DEFAULT_VOICE_LLM: VoiceLlm = "claude-haiku-4-5";
+
+/** Whether `value` is an allowed voice-agent LLM id. */
+export function isVoiceLlm(value: unknown): value is VoiceLlm {
+  return VoiceLlm.safeParse(value).success;
+}
 
 export const Config = z.strictObject({
   version: z.literal(1),
@@ -158,6 +181,8 @@ export const Config = z.strictObject({
       provider: VoiceProviderName.default("elevenlabs"),
       /** ElevenLabs voice, including a cloned one. Unset means the agent definition's default. */
       voiceId: z.string().min(1).max(100).optional(),
+      /** The voice agent's LLM, one of `VOICE_LLMS`. Unset means `DEFAULT_VOICE_LLM`. */
+      llm: VoiceLlm.optional(),
       agentId: z.string().min(1).max(100).optional(),
       agentPhoneNumberId: z.string().min(1).max(100).optional(),
       /** Id (not the value) of the ElevenLabs workspace secret holding `elevenlabs.toolSecret`. Set by `hotline voice apply`. */
@@ -181,6 +206,16 @@ export const Config = z.strictObject({
     .prefault({}),
   daemon: z.strictObject({ port: count(1024, 65535, 7341) }).prefault({}),
   secrets: z.strictObject({ store: SecretStoreChoice.default("auto") }).prefault({}),
+  /**
+   * The reply judge (HL-09d): which of the owner's own agent logins decides
+   * what a spoken reply to an approval read-back means when the fast path
+   * cannot. `auto` takes the first available: the Claude Code CLI, the Codex
+   * CLI, then the `anthropic.apiKey` secret. `off` sends nothing anywhere:
+   * such replies are never approvals and the ask is texted. Unset means the
+   * owner has not chosen yet and works like `off`: the owner's words leave the
+   * machine for a model only after an explicit choice (`hotline init` asks once).
+   */
+  judge: z.strictObject({ backend: JudgeBackendChoice.optional() }).prefault({}),
   /** Rate assumptions for `hotline doctor`'s cost estimate; each a non-negative number. */
   costs: z
     .strictObject({

@@ -54,10 +54,12 @@ users can open is made private.
 | Twilio number texts come from | `--sms-from +1...` | no | |
 | The Twilio number's id in ElevenLabs (**Phone Numbers**) | `--agent-phone-number-id` | no | |
 | Providers, secret store | `--voice-provider`, `--sms-provider`, `--secret-store` | no | |
+| Whether to use the reply judge (below) | `--judge auto` (or `claude-code`, `codex`, `anthropic-api`, `off`) | yes, once, `[Y/n]` (`[y/N]` once turned off) | |
 | PIN, 4 to 8 digits (6 or more recommended) | never | yes, twice, no echo | `HOTLINE_PIN` |
 | ElevenLabs API key | never | yes, no echo | `HOTLINE_ELEVENLABS_API_KEY` |
 | ElevenLabs post-call webhook secret | never | yes, no echo | `HOTLINE_ELEVENLABS_WEBHOOK_SECRET` |
 | Twilio account SID and auth token | never | yes, no echo | `HOTLINE_TWILIO_ACCOUNT_SID`, `HOTLINE_TWILIO_AUTH_TOKEN` |
+| Anthropic API key for the reply judge (optional) | never | no | `HOTLINE_ANTHROPIC_API_KEY` |
 
 - The PIN and credentials are never accepted as flags: other users on the Mac
   can see a process's arguments, and shells keep them in history. The
@@ -79,13 +81,61 @@ users can open is made private.
   A config `init` cannot read is refused, never replaced: it may hold the
   ElevenLabs ids, and dropping them would orphan the deployed agent.
 - Output shows the owner number as its last four digits and never a secret.
+- `init` explains the reply judge (below) and asks once whether to use it:
+  `y` turns it on (`judge.backend: "auto"`, or the backend chosen before), `n`
+  turns it off. Enter is yes, except after you turned the judge off: then the
+  question reads `[y/N]` and Enter keeps it off.
+  `--judge <auto|claude-code|codex|anthropic-api|off>` answers without asking.
+  With `--non-interactive` and no `--judge`, the earlier choice stays; on a
+  first run nothing is recorded and the judge stays off. `init` ends with a
+  `reply judge:` line saying what was recorded.
+
+### The reply judge
+
+When you answer a read-back with something other than a plain yes or no
+("yeah, let's ship that one", "sure, no problem"), the daemon can ask a small
+model what you meant, on the plan you already have (HL-09d). Your words leave
+the machine only once you have chosen this at `init` (or set `judge.backend`
+yourself); until then nothing is sent and such replies are texted. Once chosen,
+it uses the first of these it finds, with nothing else to set up:
+
+1. **Claude Code** (`claude` on the `PATH`): `claude -p` on your login, model
+   `haiku`. Log in once with `claude` if you have not.
+2. **Codex** (`codex` on the `PATH`): `codex exec` on your login, Codex's
+   default model at low reasoning effort.
+3. **An Anthropic API key**, stored as `anthropic.apiKey` when `init` runs with
+   `HOTLINE_ANTHROPIC_API_KEY` set. It is never asked for.
+
+Only your short spoken reply is sent, redacted, never the request or anything an
+agent wrote. Each run is isolated: an empty temporary folder, hooks off, no MCP
+servers, no saved session, and `HOTLINE_JUDGE=1`, under which `hotline hook` and
+`hotline mcp` do nothing. Claude Code runs with no tools. Codex keeps its shell
+tool, limited to its read-only sandbox without network; choose `--judge
+claude-code` if you want a judge with no tools. The CLI gets only the environment it needs
+(`PATH`, `HOME`, locale, proxy settings and its own login variables such as
+`CLAUDE_CONFIG_DIR` or `CODEX_HOME`); no `HOTLINE_*` variable or Hotline
+credential reaches it. A yes with a condition ("yes if the tests pass", "sure,
+but not on main") or taken back ("yes... actually no") is never an approval. If
+the judge errs, takes longer than 20 seconds, or none is available, the reply is
+unclear and the request is texted to you. The judge runs after you hang up,
+while the daemon handles the call's transcript, so you never wait on the line
+for it. High-risk requests still need your PIN or a confirming text.
+
+`config.json` `judge.backend` records the choice: `"auto"` (the order above),
+`"claude-code"`, `"codex"`, `"anthropic-api"`, or `"off"` to send nothing
+anywhere. Unset (no choice yet) also sends nothing. The daemon picks the judge
+when it starts; restart it after installing Claude Code or Codex, or after
+changing this setting. The daemon must find `claude` or `codex` on the `PATH` it
+is started with; when it does not, its `reply judge` log line and `hotline
+doctor` name the `PATH` they looked on.
 
 ## `hotline voice`
 
 - `hotline voice apply` creates, or updates on later runs, the ElevenLabs
   workspace secret holding the tool secret, the four server tools
   (`hotlineToolConfigs`, pointing at `<public URL>/hooks/el/tools/*`) and the agent
-  (`hotlineAgentConfig`, tagged `definition-v<AGENT_DEFINITION_VERSION>`). The ids
+  (`hotlineAgentConfig`, tagged `definition-v<AGENT_DEFINITION_VERSION>`, on the
+  LLM `voice.llm` or `claude-haiku-4-5`; see [voice.md](voice.md#the-model)). The ids
   go into the config (`voice.toolSecretId`, `voice.toolIds`, `voice.agentId`) as
   each is created, so a failure part way leaves nothing unrecorded; if
   recording an id itself fails, the error names the id so you can add it to
@@ -160,17 +210,21 @@ Switches away mode, which lets the permission and Stop hooks phone you
 
 One `PASS`, `WARN` or `FAIL` line per check, then `INFO` lines with the monthly
 cost estimate, then a count of the checks. Exits 1 if anything fails; `INFO`
-lines never pass, warn or fail.
+lines never pass, warn or fail. The `judge` line names the reply judge the
+daemon would use, found the way the daemon finds it (a CLI on the `PATH`, or the
+stored key) without any model call. `--check-judge` also asks it one tiny fixed
+question, which is one model call on your login or key.
 
 | Check | Fails when | Warns when |
 | --- | --- | --- |
 | config | missing, unsafe or invalid | |
 | secrets (set or not, never values) | a credential the configured providers need is missing | the daemon has not created its API token yet |
 | daemon | it refuses the token, or something else answers on its port | it is not running |
+| reply judge | with `--check-judge`, its answer to the fixed reply "yes, go ahead" is not `agreed` (not logged in, no network, a bad key) | no judge was chosen yet (`judge.backend` unset; nothing is sent), or no backend is available (the `PATH` searched is named), so unclear replies are texted (`judge.backend: "off"` passes) |
 | away mode | | the state file is unusable (it then reads as off) |
 | Claude Code and Codex installs (user, and the current project) | a hook's `--wait-seconds` is not below its `timeout`; Codex `tool_timeout_sec` is not above `policy.askTimeoutMinutes`; a Claude per-server `timeout` shorter than that | not installed; a hook or the MCP server is missing; less than 30 s between wait and timeout; a wait shorter than the ask timeout |
 | Claude Code idle timeout | `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` is not above the ask timeout | it is not set in this shell |
-| ElevenLabs agent | no phone number id or agent; the deployed agent's `definition-v<n>` tag is not `AGENT_DEFINITION_VERSION`; it lacks one of the four tools, or their ids are not recorded; a tool calls another URL than `<tunnel.publicUrl>/hooks/el/tools/<name>` or uses another secret id than `voice.toolSecretId` | its voice differs from the config |
+| ElevenLabs agent | no phone number id or agent; the deployed agent's `definition-v<n>` tag is not `AGENT_DEFINITION_VERSION`; it lacks one of the four tools, or their ids are not recorded; a tool calls another URL than `<tunnel.publicUrl>/hooks/el/tools/<name>` or uses another secret id than `voice.toolSecretId` | its voice differs from the config; its LLM is not `voice.llm` (default `claude-haiku-4-5`), which the pass line names |
 | webhooks | `tunnel.publicUrl` is unset while a real provider needs it | |
 
 ### Monthly cost estimate
