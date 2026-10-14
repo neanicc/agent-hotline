@@ -462,6 +462,10 @@ spoken after the PIN was verified on an inbound call from it (the call's
 `start_time_unix_secs` plus the turn's `time_in_call_secs`, later than the
 verification). Any other person or turn, every turn without a time on an
 inbound call, and every call parsed without that context, is a `caller`.
+The optional `pinLapse` (HL-13b) names a stretch after the verification
+whose turns are still a `caller`'s: the daemon sets it from a restart until
+the PIN is given again, when the verification time came from before the
+restart.
 
 `validPostCallSignature`, `postCallSignature` and `postCallSignatureHeader`
 implement the `ElevenLabs-Signature` HMAC; `parsePostCallEvent` reduces a

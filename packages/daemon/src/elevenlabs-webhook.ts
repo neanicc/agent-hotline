@@ -335,6 +335,8 @@ function toDecision(body: {
 
 export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute[] {
   const { pins, handlers } = options;
+  /** When this run's routes were built: a PIN time saved before it is from before a restart. */
+  const startedAt = options.clock();
   /**
    * State-changing tool deliveries by a hash of tool name and exact body: those
    * running now (`running`) and those that changed state (`remembered`, with
@@ -394,8 +396,9 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
         const seen = fallback.get(key, now) ?? remembered.get(key, now);
         // A right PIN remembered from before a restart, on a call this run's
         // PinGate has not verified: the owner said the same PIN again on the
-        // same call, so it is checked again (a right PIN spends no budget).
-        // A remembered wrong guess is still answered from memory.
+        // same call (the body, and so the HMAC key, is identical), so it is
+        // checked again (a right PIN spends no budget). Any other remembered
+        // response, a wrong guess included, is answered from memory.
         const recheck =
           seen?.verified === true && name === "verify_pin" && !pins.isVerified(conversationOf(raw));
         if (seen !== undefined && !recheck) return { response: Promise.resolve(seen), repeat: true };
@@ -478,6 +481,15 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
         (at): at is Date => at !== undefined && !Number.isNaN(at.getTime()),
       );
       return times.length === 0 ? undefined : new Date(Math.min(...times.map((at) => at.getTime())));
+    },
+    // A PIN time saved before this run covers the call only up to the
+    // restart: turns from then on count as the owner's again only after the
+    // PIN is given again in this run.
+    pinLapse: (conversationId) => {
+      const saved = options.savedPinVerifiedAt?.(conversationId);
+      if (saved === undefined || saved.getTime() >= startedAt.getTime()) return undefined;
+      const again = pins.verifiedAt(conversationId);
+      return again === undefined ? { from: startedAt } : { from: startedAt, until: again };
     },
     placedCall: options.placedCall,
   };

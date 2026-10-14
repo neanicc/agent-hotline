@@ -153,6 +153,13 @@ export interface OwnerContext {
   pinVerifiedAt: (conversationId: string) => Date | undefined;
   /** Whether Hotline placed this conversation; only then is an outbound call the owner's. */
   placedCall: (conversationId: string) => boolean;
+  /**
+   * A stretch of an inbound call after `pinVerifiedAt` whose turns still do not
+   * count as the owner's: from `from` until `until` (open-ended without it).
+   * The daemon sets it when the PIN time came from before a restart, so turns
+   * after the restart count only once the PIN is given again.
+   */
+  pinLapse?: (conversationId: string) => { from: Date; until?: Date } | undefined;
 }
 
 /**
@@ -242,6 +249,7 @@ export function conversationEvent(
   const direction =
     phone?.direction === "inbound" || phone?.direction === "outbound" ? phone.direction : undefined;
   const from = ownerFrom(owner, data.conversation_id, direction, phone?.external_number);
+  const lapse = direction === "inbound" ? owner?.pinLapse?.(data.conversation_id) : undefined;
   const start = data.metadata?.start_time_unix_secs;
   /** A turn is the owner's only when it is known to come after `from`; an unknown time is not. */
   const person = (turn: z.infer<typeof Turn>): "owner" | "caller" => {
@@ -251,7 +259,12 @@ export function conversationEvent(
       typeof start === "number" && typeof turn.time_in_call_secs === "number"
         ? start + turn.time_in_call_secs
         : undefined;
-    return at !== undefined && at > from ? "owner" : "caller";
+    if (at === undefined || at <= from) return "caller";
+    // Inside a lapse (after a restart, before the PIN again): not the owner's.
+    if (lapse !== undefined && at >= lapse.from.getTime() / 1000) {
+      if (lapse.until === undefined || at <= lapse.until.getTime() / 1000) return "caller";
+    }
+    return "owner";
   };
   return {
     type: "transcription",

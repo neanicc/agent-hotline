@@ -201,7 +201,11 @@ this run's PinGate has not verified the call (a right PIN spends no budget),
 while a remembered wrong guess is still answered from memory. When a call
 holds an instruction, the time it passed the PIN is saved with it, and the
 post-call check uses the earlier of that and this run's PinGate time to tell
-the owner's turns from the caller's; it never serves a live tool. The
+the owner's turns from the caller's; it never serves a live tool. The saved
+time covers the call only up to this run's start: turns after the restart
+count as the owner's again only once the PIN is given again in this run
+(`pinLapse` in the owner context). Turns while the daemon was down still
+count, since the person on the call had already proved the PIN. The
 post-call replay memory stays in memory too; why a replay after a restart is
 harmless is under "Once per event" below. If the PIN budgets cannot be read
 or written, the attempt is refused without checking the PIN; if the delivery

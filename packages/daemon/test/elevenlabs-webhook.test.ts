@@ -1659,7 +1659,15 @@ describe("a daemon restart in the middle of things (HL-13b)", () => {
     called_number: AGENT_NUMBER,
   });
 
-  it("confirms an instruction held before the restart from the real post-call event", async () => {
+  /**
+   * An inbound call that began 60 s before the PIN (at T0): the owner names
+   * session 1 at T0+10 s, the agent reads it back at T0+15 s, and the owner
+   * says yes at T0+20 s. `send_instruction` arrives at `heldAt` seconds after
+   * T0, the daemon restarts at `restartAt`, and with `pinAgainAt` the owner
+   * gives the PIN again in the new run. Returns the instructions queued once
+   * the real, signed post-call webhook has been handled.
+   */
+  async function heldAcrossRestart(heldAt: number, restartAt: number, pinAgainAt?: number) {
     store.putSession({
       id: "s-1",
       agent: "claude-code",
@@ -1670,11 +1678,15 @@ describe("a daemon restart in the middle of things (HL-13b)", () => {
       lastSeenAt: now.toISOString(),
     });
     unplaced.add("conv_r");
-    const verifiedAt = now.getTime() / 1000;
+    const t0 = now.getTime();
+    const at = (seconds: number) => {
+      now = new Date(t0 + seconds * 1000);
+    };
     expect((await tool("verify_pin", { ...inbound("conv_r"), pin: PIN })).json()).toMatchObject({
       verified: true,
     });
     expect((await tool("get_status", inbound("conv_r"))).json()).toMatchObject({ result: "ok" });
+    at(heldAt);
     const held = await tool("send_instruction", {
       ...inbound("conv_r"),
       session_number: 1,
@@ -1682,13 +1694,20 @@ describe("a daemon restart in the middle of things (HL-13b)", () => {
       owner_words: "session 1, run the tests",
     });
     expect(held.json()).toEqual({ result: "queued" });
+    at(restartAt);
     await restart();
-    now = new Date(now.getTime() + 60_000);
-    // ElevenLabs' record of the finished call: it began 60 s before the PIN.
-    const turn = (role: "agent" | "user", message: string, at: number) => ({
+    if (pinAgainAt !== undefined) {
+      at(pinAgainAt);
+      // The same words, so a byte-identical body: checked again, not answered from memory.
+      expect((await tool("verify_pin", { ...inbound("conv_r"), pin: PIN })).json()).toMatchObject({
+        verified: true,
+      });
+    }
+    at(90);
+    const turn = (role: "agent" | "user", message: string, second: number) => ({
       role,
       message,
-      time_in_call_secs: at,
+      time_in_call_secs: 60 + second,
     });
     const response = await postCall({
       type: "post_call_transcription",
@@ -1698,16 +1717,16 @@ describe("a daemon restart in the middle of things (HL-13b)", () => {
         conversation_id: "conv_r",
         status: "done",
         transcript: [
-          turn("agent", "Hey, it's your hotline.", 0),
-          turn("user", "4821", 55),
-          turn("agent", "One live session. Session 1, Claude in demo-app: working.", 62),
-          turn("user", "session 1, run the tests", 70),
-          turn("agent", "For session 1: run the tests. Send it?", 75),
-          turn("user", "Yes.", 80),
-          turn("agent", "Sent.", 85),
+          turn("agent", "Hey, it's your hotline.", -60),
+          turn("user", "4821", -5),
+          turn("agent", "One live session. Session 1, Claude in demo-app: working.", 2),
+          turn("user", "session 1, run the tests", 10),
+          turn("agent", "For session 1: run the tests. Send it?", 15),
+          turn("user", "Yes.", 20),
+          turn("agent", "Sent.", 25),
         ],
         metadata: {
-          start_time_unix_secs: verifiedAt - 60,
+          start_time_unix_secs: t0 / 1000 - 60,
           call_duration_secs: 90,
           phone_call: {
             direction: "inbound",
@@ -1720,9 +1739,20 @@ describe("a daemon restart in the middle of things (HL-13b)", () => {
       },
     });
     expect(response.statusCode).toBe(200);
-    expect(store.listInstructions().map((i) => [i.sessionId, i.text, i.status])).toEqual([
-      ["s-1", "run the tests", "queued"],
-    ]);
+    return store.listInstructions().map((i) => [i.sessionId, i.text, i.status]);
+  }
+
+  it("confirms an instruction held before the restart from the real post-call event", async () => {
+    expect(await heldAcrossRestart(22, 30)).toEqual([["s-1", "run the tests", "queued"]]);
+  });
+
+  it("does not count words said after the restart as the owner's until the PIN is given again", async () => {
+    // The yes comes after the restart, with no PIN in the new run: it is nobody's yes.
+    expect(await heldAcrossRestart(11, 12)).toEqual([]);
+  });
+
+  it("counts words said after the PIN is given again in the new run", async () => {
+    expect(await heldAcrossRestart(11, 12, 14)).toEqual([["s-1", "run the tests", "queued"]]);
   });
 
   it("never lets the saved PIN time serve a live tool after a restart", async () => {

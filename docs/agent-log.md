@@ -3277,6 +3277,17 @@ Template:
   follow-up. (P3s: the saved PIN time widening the owner-turn window goes into
   security.md with #77; splitting `SavedCall` out of `inbound-line.ts` waits
   for HL-13c.)
+- Staff review of 2a4c2cb (P2): the saved PIN time let turns after a
+  restart, before the PIN was given again, count as the owner's. The owner
+  context gained an optional `pinLapse` (`@hotline/providers`): from this
+  run's start until this run's PinGate verifies the call (open-ended if it
+  never does), turns are the caller's. Route-level tests: a yes said before
+  the restart confirms the held instruction, a yes after it does not, and a
+  yes after the PIN is given again does (the lapse removed: 1 test fails).
+  (P3) The recheck comment now ties it to the identical body and HMAC key;
+  the wrong-guess test already pins that other responses are not rechecked.
+  (P3) Follow-up issues for security.md and the SMS cap are left to the
+  conductor; this run does not create issues.
 - Open issues or follow-ups: bound `/hooks/twilio/sms` with reserved capacity
   for genuine Twilio requests; security.md update after #77; count out-of-queue
   texts against the text rate limits; HL-13c (#80) retries processing records
