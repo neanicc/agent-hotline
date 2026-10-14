@@ -119,6 +119,18 @@ describe("TwilioSmsProvider", () => {
       throw new TypeError("fetch failed");
     };
     await expect(twilio({ fetch: offline }).sendToOwner("hi")).rejects.toThrow("Could not reach Twilio");
+    // Node's fetch error names the URL (with the account SID) in its cause: keep only the code.
+    const refused: HttpFetch = async (url) => {
+      throw new TypeError("fetch failed", {
+        cause: Object.assign(new Error(`connect ECONNREFUSED ${url}`), { code: "ECONNREFUSED" }),
+      });
+    };
+    const error = (await twilio({ fetch: refused })
+      .sendToOwner("hi")
+      .catch((caught: unknown) => caught)) as SmsSendError;
+    expect(error.message).toBe("Could not reach Twilio (ECONNREFUSED)");
+    expect(error.cause).toBeUndefined();
+    expect(JSON.stringify(error)).not.toContain(ACCOUNT_SID);
     await expect(
       twilio({ fetch: fakeFetch(500, new SyntaxError("bad json")) }).sendToOwner("hi"),
     ).rejects.toThrow("Twilio refused the message (HTTP 500)");

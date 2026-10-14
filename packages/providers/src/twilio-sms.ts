@@ -67,7 +67,12 @@ export class TwilioSmsProvider implements SmsProvider {
         signal: AbortSignal.timeout(timeoutMs ?? DEFAULT_TWILIO_TIMEOUT_MS),
       });
     } catch (error) {
-      throw new SmsSendError("Could not reach Twilio", undefined, undefined, { cause: error });
+      // Only the system error code (such as ECONNREFUSED), never the original error:
+      // its message or cause can name the request URL, which holds the account SID.
+      const cause = (error as { cause?: { code?: unknown } } | null)?.cause;
+      const reason =
+        typeof cause?.code === "string" && /^[A-Z_]{1,40}$/.test(cause.code) ? ` (${cause.code})` : "";
+      throw new SmsSendError(`Could not reach Twilio${reason}`);
     }
     let parsed: unknown;
     try {

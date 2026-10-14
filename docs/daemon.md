@@ -66,8 +66,11 @@ query string. Paths outside `/hooks` get `404`. Routes are added through
 
 ### Twilio SMS (`POST /hooks/twilio/sms`)
 
-Point the Twilio number's "A message comes in" webhook (HTTP POST) at
-`<tunnel.publicUrl>/hooks/twilio/sms`. `runDaemon` registers the route only when
+Point the Twilio number's "A message comes in" webhook (HTTP POST) at exactly
+`<tunnel.publicUrl>/hooks/twilio/sms`, with no explicit `:443` and no query
+string. Twilio signs the URL it was given, and the daemon rebuilds it from
+`tunnel.publicUrl` (which the config already limits to a bare origin), so any
+other spelling fails verification with a plain 403. `runDaemon` registers the route only when
 `sms.provider` is `twilio`, `sms.fromNumber` and `tunnel.publicUrl` are set, and
 the `twilio.accountSid` and `twilio.authToken` secrets exist. Otherwise it logs
 `sms webhook off` with the reason and the path stays a `403`.

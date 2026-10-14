@@ -416,8 +416,8 @@ Template:
     The PIN is never accepted by text, so it never passes through Twilio.
     Generating and storing the code per ask is HL-09's job.
 - Evidence (automated): `scripts/ci/run.sh build` (Biome, `tsc -b`, typecheck
-  including tests, CLI smoke) passed; `scripts/ci/run.sh test` passed, 426 tests
-  in 22 files. A mutation check (dropping the account SID check, the signature
+  including tests, CLI smoke) passed; `scripts/ci/run.sh test` passed (490
+  tests in 26 files after rebasing on HL-03). A mutation check (dropping the account SID check, the signature
   header precheck and the `From` check) failed 5 webhook tests. Scenario suite:
   not built yet (HL-12). No real agent or live-call testing; no real Twilio
   request was made.
@@ -428,3 +428,20 @@ Template:
   replay protection by message SID, fuzzing `parseSmsReply`. If Twilio's
   Advanced Opt-Out is configured to treat `YES` as an opt-in keyword, the owner
   may also see Twilio's opt-in confirmation; the answer still arrives.
+- Staff review (two P2s, both constraints on HL-09, nothing exploitable in this
+  PR). These are HL-09 acceptance criteria:
+  - (1) Twilio signatures carry no timestamp, and the SID set is in memory, so a
+    captured signed "yes" could be replayed after a restart. Accept a text only
+    for an ask Hotline actually texted that is still open (`answerProblem` covers
+    the time window). Persist handled SIDs (HL-13).
+  - (2) Bind each reply to one texted ask. When several permission asks are
+    waiting on texts, fail closed instead of giving a bare "yes" to the newest.
+    Generate confirmation codes randomly per ask, expire them with the ask, and
+    consume them on first use.
+  - The outgoing text should say "reply YES or NO", because `cancel`, `end` and
+    `quit` mean stop.
+  - Fixed here (P3): a network failure's `SmsSendError` keeps only the system
+    error code, not the raw error, whose cause can name the URL with the account
+    SID. `docs/daemon.md` now says the Twilio webhook URL must be exactly
+    `<publicUrl>/hooks/twilio/sms` (the config already refuses a `publicUrl` with
+    a path).
