@@ -42,6 +42,10 @@ decides anything itself.
 - **Cancel means nobody is called.** If the agent cancels the call or closes the
   server, the ask is cancelled on the daemon.
 - **Only MCP messages on stdout.** Help and errors go to stderr.
+- **Only 127.0.0.1, no redirects.** The client sends the token only to
+  `127.0.0.1:<port>` and refuses redirects, so a process squatting on the port
+  cannot forward the token or the unredacted text to another host. After a
+  response that is not the daemon's, it looks the port up again.
 
 ## Session registration
 

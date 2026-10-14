@@ -210,6 +210,9 @@ export class DaemonClient implements HotlineDaemon {
     try {
       response = await this.fetch(`http://${DAEMON_HOST}:${connection.port}${call.path}`, {
         method: call.method,
+        // Never follow a redirect: whatever answers on the port must not be able to
+        // send the token or the unredacted text on to another host.
+        redirect: "error",
         headers: {
           authorization: `Bearer ${connection.token}`,
           ...(call.body === undefined ? {} : { "content-type": "application/json" }),
@@ -234,11 +237,15 @@ export class DaemonClient implements HotlineDaemon {
     try {
       json = await response.json();
     } catch {
+      // Maybe not the daemon at all: look the port up again next time. Never replay.
+      this.connection = undefined;
       throw new DaemonError("bad-response", "the daemon's response is not JSON");
     }
     const parsed = call.schema.safeParse(json);
-    if (!parsed.success)
+    if (!parsed.success) {
+      this.connection = undefined;
       throw new DaemonError("bad-response", "the daemon's response has an unexpected shape");
+    }
     return parsed.data;
   }
 }

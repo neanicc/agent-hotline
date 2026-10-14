@@ -545,7 +545,8 @@ Template:
 
 - Decision / change: `hotline mcp` (stdio, `packages/agents`) offers
   `ask_human`, `notify_human` and `check_inbox`; see `docs/mcp.md`. It talks only
-  to the daemon on 127.0.0.1 with the token. It relays `answered` only for the
+  to the daemon on 127.0.0.1 with the token and never follows redirects
+  (Greptile). It relays `answered` only for the
   ask it created and only with a decision a question can have. Every failure,
   timeout, cancel or doubtful outcome is `no-answer`.
   `@modelcontextprotocol/sdk` is pinned at 1.31.0 (15 days old; its one change
@@ -584,7 +585,7 @@ Template:
   after 2 s. With that fix disabled, 9 of 10 runs of the MCP test file failed;
   with it, 12 of 12 passed.
 - Evidence (worktree, Node 24.11.0; the pre-merge tree also on 22.23.1):
-  - `run.sh setup`, `build` and `test` pass, with 568 tests after merging main.
+  - `run.sh setup`, `build` and `test` pass, with 572 tests after merging main.
   - The tests drive the SDK `Client` against a real daemon on 127.0.0.1
     (InMemoryTransport, fake clock), plus `hotline mcp` over stdio framing.
   - Mutation checks fail tests when the `askId` match, ask-text redaction or
