@@ -540,3 +540,77 @@ Template:
 - Open issues or follow-ups: HL-07's `parseSmsReply` already turns `call me` into
   the `call-me` command; HL-09 maps that command to this event, dedupes inbound
   texts by message id, and turns the ignore reasons into owner replies.
+
+## 2026-10-14 — HL-08 ElevenLabs voice provider (#PR)
+
+- Decision / change:
+  - `packages/providers`: `VoiceProvider.callOwner({callId, asks})`, bound to
+    the owner's number at creation. `ElevenLabsVoiceProvider` is one hand-written
+    JSON POST to `/v1/convai/twilio/outbound-call` (`xi-api-key`, 15 s timeout,
+    required injected `fetch`) instead of `@elevenlabs/elevenlabs-js`: one
+    request type does not justify the SDK, and no test can reach the network.
+    zod 4.6.5 (the pin core already uses) is now a providers dependency for the
+    tool body schemas. Only `callVariables` leaves the machine: per ask the
+    nickname, kind, risk and redacted text, redacted whole and then cut (300
+    characters per ask), inside an `<agent_text>` fence agent text cannot close.
+  - Agent definition as code (`elevenlabs-agent.ts`, version 1): prompt, first
+    message, the four webhook tool configs and the agent body, for HL-11 to
+    apply. Each tool's call ids and both phone numbers come from ElevenLabs'
+    `system__*` dynamic variables, so the model cannot pick the call it answers
+    for; no tool has a confirmation field. Tools are created separately and
+    referenced by `tool_ids` (inline `tools` is deprecated in the SDK types).
+  - Server tools on the webhook listener (`/hooks/el/tools/*`): shared secret in
+    `x-hotline-tool-secret`, checked in `precheck` (present, JSON) and `verify`
+    (constant time). The webhook listener's JSON parser now keeps the raw text,
+    so every JSON route verifies before it parses. A call must have the owner as
+    `caller_id` or `called_number`, or the tool answers `refused` with
+    `end_call`. `get_status` and `send_instruction` need `verify_pin` on the same
+    call (the hook HL-10 needs). `confirmation: "pin"` comes only from the
+    `PinGate`. Handlers are injected, as on the SMS route; until HL-09/HL-10,
+    `runDaemon` audits answers by kind only and resolves nothing.
+  - PIN: `verifyPin` (scrypt with the config's parameters and `maxmem`,
+    constant-time compare) and `hashPin` live in the daemon. `PinGate` allows 2
+    wrong PINs per call (matching `inbound-wrong-pin-rejected`), then ends the
+    call; 6 failures in a rolling hour across calls lock every check, the right
+    PIN included, until the hour passes (fails closed; an attacker can lock the
+    owner out of PIN approvals for an hour). Attempts are counted before the
+    slow check, so concurrent guesses cannot exceed the limit. A verified PIN is
+    registered with `addShortSecret`.
+  - Post-call webhook: the algorithm is taken from the SDK's `constructEvent`
+    (elevenlabs-js `278c39c0`, `src/wrapper/webhooks.ts`), which the
+    post-call-webhooks docs point to: `t=<s>,v0=<hex HMAC-SHA256(secret,
+    "t.body")>`. The SDK allows 30 minutes into the past and any future
+    timestamp; Hotline also refuses more than 5 minutes ahead. The test vector
+    uses the SDK test's payload and secret, with the digest computed by
+    `openssl dgst`. Replays are keyed by event type and conversation id, not
+    the header, so reordering the header's parts does not bypass them.
+  - Fake voice provider with scripted humans (answers, silence, no pickup, busy,
+    drop, unclear, wrong PIN, inbound status and instructions) driving the real
+    routes through `httpVoiceToolClient`, for HL-12.
+- Evidence (automated, worktree, Node 24.11.0): `scripts/ci/run.sh build`
+  (Biome, `tsc -b`, typecheck, CLI smoke) and `scripts/ci/run.sh test` (614
+  tests in 32 files) pass. Mutation checks, each run against the daemon and
+  providers suites and reverted: a tool secret check that always passes (4
+  tests fail), `confirmation: "pin"` without the PinGate (3), `get_status`
+  without the PIN (2), no owner-on-call check (1), no timestamp tolerance (3),
+  no replay memory (1), no PIN attempt limit (5). Scenario suite: not built yet
+  (HL-12). No real ElevenLabs or Twilio request was made; no real agent or live
+  call evidence.
+- Open issues or follow-ups:
+  - HL-09: `owner_words` is written by the voice model, and agent text reaches
+    the model, so a prompt-injected or confused model could submit a low-risk
+    `allow` the owner never said. Confirm each voice decision with
+    `ownerSaid(ownerWords, transcript)` against the post-call transcript before
+    resolving the ask (high-risk approvals are already safe: they need the PIN,
+    which agents cannot read). Map the ask number to the call's ask ids, treat
+    `unclear` as the queue's `unclear` event, and `initiation-failure` as
+    `no-pickup` (busy, no-answer) or `failed`.
+  - Live check: that ElevenLabs fills `system__caller_id` and
+    `system__called_number` with E.164 numbers on Twilio calls in both
+    directions. If not, every tool call is refused (fails closed). Also the exact
+    `built_in_tools.end_call` shape and whether outbound calls should enable
+    Twilio machine detection so a voicemail greeting is never read the asks.
+  - HL-11: create the workspace secret and tools, then the agent, from these
+    configs; `hotline doctor` compares `AGENT_DEFINITION_VERSION`.
+  - HL-13: durable replay protection for post-call events and PIN failures
+    (both in memory today, reset by a restart).

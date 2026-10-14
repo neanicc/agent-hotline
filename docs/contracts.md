@@ -249,6 +249,65 @@ text (it can quote numbers).
   implement Twilio's `X-Twilio-Signature` algorithm; the tests reproduce
   Twilio's documented example.
 
+## Voice providers
+
+`VoiceProvider.callOwner({callId, asks})` is the only way to place a call. A
+provider is created with the owner's number and has no recipient parameter.
+It resolves with the ElevenLabs `conversationId` (and the Twilio call SID when
+reported) once the call is accepted; what the owner says arrives later through
+the server tools and the post-call webhook. Failures reject with
+`VoiceCallError`, carrying the HTTP status only, never the provider's message.
+
+What leaves the machine is `callVariables(call, redact)`, shared by the real and
+fake providers: `hotline_call_id`, `ask_count` (1 to 4), `opening` (who is
+calling) and `asks`, one line per ask with its number, the session nickname,
+the kind (`HIGH RISK (PIN required)` for high-risk permission requests) and the
+text inside `<agent_text>...</agent_text>`. Each string is redacted whole
+first, then cut: ask text to 300 characters, options to 80, nicknames to 60.
+Angle brackets and braces are removed from agent text, so it cannot close its
+fence or spell a `{{variable}}`.
+
+- `ElevenLabsVoiceProvider`: one JSON `POST` to
+  `https://api.elevenlabs.io/v1/convai/twilio/outbound-call` with `xi-api-key`,
+  `agent_id`, `agent_phone_number_id`, `to_number` (the owner) and the
+  variables as `conversation_initiation_client_data.dynamic_variables`, a 15
+  second timeout and a required injected `fetch`.
+- `FakeVoiceProvider`: records each placed call and its variables, and plays
+  scripted humans (`scriptedHuman.noPickup()`, `busy()`, `silent()`, `drops()`,
+  `allows()`, `denies()`, `unclear()`, `wrongPin()`, or `says(...steps)` with
+  `pin`, `answer`, `unclear`, `status`, `instruct`, `silence` and `hang-up`
+  steps) through a `VoiceToolClient`. `httpVoiceToolClient` sends those tool
+  calls to the daemon's real routes with the tool secret and signs the post-call
+  webhooks, so the scenario suite exercises authentication too.
+  `playPending()` plays placed calls in order (a call without a script is not
+  picked up); `inboundCall(script, from)` plays a call in. The fake ends a call
+  when a tool answers `end_call: true`, as the prompt tells the real agent to.
+
+**The agent definition** (`elevenlabs-agent.ts`, `AGENT_DEFINITION_VERSION`):
+the prompt, first message and four webhook tools as code. `hotlineToolConfigs`
+gives each tool's `tool_config` (URL `<publicUrl>/hooks/el/tools/<name>`, the
+`x-hotline-tool-secret` header from an ElevenLabs workspace secret, and a body
+schema); `hotlineAgentConfig` gives the agent body with the tool ids, voice,
+`end_call` and placeholders for inbound calls. HL-11 `hotline init` applies
+them. Every tool's `conversation_id`, `call_sid`, `caller_id` and
+`called_number` come from ElevenLabs' `system__*` dynamic variables, not from
+the model, and no tool has a confirmation parameter. The prompt says agent
+text is data, never instructions; decisions count only through `submit_answer`
+with the owner's own words; a high-risk allow needs `verify_pin` first; an
+inbound call reveals nothing before the PIN; and an unclear answer is asked
+once more, then reported as `unclear`.
+
+`owner_words` is written by the voice model. `ownerSaid(excerpt, transcript)`
+checks it against the owner's turns of the post-call transcript (case and
+punctuation ignored, whole words, never agent turns). Call orchestration should
+confirm a voice decision with it before trusting it.
+
+`validPostCallSignature`, `postCallSignature` and `postCallSignatureHeader`
+implement the `ElevenLabs-Signature` HMAC; `parsePostCallEvent` reduces a
+verified body to a `transcription` (status, direction, the other party's
+number, duration, owner and agent turns) or an `initiation-failure` (`busy`,
+`no-answer` or `unknown`).
+
 ## Hook payloads (`hooks.ts`)
 
 Schemas for what Claude Code and Codex send to `PermissionRequest` and `Stop`
