@@ -2152,3 +2152,20 @@ Template:
   - P3: `ReplyJudge` documents that `agreed` is final and not re-screened
     for doubt markers, so a judge owns that call and must agree only to a
     clear yes.
+- Bot staff review of 7034164 (approve with nits, 84; P2 2, P3 2):
+  - P2 fixed: a permission request longer than the read-out length
+    (`MAX_SPOKEN_ASK_LENGTH`, 300 characters, now the source of
+    `READ_TEXT_LENGTH`) is never approved by voice. Its tail was never read
+    out, so it is texted; a deny of it still counts. Tests cover an over-long
+    command and one of exactly the read-out length. The mutation dropping the
+    rule fails 1 test.
+  - P2 recorded in docs/daemon.md: the constraints before any real judge is
+    wired in. They are the plan change and the owner's approval; `agreed` is
+    final, so a judge must agree only to a clear yes; and a high-risk request
+    never takes a judge's `agreed` without the PIN or a confirming text,
+    which `needs-pin` and the queue already enforce for every voice allow.
+  - P3 stated consistently in code and docs: words that answer a yes-or-no
+    question ("ok", "okay", "alright", "sure", "sounds good") are fast yeses,
+    because the fast path only hears replies to a read-back that asked for a
+    yes. Words that only acknowledge or thank go to the judge.
+  - P3 (split the module): follow-up.

