@@ -402,9 +402,14 @@ export class FakeVoiceProvider implements VoiceProvider {
       } else if (step.kind === "status") {
         say("user", "What's everyone doing?");
         response = await tool("get_status", {});
+        // The agent reads the status out, its fences dropped as the prompt says.
+        if (typeof response.status === "string")
+          say("agent", response.status.replace(/<\/?agent_text>/g, ""));
       } else {
         const words = step.words ?? step.instruction;
         say("user", words);
+        // The prompt's read-back of an instruction, before it is sent.
+        say("agent", `Session ${step.session}: ${step.instruction}. Passing that on.`);
         response = await tool("send_instruction", {
           session_number: step.session,
           instruction: step.instruction,

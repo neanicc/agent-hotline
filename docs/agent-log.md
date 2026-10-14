@@ -1695,3 +1695,75 @@ Template:
   pre-existing queue or test bug that random seeds rarely hit, not this refactor.
   It is not fixed here (out of lane); the rerun passed. Tracked in #50
   (`lane:core`), after the staff review on ff58e6a (P2) asked for an issue.
+
+## 2026-10-14 — HL-10 Inbound line (#11)
+
+- Change: the owner can call the Hotline number, give the PIN, hear every live
+  session's status and leave one session an instruction; a `status` text gets
+  the same status. New `packages/daemon/src/inbound-line.ts` (status,
+  `send_instruction`, post-call confirmation, lockout texts, inbound call
+  records), `instruction-confirm.ts` (pure confirmation) and `sessions.ts`
+  (session lifetime). Store migration 4 adds `instructions`. Agent API: the
+  inbox now hands queued instructions over, and
+  `POST /v1/sessions/:id/instructions/take` does the same for the MCP server
+  (after `ask_human`) and the Stop hook. Agent definition v5 (inbound steps).
+- Decision: an instruction is held until the post-call transcript backs it,
+  like other voice decisions. `confirmInstruction` needs the instruction itself
+  in one run of the owner's own turns (after the PIN on an inbound call),
+  `owner_words` in that stretch or the one before, the session named there (by
+  number, or by name better than any other listed session; one listed session
+  is the one meant), and no doubt from the owner after it up to their reply to
+  the read-back. `voice-confirm.ts` is unchanged; only its exported
+  `soundsDoubtful` is reused, with questions not counted. Reason: the model
+  writes `instruction` and `owner_words`, the status it read holds agent text,
+  and an instruction becomes an agent's next prompt.
+- Decision: sessions are named by number. `get_status` numbers live sessions
+  by registration and remembers, per call, which number is which session;
+  `send_instruction` takes only a number that call's status read out
+  (`unknown-session` otherwise), per the HL-14 comment on #11.
+- Decision: delivery at the Stop hook goes through the hook's continuation
+  path. The hook takes queued instructions before asking anyone (no call for
+  that stop), and a stop already waiting is cancelled by a new instruction
+  for its session, after which the hook takes it. Rejected: answering the stop
+  ask with the instruction through the queue, which accepts a voice answer only
+  for an ask on the call in progress; that would need a core queue change.
+  Hook change kept small for HL-06b: two helpers and one block in `stopHook`.
+- Decision (plan open question 3, recommended default): instructions are
+  delivered at the next ask or Stop hook only; nothing mid-turn.
+- Decision: inbound calls answer no asks. Plan section 4D lists status and
+  instructions only, so answering asks on an inbound call stays out of scope;
+  call orchestration still refuses `submit_answer` on calls it did not place.
+- Decision: session lifetime. A session idle for 6 hours with no open ask and
+  no queued instruction is ended (`session.expired`), checked before each new
+  registration and status read; queued instructions expire after 6 hours; at
+  most 20 live sessions (a new one past that gets 429, an existing one can
+  refresh). Ending a session drops its queued instructions.
+- Decision: caps of 5 instructions per call, 3 waiting per session and 20 in
+  all; instructions redacted and cut to 1000 characters before storage.
+- Decision: a PIN lockout is texted to the owner at most once an hour per
+  direction, quiet hours or not. An instruction that was not confirmed (or
+  whose session ended) gets one text after the call saying it was not passed
+  on, so silence never looks like delivery.
+- Not needed: the HL-09b P3 (OwnerTexts keeping `OrchestratorState.data`
+  across an await). Nothing here reloads orchestrator state, and the new
+  `status` reply path has no await; the instructions live in the store, not
+  the orchestrator state.
+- Evidence: `scripts/ci/run.sh build` passes; `scripts/ci/run.sh test` 57
+  files, 1369 tests, passed three times in a row. New end-to-end tests
+  (`apps/cli/test/inbound-line.test.ts`) run the real daemon routes with the
+  fake voice and SMS providers, then the real hook adapter and MCP server:
+  PIN, status, instruction, delivery at the Stop hook (no call placed) and at
+  `ask_human` and `check_inbox` (once); a waiting stop picking one up; wrong
+  PIN; the lockout text; a stranger's call and text; a spoofed owner number
+  without the PIN; a take-back and a paraphrase never queued; the status text.
+  Mutation checks, each reverted: `confirmInstruction` always confirming
+  (9 tests fail), the Stop hook skipping queued instructions (3 unit tests and
+  1 end-to-end test fail). Scenario suite not built yet (HL-12). Real Claude
+  Code or Codex runs not done: they would use the developer's real config and
+  credentials.
+- Open issues or follow-ups: Codex's MCP server registers without a session
+  id, so a Codex session shows as two sessions in the status (MCP and hooks);
+  an instruction reaches whichever one the owner named. The transcript rules
+  are tested on the fake's transcripts only; real ElevenLabs turn splitting
+  needs the live check. PinGate counters and the held instructions are in
+  memory (HL-13).

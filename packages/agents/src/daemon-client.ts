@@ -46,9 +46,13 @@ export const OutcomeState = z.discriminatedUnion("state", [
 ]);
 export type OutcomeState = z.infer<typeof OutcomeState>;
 
+/** An instruction the owner gave this session by phone, in their own words. Handed over once. */
+export const OwnerInstruction = z.object({ text: z.string().min(1), receivedAt: z.string() });
+export type OwnerInstruction = z.infer<typeof OwnerInstruction>;
+
 export const Inbox = z.object({
   session: Session,
-  instructions: z.array(z.object({ text: z.string(), receivedAt: z.string() })),
+  instructions: z.array(OwnerInstruction),
   asks: z.array(z.object({ ask: Ask, outcome: AskOutcome.optional() })),
 });
 export type Inbox = z.infer<typeof Inbox>;
@@ -72,6 +76,11 @@ export interface HotlineDaemon {
   outcome(askId: string, waitSeconds: number, signal?: AbortSignal): Promise<OutcomeState>;
   cancelAsk(askId: string): Promise<boolean>;
   inbox(sessionId: string): Promise<Inbox>;
+  /**
+   * Hands over the owner's queued instructions for the session, oldest first.
+   * Each is handed over once: after an ask (`ask`) or at a Stop hook (`stop`).
+   */
+  takeInstructions(sessionId: string, via: "ask" | "stop"): Promise<OwnerInstruction[]>;
   /** Marks the session ended and cancels its open asks. */
   endSession(sessionId: string): Promise<boolean>;
 }
@@ -90,6 +99,7 @@ const SessionResponse = z.object({ session: Session });
 const AskResponse = z.object({ ask: Ask });
 const CancelResponse = z.object({ cancelled: z.boolean() });
 const EndResponse = z.object({ ended: z.boolean() });
+const InstructionsResponse = z.object({ instructions: z.array(OwnerInstruction) });
 
 function validPort(port: number): boolean {
   return Number.isInteger(port) && port >= 1 && port <= 65535;
@@ -165,6 +175,15 @@ export class DaemonClient implements HotlineDaemon {
       path: `/v1/sessions/${encodeURIComponent(Id.parse(sessionId))}/inbox`,
       schema: Inbox,
     });
+  }
+
+  takeInstructions(sessionId: string, via: "ask" | "stop"): Promise<OwnerInstruction[]> {
+    return this.call({
+      method: "POST",
+      path: `/v1/sessions/${encodeURIComponent(Id.parse(sessionId))}/instructions/take`,
+      body: { via },
+      schema: InstructionsResponse,
+    }).then((response) => response.instructions);
   }
 
   private resolveConnection(): Promise<DaemonConnection> {

@@ -28,6 +28,7 @@ import {
   MAX_PREVIEW,
   NOT_APPROVED,
   type OutcomeState,
+  type OwnerInstruction,
   permissionAsk,
   runHook,
   safeToolName,
@@ -311,6 +312,8 @@ interface FakeScript {
   register?: () => Promise<Session>;
   create?: (request: CreateAskRequest) => Promise<Ask>;
   outcome?: (ask: Ask) => Promise<OutcomeState>;
+  /** The owner's queued instructions, handed over on each take (default: none). */
+  take?: () => Promise<OwnerInstruction[]>;
 }
 
 function makeAsk(request: CreateAskRequest, overrides: Partial<Ask> = {}): Ask {
@@ -367,6 +370,10 @@ function fakeDaemon(script: FakeScript): HotlineDaemon & { calls: string[]; asks
     },
     async inbox() {
       throw new Error("unused");
+    },
+    async takeInstructions(_sessionId, via) {
+      calls.push(`take:${via}`);
+      return script.take ? script.take() : [];
     },
     async endSession() {
       return true;
@@ -619,6 +626,74 @@ describe("Stop hook loop guards", () => {
     const next = fakeDaemon({ outcome: async (ask) => instruction(ask) });
     expect((await run(next, state, true)).stdout).toBeUndefined();
     expect(next.calls).toEqual([]);
+  });
+
+  const left = (...texts: string[]) =>
+    texts.map((text) => ({ text, receivedAt: START.toISOString() }) satisfies OwnerInstruction);
+
+  it("continues with the owner's queued instructions without asking anyone (the inbound line)", async () => {
+    const state = new MemoryState();
+    const daemon = fakeDaemon({
+      take: async () => left("run the tests", "then open a PR"),
+      outcome: async (ask) => ({
+        state: "final",
+        ask,
+        outcome: { outcome: "no-answer", askId: ask.id, reason: "timeout" },
+      }),
+    });
+    expect(parse((await run(daemon, state, false)).stdout)).toEqual({
+      decision: "block",
+      reason: "run the tests\nthen open a PR",
+    });
+    expect(daemon.calls).toEqual(["register", "take:stop"]);
+    expect(daemon.asks).toEqual([]);
+    expect(state.counts.get(SESSION)).toBe(1);
+  });
+
+  it("picks up an instruction left while its stop waited, which ended the stop as no answer", async () => {
+    let takes = 0;
+    const daemon = fakeDaemon({
+      take: async () => (takes++ === 0 ? [] : left("now write the docs")),
+      outcome: async (ask) => ({
+        state: "final",
+        ask,
+        outcome: { outcome: "no-answer", askId: ask.id, reason: "cancelled" },
+      }),
+    });
+    expect(parse((await run(daemon, new MemoryState(), false)).stdout)).toEqual({
+      decision: "block",
+      reason: "now write the docs",
+    });
+    expect(daemon.calls.filter((call) => call.startsWith("take"))).toHaveLength(2);
+  });
+
+  it("does not hand over instructions past the continuation cap, or after the owner said that's it", async () => {
+    const state = new MemoryState();
+    state.counts.set(SESSION, 3);
+    const capped = fakeDaemon({ take: async () => left("keep going") });
+    expect((await run(capped, state, true)).stdout).toBeUndefined();
+    expect(capped.calls).not.toContain("take:stop");
+    let takes = 0;
+    const done = fakeDaemon({
+      take: async () => (takes++ === 0 ? [] : left("keep going")),
+      outcome: async (ask) => answered(ask, { type: "done" }),
+    });
+    expect((await run(done, new MemoryState(), false)).stdout).toBeUndefined();
+    expect(done.calls.filter((call) => call === "take:stop")).toHaveLength(1);
+  });
+
+  it("asks the owner as usual when the instructions cannot be fetched", async () => {
+    const daemon = fakeDaemon({
+      take: async () => {
+        throw new DaemonError("unreachable", "gone");
+      },
+      outcome: async (ask) => instruction(ask),
+    });
+    expect(parse((await run(daemon, new MemoryState(), false)).stdout)).toEqual({
+      decision: "block",
+      reason: "keep going",
+    });
+    expect(daemon.asks.map((ask) => ask.kind)).toEqual(["stop"]);
   });
 
   it("does not continue when away mode was switched off while it waited", async () => {

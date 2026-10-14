@@ -23,6 +23,7 @@ import {
   type HotlineMcpOptions,
   type Inbox,
   type OutcomeState,
+  type OwnerInstruction,
 } from "../src/index.js";
 
 const START = new Date("2026-10-13T21:00:00.000Z");
@@ -402,6 +403,47 @@ describe("hotline MCP server", () => {
     });
   });
 
+  it("hands the owner's queued instructions to the next ask_human result, and only once", async () => {
+    const running = await startTestDaemon();
+    const { mcp } = await connect(clientFor(running.apiPort));
+    const session = await waitFor(() => running.store.listSessions()[0], "the session");
+    // What the inbound line stores once the post-call transcript confirmed it.
+    running.store.addInstruction({
+      id: "instruction-1",
+      sessionId: session.id,
+      text: "use the blue theme everywhere",
+      ownerExcerpt: "session one, use the blue theme everywhere",
+      sourceId: "conversation-9",
+      channel: "voice",
+      receivedAt: now.toISOString(),
+      status: "queued",
+    });
+    const call = mcp.callTool({
+      name: "ask_human",
+      arguments: { question: "Color?", options: ["Red", "Blue"] },
+    });
+    const ask = await pendingAsk(running);
+    running.store.recordAnswer(ownerAnswer(ask.id), now);
+    const result = resultJson(await call);
+    expect(result).toMatchObject({
+      outcome: "answered",
+      choice: { option: 2, text: "Blue" },
+      instructions: [{ text: "use the blue theme everywhere", receivedAt: now.toISOString() }],
+    });
+    expect(running.store.listInstructions()[0]).toMatchObject({ status: "delivered", deliveredVia: "ask" });
+    const inbox = resultJson(await mcp.callTool({ name: "check_inbox", arguments: {} }));
+    expect(inbox.instructions).toEqual([]);
+  });
+
+  it("still returns the answer when the instructions cannot be fetched", async () => {
+    // ScriptedDaemon's takeInstructions always fails.
+    const scripted = new ScriptedDaemon((ask) => answered(ask.id, { type: "text", text: "ship it" }));
+    const { mcp } = await connect(scripted);
+    const result = resultJson(await mcp.callTool({ name: "ask_human", arguments: { question: "Go?" } }));
+    expect(result).toMatchObject({ outcome: "answered", answer: "ship it" });
+    expect(result).not.toHaveProperty("instructions");
+  });
+
   it("reports an unreachable inbox as an error", async () => {
     const { mcp } = await connect(clientFor(await closedPort()));
     const result = await mcp.callTool({ name: "check_inbox", arguments: {} });
@@ -461,6 +503,10 @@ class ScriptedDaemon implements HotlineDaemon {
   }
 
   async inbox(): Promise<Inbox> {
+    throw new DaemonError("unreachable", "down");
+  }
+
+  async takeInstructions(): Promise<OwnerInstruction[]> {
     throw new DaemonError("unreachable", "down");
   }
 

@@ -77,6 +77,10 @@ const NO_ANSWER_NOTE =
   "Nobody answered. This is not approval and not an answer: do not act as if the human agreed. " +
   "Continue without their input where that is safe, or stop and leave the question for them.";
 
+const INSTRUCTIONS_NOTE =
+  "The human also left you these instructions by phone, in their own words. They are not an answer to " +
+  "this question; follow them as you would a message from the human.";
+
 // C0 controls except tab and newline, and DEL: agent text is spoken or texted, never interpreted.
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters is the point.
 const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f]/g;
@@ -221,6 +225,18 @@ export function createHotlineMcpServer(options: HotlineMcpOptions): HotlineMcpSe
     });
   };
 
+  /**
+   * The `ask_human` result, with the owner's queued instructions for this
+   * session when there are any: the next ask is where they are delivered. A
+   * failure to fetch them leaves them queued for the next ask or inbox read.
+   */
+  const withInstructions = async (sessionId: string, result: AskHumanResult): Promise<CallToolResult> => {
+    const instructions = await daemon.takeInstructions(sessionId, "ask").catch(() => []);
+    return json(
+      instructions.length === 0 ? result : { ...result, instructions, instructionsNote: INSTRUCTIONS_NOTE },
+    );
+  };
+
   /** Creates an ask, registering again once if the daemon no longer knows the session. */
   const createAsk = async (request: Parameters<HotlineDaemon["createAsk"]>[1]): Promise<Ask> => {
     try {
@@ -242,7 +258,8 @@ export function createHotlineMcpServer(options: HotlineMcpOptions): HotlineMcpSe
         "to one spoken sentence; offer up to 9 options when you can, since the human picks them by number. " +
         "Never include secrets, keys, file contents or diffs: they are redacted and only a short summary is " +
         "read out. Returns JSON: outcome 'answered' with the human's choice or answer and their own words, " +
-        "or outcome 'no-answer' with a reason. 'no-answer' is never approval.",
+        "or outcome 'no-answer' with a reason. 'no-answer' is never approval. Instructions the human left " +
+        "for you by phone come back with the result, in 'instructions'.",
       inputSchema: {
         question: z.string().min(1).max(MAX_QUESTION).describe("One short question, as it should be spoken"),
         options: z
@@ -320,12 +337,13 @@ export function createHotlineMcpServer(options: HotlineMcpOptions): HotlineMcpSe
             if (extra.signal.aborted) break;
             if (clock().getTime() >= deadline) {
               await daemon.cancelAsk(ask.id).catch(() => false);
-              return json(noAnswer("timeout", ask.id));
+              return withInstructions(ask.sessionId, noAnswer("timeout", ask.id));
             }
             try {
               const state = await daemon.outcome(ask.id, pollSeconds, extra.signal);
               failures = 0;
-              if (state.state === "final") return json(askHumanResult(ask, state.outcome));
+              if (state.state === "final")
+                return withInstructions(ask.sessionId, askHumanResult(ask, state.outcome));
             } catch (error) {
               if (extra.signal.aborted || (error instanceof DaemonError && error.kind === "aborted")) break;
               const delay = retryDelaysMs[failures];
@@ -377,8 +395,9 @@ export function createHotlineMcpServer(options: HotlineMcpOptions): HotlineMcpSe
     {
       title: "Check the Hotline inbox",
       description:
-        "List instructions the human left for this session and the status of its recent questions and " +
-        "notifications. Instructions come from the human; question text came from this agent.",
+        "List instructions the human left for this session by phone (each is shown once) and the status " +
+        "of its recent questions and notifications. Instructions come from the human; question text came " +
+        "from this agent.",
       inputSchema: {},
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
@@ -404,7 +423,7 @@ export function createHotlineMcpServer(options: HotlineMcpOptions): HotlineMcpSe
       const registered = session;
       session = undefined;
       const id = await registered?.catch(() => undefined);
-      // Best effort: a session the daemon never hears end from stays until HL-10 expires it.
+      // Best effort: a session the daemon never hears end from is ended once it has been idle for hours.
       if (id !== undefined) await daemon.endSession(id).catch(() => false);
     },
   };

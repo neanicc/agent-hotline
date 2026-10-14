@@ -3,7 +3,8 @@
 //
 //   POST /v1/sessions                      register a session (or refresh one by agentSessionId)
 //   POST /v1/sessions/:sessionId/asks      queue a question, notification, permission request or stop
-//   GET  /v1/sessions/:sessionId/inbox     owner instructions and this session's recent asks
+//   GET  /v1/sessions/:sessionId/inbox     owner instructions (handed over) and this session's recent asks
+//   POST /v1/sessions/:sessionId/instructions/take   hand over the owner's queued instructions
 //   GET  /v1/asks/:askId/outcome           the outcome, waiting up to `waitSeconds` for one
 //   POST /v1/asks/:askId/cancel            the agent stopped waiting; do not call about it
 //
@@ -27,7 +28,8 @@ import { sessionNickname } from "@hotline/providers";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import type { Redactor } from "./redact.js";
-import type { HotlineStore } from "./store.js";
+import { endSession, expireStaleSessions, liveSessions, MAX_LIVE_SESSIONS } from "./sessions.js";
+import { type HotlineStore, type Instruction, InstructionDelivery } from "./store.js";
 
 /** Longest an outcome request may wait before answering "still waiting". */
 export const MAX_OUTCOME_WAIT_SECONDS = 30;
@@ -116,11 +118,21 @@ const OutcomeQuery = z.strictObject({
   waitSeconds: z.coerce.number().int().min(0).max(MAX_OUTCOME_WAIT_SECONDS).default(0),
 });
 
-/** An owner instruction waiting for a session. HL-10 fills this queue; until then it is empty. */
+/**
+ * An owner instruction for a session, handed over once (HL-10): the owner's own
+ * words from a call, confirmed against the post-call transcript. Never agent text.
+ */
 export interface InboxInstruction {
   text: string;
   receivedAt: string;
 }
+
+const TakeInstructionsBody = z.strictObject({ via: InstructionDelivery.exclude(["inbox"]) });
+
+const inboxInstruction = (instruction: Instruction): InboxInstruction => ({
+  text: instruction.text,
+  receivedAt: instruction.receivedAt,
+});
 
 export type OutcomeResponse =
   | { state: "waiting"; ask: Ask }
@@ -257,6 +269,14 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
     stopWatching();
   });
 
+  /** Hands over a session's queued instructions, oldest first, each with an audit entry. */
+  const takeInstructions = (sessionId: string, via: InstructionDelivery): InboxInstruction[] => {
+    const now = clock();
+    const taken = store.takeInstructions(sessionId, via, now);
+    for (const _ of taken) store.appendAudit("instruction.delivered", { via }, now, { sessionId });
+    return taken.map(inboxInstruction);
+  };
+
   /** Resolves when `askId` changes, `ms` pass, the client goes away or the daemon closes. */
   const changeOrTimeout = (askId: string, ms: number, reply: FastifyReply) =>
     new Promise<void>((resolve) => {
@@ -285,6 +305,14 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
     const { agent, cwd, agentSessionId } = body.data;
     const now = clock().toISOString();
     const existing = agentSessionId === undefined ? undefined : store.findLiveSession(agent, agentSessionId);
+    if (existing === undefined) {
+      // A killed agent never ends its session: end the stale ones before counting.
+      expireStaleSessions(store, clock());
+      if (liveSessions(store).length >= MAX_LIVE_SESSIONS) {
+        store.appendAudit("session.refused", { agent, reason: "too many live sessions" }, clock());
+        return reply.code(429).send({ error: "too many live sessions" });
+      }
+    }
     const session: Session = existing
       ? { ...existing, cwd, lastSeenAt: now }
       : {
@@ -428,22 +456,8 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
     const session = store.getSession(params.data.sessionId);
     if (session === undefined) return reply.code(404).send({ error: "unknown session" });
     if (session.state === "ended") return { ended: false };
-    // Its open asks go too: nobody should be called for an agent that left.
-    const open = store.listAsks(["pending", "in-flight"]).filter((ask) => ask.sessionId === session.id);
-    for (const ask of open) {
-      if (store.setAskStatus(ask.id, "cancelled")) {
-        store.appendAudit("ask.cancelled", { kind: ask.kind, by: "session-end" }, clock(), {
-          askId: ask.id,
-          sessionId: session.id,
-        });
-      }
-    }
-    store.putSession({
-      ...(store.getSession(session.id) ?? session),
-      state: "ended",
-      lastSeenAt: clock().toISOString(),
-    });
-    store.appendAudit("session.ended", {}, clock(), { sessionId: session.id });
+    // Its open asks and queued instructions go too: nobody should be called for an agent that left.
+    endSession(store, session.id, clock(), "agent");
     return { ended: true };
   });
 
@@ -471,7 +485,22 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
     const asks = store.listSessionAsks(session.id, INBOX_ASK_LIMIT).map(outcomeOf);
     const seen = { ...(store.getSession(session.id) ?? session), lastSeenAt: clock().toISOString() };
     store.putSession(seen);
-    const response: InboxResponse = { session: seen, instructions: [], asks };
+    // Reading the inbox is one way an agent picks up the owner's instructions: each is handed over once.
+    const instructions = takeInstructions(session.id, "inbox");
+    const response: InboxResponse = { session: seen, instructions, asks };
     return response;
+  });
+
+  // After an ask (the MCP server) and around a stop (the Stop hook): the
+  // session's next ask or Stop hook is where an owner instruction is delivered.
+  app.post("/v1/sessions/:sessionId/instructions/take", async (request, reply) => {
+    const params = SessionParams.safeParse(request.params);
+    if (!params.success) return invalid(reply, params.error);
+    const body = TakeInstructionsBody.safeParse(request.body);
+    if (!body.success) return invalid(reply, body.error);
+    const session = store.getSession(params.data.sessionId);
+    if (session === undefined) return reply.code(404).send({ error: "unknown session" });
+    if (session.state !== "ended") store.putSession({ ...session, lastSeenAt: clock().toISOString() });
+    return { instructions: takeInstructions(session.id, body.data.via) };
   });
 }

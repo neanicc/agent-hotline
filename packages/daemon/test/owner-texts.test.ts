@@ -26,6 +26,12 @@ const plan = (body: string, waiting: WaitingText[], firstSeenAt = LATER, receive
   planTextReply({ body, messageSid: SID, receivedAt, firstSeenAt, optedOut: false, waiting });
 
 describe("planTextReply", () => {
+  it("replies to `status` with the status and never takes it as an answer to a waiting ask", () => {
+    for (const body of ["status", " Status? "]) {
+      expect(plan(body, [{ ask: ask(), sentAt: SENT }])).toEqual({ type: "status" });
+    }
+  });
+
   it("answers the one waiting question with free text first seen well after it was texted", () => {
     expect(plan("postgres", [{ ask: ask(), sentAt: SENT }])).toMatchObject({
       type: "answer",

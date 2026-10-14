@@ -19,6 +19,7 @@ import {
   Id,
   NoAnswerReason,
   Session,
+  Timestamp,
 } from "@hotline/core";
 import { z } from "zod";
 import { privatePathProblem } from "./private-file.js";
@@ -102,7 +103,61 @@ export const MIGRATIONS: readonly string[] = [
     finished INTEGER NOT NULL DEFAULT 0
   ) STRICT;
   `,
+  // The inbound line (HL-10): instructions the owner gave a session on a call,
+  // queued until that session's next ask, inbox read or Stop hook.
+  `
+  CREATE TABLE instructions (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions (id),
+    status TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    record TEXT NOT NULL
+  ) STRICT;
+  CREATE INDEX instructions_by_session ON instructions (session_id, status, received_at);
+  `,
 ];
+
+/** Where an owner instruction is in its life: waiting for its session, handed over, or dropped undelivered. */
+export const InstructionStatus = z.enum(["queued", "delivered", "dropped"]);
+export type InstructionStatus = z.infer<typeof InstructionStatus>;
+
+/** How a queued instruction reached its session. */
+export const InstructionDelivery = z.enum(["inbox", "ask", "stop"]);
+export type InstructionDelivery = z.infer<typeof InstructionDelivery>;
+
+/** Why a queued instruction was dropped without being delivered. */
+export const InstructionDrop = z.enum(["session-ended", "expired"]);
+export type InstructionDrop = z.infer<typeof InstructionDrop>;
+
+const notBlank = (max: number) =>
+  z
+    .string()
+    .min(1)
+    .max(max)
+    .refine((text) => text.trim().length > 0, "must not be blank");
+
+/**
+ * An instruction the owner gave one session on a call, after the PIN, confirmed
+ * against the owner's own turns in the post-call transcript. Never agent text.
+ */
+export const Instruction = z.strictObject({
+  id: Id,
+  sessionId: Id,
+  /** The instruction in the owner's own words, redacted and capped. */
+  text: notBlank(1000),
+  /** The owner's transcript turns that back it, verbatim apart from redaction. */
+  ownerExcerpt: notBlank(2000),
+  /** The call it came from (the ElevenLabs conversation id). */
+  sourceId: Id,
+  channel: z.literal("voice"),
+  receivedAt: Timestamp,
+  status: InstructionStatus,
+  deliveredVia: InstructionDelivery.optional(),
+  dropReason: InstructionDrop.optional(),
+  /** When it was delivered or dropped. */
+  closedAt: Timestamp.optional(),
+});
+export type Instruction = z.infer<typeof Instruction>;
 
 /**
  * Why an ask ended without an answer, stored next to its final status: a
@@ -555,6 +610,77 @@ export class HotlineStore {
       .map((row) => String(row.message_sid));
   }
 
+  // Owner instructions ------------------------------------------------------
+
+  /** Stores a new instruction. Its session must exist and its id must be new. */
+  addInstruction(instruction: Instruction): void {
+    const record = Instruction.parse(instruction);
+    this.wrap(`Could not add instruction ${record.id}`, () =>
+      this.db
+        .prepare(
+          "INSERT INTO instructions (id, session_id, status, received_at, record) VALUES (?, ?, ?, ?, ?)",
+        )
+        .run(record.id, record.sessionId, record.status, record.receivedAt, JSON.stringify(record)),
+    );
+  }
+
+  /** Instructions oldest first, optionally of one session and one status. */
+  listInstructions(filter: { sessionId?: string; status?: InstructionStatus } = {}): Instruction[] {
+    return this.db
+      .prepare(
+        `SELECT id, record FROM instructions WHERE (? IS NULL OR session_id = ?) AND (? IS NULL OR status = ?)
+         ORDER BY received_at, id`,
+      )
+      .all(filter.sessionId ?? null, filter.sessionId ?? null, filter.status ?? null, filter.status ?? null)
+      .map((row) => this.decode(Instruction, "instruction", row));
+  }
+
+  /**
+   * Hands over a session's queued instructions, oldest first, and marks them
+   * delivered in the same transaction, so each is delivered once.
+   */
+  takeInstructions(sessionId: string, via: InstructionDelivery, at: Date): Instruction[] {
+    return this.transaction(() => {
+      const queued = this.listInstructions({ sessionId, status: "queued" });
+      for (const instruction of queued) {
+        this.writeInstruction({
+          ...instruction,
+          status: "delivered",
+          deliveredVia: via,
+          closedAt: at.toISOString(),
+        });
+      }
+      return queued;
+    });
+  }
+
+  /**
+   * Drops queued instructions undelivered: one session's, or with `receivedBefore`
+   * every one older than that. Returns the instructions it dropped.
+   */
+  dropInstructions(
+    filter: { sessionId?: string; receivedBefore?: Date },
+    reason: InstructionDrop,
+    at: Date,
+  ): Instruction[] {
+    return this.transaction(() => {
+      const before = filter.receivedBefore?.getTime();
+      const dropped = this.listInstructions({
+        ...(filter.sessionId === undefined ? {} : { sessionId: filter.sessionId }),
+        status: "queued",
+      }).filter((instruction) => before === undefined || Date.parse(instruction.receivedAt) < before);
+      for (const instruction of dropped) {
+        this.writeInstruction({
+          ...instruction,
+          status: "dropped",
+          dropReason: reason,
+          closedAt: at.toISOString(),
+        });
+      }
+      return dropped;
+    });
+  }
+
   // Audit ------------------------------------------------------------------
 
   /**
@@ -618,6 +744,13 @@ export class HotlineStore {
         // A listener's failure must not undo or hide a committed write.
       }
     }
+  }
+
+  private writeInstruction(instruction: Instruction): void {
+    const record = Instruction.parse(instruction);
+    this.db
+      .prepare("UPDATE instructions SET status = ?, record = ? WHERE id = ?")
+      .run(record.status, JSON.stringify(record), record.id);
   }
 
   private writeAskStatus(ask: Ask): void {

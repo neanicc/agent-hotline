@@ -98,7 +98,12 @@ export interface VoiceInstruction extends ToolCall {
 }
 
 export type SubmitAnswerResult = "recorded" | "needs-pin" | "not-recorded";
-export type SendInstructionResult = "queued" | "unknown-session";
+/**
+ * `queued`: held until the post-call transcript confirms it (HL-10).
+ * `unknown-session`: not a session number the status on this call read out, or it ended.
+ * `too-many`: the call, the session or all sessions have as many waiting as allowed.
+ */
+export type SendInstructionResult = "queued" | "unknown-session" | "too-many" | "invalid";
 
 export interface VoiceHandlers {
   submitAnswer(answer: VoiceAnswer): SubmitAnswerResult | Promise<SubmitAnswerResult>;

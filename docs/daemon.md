@@ -45,12 +45,13 @@ adapters in [hooks.md](hooks.md) are the clients):
 | Route | Does |
 | --- | --- |
 | `GET /v1/health` | `{"ok": true, "version": "..."}` |
-| `POST /v1/sessions` | Registers `{agent, cwd, agentSessionId?}` and returns `{session}` (201). A live session with the same agent and `agentSessionId` is reused (200) |
+| `POST /v1/sessions` | Registers `{agent, cwd, agentSessionId?}` and returns `{session}` (201). A live session with the same agent and `agentSessionId` is reused (200). A new one first ends stale sessions ([session lifetime](#session-lifetime)); past 20 live sessions it gets `429` (audited as `session.refused`) |
 | `POST /v1/sessions/:sessionId/asks` | Queues `{kind, text, options?, toolName?, risk?, urgent?}` and returns `{ask}` (201). `kind` is `question`, `notify`, `permission` or `stop`. Only questions carry `options`; `permission` requires `toolName` (identifier characters, up to 100) and `risk` (`low` or `high`), and no other kind may send them. Text, options and the tool name are redacted before they are stored. The ask expires after `policy.askTimeoutMinutes`. Open-ask caps per session / across all sessions: questions 3 / 10, notifications 10 / 30, permission requests 3 / 10, stops 1 / 10; past them `429` (audited as `ask.refused`). A new `stop` cancels the session's older open `stop` first. `urgent` is the agent's request only; call policy decides |
 | `GET /v1/asks/:askId/outcome?waitSeconds=0..30` | `{state: "waiting", ask}` or `{state: "final", ask, outcome}`, waiting up to `waitSeconds` for a change |
 | `POST /v1/asks/:askId/cancel` | Cancels an ask that is still open: `{cancelled}` |
-| `POST /v1/sessions/:sessionId/end` | Marks the session `ended` and cancels its open asks: `{ended}`. An ended session takes no new asks (`404`) |
-| `GET /v1/sessions/:sessionId/inbox` | `{session, instructions, asks}`: owner instructions (always empty until HL-10 adds the queue) and the 20 newest asks with their outcomes |
+| `POST /v1/sessions/:sessionId/end` | Marks the session `ended`, cancels its open asks and drops its queued instructions: `{ended}`. An ended session takes no new asks (`404`) |
+| `GET /v1/sessions/:sessionId/inbox` | `{session, instructions, asks}`: the owner's queued instructions for this session ([inbound line](#inbound-line)), handed over once, and the 20 newest asks with their outcomes |
+| `POST /v1/sessions/:sessionId/instructions/take` | `{via: "ask" \| "stop"}` hands over the session's queued instructions, oldest first, once: `{instructions: [{text, receivedAt}]}`. The MCP server calls it after `ask_human`, the Stop hook before and after its stop |
 
 Bodies are strict: an unknown field, a relative `cwd`, more than 9 options,
 options on anything but a question, or a `toolName` or `risk` that is missing
@@ -203,10 +204,10 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
 
 | Tool | What the route does |
 | --- | --- |
-| `verify_pin` | Checks the PIN with the `PinGate`: 2 wrong PINs per call, then `end_call: true` and no further checks on that call; 6 wrong PINs across all calls of one direction in a rolling hour, or 10 in a rolling day, lock every check on that direction, the right PIN included, until enough time has passed. A caller spoofing the owner's number therefore gets at most 10 guesses a day (0.1% of a 4-digit PIN space). Each lockout calls the PinGate's `onLockout` so the owner can be told (HL-10 texts them). Inbound and outbound calls have separate budgets, so someone guessing on inbound calls (caller ID can be spoofed) cannot block PIN approvals on calls Hotline placed to the owner. The trade-off: such guessing still locks the owner's own inbound line for up to an hour, which fails closed. Answers `{verified, attempts_left, end_call}`. A verified PIN is registered with the redactor (`addShortSecret`). The PIN is checked against `owner.pinHash` with scrypt and never logged or stored |
+| `verify_pin` | Checks the PIN with the `PinGate`: 2 wrong PINs per call, then `end_call: true` and no further checks on that call; 6 wrong PINs across all calls of one direction in a rolling hour, or 10 in a rolling day, lock every check on that direction, the right PIN included, until enough time has passed. A caller spoofing the owner's number therefore gets at most 10 guesses a day (0.1% of a 4-digit PIN space). Each lockout calls the PinGate's `onLockout`, and the inbound line texts the owner (at most once an hour per direction). Inbound and outbound calls have separate budgets, so someone guessing on inbound calls (caller ID can be spoofed) cannot block PIN approvals on calls Hotline placed to the owner. The trade-off: such guessing still locks the owner's own inbound line for up to an hour, which fails closed. Answers `{verified, attempts_left, end_call}`. A verified PIN is registered with the redactor (`addShortSecret`). The PIN is checked against `owner.pinHash` with scrypt and never logged or stored |
 | `submit_answer` | On an inbound call, `pin-required` until this call passed `verify_pin`, because caller ID can be spoofed. A call is outbound only when the injected `placedCall(conversationId)` says Hotline placed it (call orchestration knows) and it went to the owner's number from another number; everything else counts as inbound. `runDaemon` passes call orchestration's `placedCall`, true from the moment a call is placed until its post-call event, its failure or the stuck-call limit. Otherwise passes the ask number, decision (`option`, `allow`, `deny`, `text`, `done` or `unclear`), the owner's words, the direction and the call ids to the `submitAnswer` handler. `confirmation` is `pin` only when this call passed `verify_pin`; nothing in the request can set it |
-| `get_status` | `{"result": "pin-required"}` until this call passed `verify_pin`. Then the `getStatus` handler's text, redacted and cut to 1500 characters |
-| `send_instruction` | `pin-required` until this call passed `verify_pin`. Then the `sendInstruction` handler gets the session number, instruction and the owner's words |
+| `get_status` | `{"result": "pin-required"}` until this call passed `verify_pin`. Then the `getStatus` handler's text (the [inbound line](#inbound-line)'s numbered status), redacted and cut to 1500 characters |
+| `send_instruction` | `pin-required` until this call passed `verify_pin`. Then the `sendInstruction` handler gets the session number, instruction and the owner's words, and answers `queued` (held until the post-call transcript confirms it), `unknown-session` (not a number this call's status read out, or that session ended), `too-many` or `invalid` |
 
 **Post-call webhook** (`POST /hooks/el/post-call`):
 
@@ -252,10 +253,10 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
 - **Logs:** tool name and result, event kind. Never bodies, words, transcripts,
   PINs or numbers.
 
-`submit_answer` and the post-call webhook go to call orchestration (below).
-Until the inbound line (HL-10) provides its handlers, `runDaemon` records
-`voice.instruction` in the audit log, answers `unknown-session`, and reads out
-no status.
+`submit_answer` goes to call orchestration (below), `get_status` and
+`send_instruction` to the [inbound line](#inbound-line), and the post-call
+webhook to both. `PinGate.onLockout` goes to the inbound line, which audits it
+(`voice.pin-lockout`) and texts the owner.
 
 ## Call orchestration
 
@@ -417,8 +418,8 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
   but never finished) get one text on the next start saying a text may not
   have been recorded. `call me` becomes the queue's `call-me`
   event and gets "calling you now" or the queue's reason for not calling.
-  `status` waits for HL-10; `stop` and Twilio's keywords get no reply of
-  Hotline's own. Any other text answers only an ask Hotline texted that is
+  `status` gets the [inbound line](#inbound-line)'s status of every live
+  session; `stop` and Twilio's keywords get no reply of Hotline's own. Any other text answers only an ask Hotline texted that is
   still open, and only one: a `YES <code>` reply names the ask with that code;
   otherwise there must be exactly one such ask, texted at least 10 seconds
   before the message was first seen (the time its SID was claimed; an ask with
@@ -448,6 +449,91 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
   `outbound texts off` with the reason when one is missing. Then every call or
   text fails and the queue falls back or ends the ask as no answer.
 
+## Inbound line
+
+`InboundLine` (`inbound-line.ts`, HL-10, plan section 4D) serves the owner
+calling the Hotline number or texting `status`. The routes above have already
+checked the tool secret, that the owner's number is on the call, and that this
+call passed `verify_pin`; before that nothing is read out and nothing is taken
+(`pin-required`), so a caller spoofing the owner's number still needs the PIN.
+Anyone else's call gets `refused` with `end_call` on its first tool call, and
+anyone else's text the generic SMS reply.
+
+- **Status.** `get_status` numbers every live session, oldest registration
+  first, and remembers on this call which number is which session. Per
+  session: its spoken name, state, open asks by kind, the latest ask's text
+  (already redacted when it was stored, redacted again and cut to 120
+  characters), queued instructions, and when it was last heard from. The name
+  and the ask text are agent-derived, so they are fenced in `<agent_text>` like
+  ask text on outbound calls. The whole status stays under 1400 characters;
+  sessions past that are counted ("3 more sessions are not read out"). Stale
+  sessions are ended first ([session lifetime](#session-lifetime)). The `status`
+  text gets the same status without fences, which goes back only to the owner's
+  number (the webhook checked the sender, and Twilio replies to that number), so
+  a spoofed sender never sees it.
+- **Instructions are held, then confirmed.** `send_instruction` takes only a
+  session number that this call's status read out and a session still live;
+  then it holds the instruction (`queued`) until the post-call transcript. Caps:
+  5 per call, 3 waiting per session, 20 in all (`too-many`). At the post-call
+  event each held instruction must pass `confirmInstruction`
+  (`instruction-confirm.ts`):
+  - the instruction itself is words the owner said, in one run of consecutive
+    owner turns (`ownerSaid`; on an inbound call only turns after the PIN are
+    the owner's), and `owner_words` are the owner's in that stretch or the one
+    before it. A paraphrase never counts;
+  - the owner named that session there: its number ("session two", "the second
+    one", "2"), or its name better than any other session the status listed.
+    With one session listed, that one is meant;
+  - nothing the owner said after it, up to their reply to the agent's next turn
+    (the read-back), sounds doubtful (`soundsDoubtful` without questions: "no
+    wait", "never mind", "actually"). The instruction's own words may say
+    "don't", and a turn giving another instruction from the same call is not a
+    take-back.
+  A confirmed instruction is redacted, cut to 1000 characters and stored
+  (`instructions` table) with the matching owner turns as its excerpt and the
+  conversation id. Anything else is dropped (`voice.instruction-unconfirmed`
+  with the reason), and the owner gets one text saying it was not passed on.
+  The held instructions and the call's numbering live in memory for two hours:
+  a restart before the post-call event drops them (fail closed; the PinGate's
+  verification is in memory too, so nothing would count as the owner's anyway).
+- **Delivery.** Each instruction is handed over once, oldest first, to the
+  session's next reader: the MCP server after `ask_human` returns (it adds
+  them to the result), `check_inbox` (the inbox route), or the Stop hook, which
+  takes them before it asks the owner anything and continues the agent with
+  them (`decision: block`, one instruction per line) within the usual loop
+  guards. A stop already waiting on the owner is cancelled when an instruction
+  for its session is queued (`ask.cancelled` by `instruction`), and the hook
+  then picks the instruction up. A permission request never carries one.
+  Instructions are dropped when their session ends and after 6 hours unread
+  (`instruction.expired`).
+- **No answers on inbound calls.** Call orchestration accepts `submit_answer`
+  only on a call Hotline placed, so an inbound call answers no ask, PIN or not.
+  The plan's inbound line reads status and takes instructions only.
+- **Lockouts.** `PinGate.onLockout` is audited (`voice.pin-lockout`) and texted
+  to the owner, at most once an hour per direction, quiet hours or not.
+- **Inbound call records.** Each inbound call's post-call event stores a
+  `CallRecord` (direction `inbound`, no asks, `answered` when anything the
+  person said counted as the owner's, else `rejected`) with its duration and
+  cost estimate, for `hotline doctor`. No numbers are stored.
+- Known limits: Codex's MCP server has no session id of its own, so its MCP
+  session and its hooks' session are two sessions in the status; an
+  instruction reaches whichever one the owner named. Real transcripts may
+  split or merge turns differently from the fake's; tune on the live check.
+
+## Session lifetime
+
+`sessions.ts`. The MCP server ends its session when it exits, but a killed
+server never does, and hook sessions never end at all. Before a new session
+registers and before each status is read, the daemon drops queued instructions
+older than 6 hours, then ends every live session nobody has heard from
+(`lastSeenAt`: registration, asks, inbox reads, instruction pickups) for 6
+hours that has no open ask and no queued instruction (`session.expired`). Ending
+a session cancels its open asks and drops its queued instructions, whoever ends
+it. At most 20 sessions are live at once: a new registration past that gets
+`429`, so a looping agent cannot flood the status, while an existing session
+can always refresh. A client whose session was ended registers again on its
+next call.
+
 ## Store
 
 SQLite through Node's built-in `node:sqlite`, at `hotline.db` in the hotline home,
@@ -461,7 +547,11 @@ on write and on read, next to the columns the daemon queries by. Migration 3
 `inbound_messages` (the owner's texts claimed, by message SID, and whether each
 was finished). Twilio signatures carry no timestamp, so a captured reply can be
 replayed at any time: finished SIDs are kept for 400 days and unfinished ones
-until they finish. Rows are tiny.
+until they finish. Rows are tiny. Migration 4 (HL-10) adds `instructions`:
+the owner's confirmed instructions with their session, status (`queued`,
+`delivered`, `dropped`), how they were delivered or why they were dropped, and
+the record (text, excerpt, conversation id) as JSON. `takeInstructions` hands a
+session's queued ones over and marks them delivered in one transaction.
 `onAskAdded` tells listeners about each new ask, as `onAskChange` does about
 status changes.
 
@@ -534,9 +624,9 @@ message, request fields, error stacks and bindings are all covered:
 - The owner's PIN, which is shorter than that minimum, can be registered with
   `addShortSecret` (4 to 8 digits). Any digit run or formatted number that
   contains it anywhere is removed whole, before phone masking, so a masked number
-  can never print the PIN as its last four digits. Until the inbound line (HL-10)
-  handles a spoken or keyed PIN, the key-based redaction above is what protects
-  it.
+  can never print the PIN as its last four digits. `verify_pin` registers the
+  PIN this way once it verified; before that, the key-based redaction above is
+  what protects it.
 - Numbers are redacted like their decimal text: phone-shaped, equal to a known
   secret, or containing the PIN.
 - Strings longer than 16 KiB are cut, along with the word at the cut, and

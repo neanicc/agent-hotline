@@ -12,9 +12,11 @@
 //   only when core's `permissionVerdict` says so: the owner's own approval of
 //   exactly this ask, with the PIN or a confirming text when it is high risk.
 //   No answer, a timeout, an unreachable daemon or a malformed outcome denies.
-// - Stop continues only with the owner's own instruction, and only while the
-//   loop guards allow: a turn Hotline did not continue itself is left alone, and
-//   at most `policy.maxConsecutiveContinuations` continuations run in a row.
+// - Stop continues only with the owner's own instruction (an answer to the
+//   stop, or one the owner left for this session on a call, which the daemon
+//   confirmed), and only while the loop guards allow: a turn Hotline did not
+//   continue itself is left alone, and at most
+//   `policy.maxConsecutiveContinuations` continuations run in a row.
 //
 // Everything in the payload was written by the agent and is untrusted: it is
 // cut short, stripped of control characters and redacted by the daemon before
@@ -309,6 +311,41 @@ async function askAndWait(
   return { ask, outcome: undefined };
 }
 
+/**
+ * The owner's queued instructions for this daemon session (the inbound line),
+ * one per line, or undefined. They are handed over once; any failure leaves
+ * them queued and the agent stops.
+ */
+async function takeInstructions(daemon: HotlineDaemon, sessionId: string): Promise<string | undefined> {
+  try {
+    const taken = await daemon.takeInstructions(sessionId, "stop");
+    const text = taken
+      .map((instruction) => instruction.text.trim())
+      .filter((line) => line !== "")
+      .join("\n");
+    return text === "" ? undefined : text;
+  } catch {
+    return undefined;
+  }
+}
+
+async function queuedInstructions(
+  daemon: HotlineDaemon,
+  session: { agent: AgentKind; cwd: string; agentSessionId: string | undefined },
+): Promise<string | undefined> {
+  try {
+    const registered = await daemon.registerSession({
+      agent: session.agent,
+      cwd: session.cwd,
+      ...(session.agentSessionId === undefined ? {} : { agentSessionId: session.agentSessionId }),
+    });
+    return await takeInstructions(daemon, registered.id);
+  } catch {
+    // The stop ask registers again, and fails closed if the daemon is gone.
+    return undefined;
+  }
+}
+
 function waiting(connection: HookConnection, options: HookOptions): Waiting {
   return {
     daemon: connection.daemon,
@@ -438,14 +475,21 @@ async function stopHook(options: HookOptions): Promise<HookResult> {
     return { note: `continuation cap (${count}) reached; the agent stops` };
   }
 
-  const result = await askAndWait(waiting(connection, options), session, {
-    kind: "stop",
-    text: stopText(parsed.data.last_assistant_message),
-  });
-  if (result?.outcome === undefined) return stop("no instruction from the owner; the agent stops");
-  const instruction = stopInstruction(result.ask, result.outcome);
+  // Instructions the owner left on a call to the Hotline number come first:
+  // then nobody is phoned about this stop.
+  let instruction = await queuedInstructions(connection.daemon, session);
+  if (instruction === undefined) {
+    const result = await askAndWait(waiting(connection, options), session, {
+      kind: "stop",
+      text: stopText(parsed.data.last_assistant_message),
+    });
+    if (result?.outcome?.outcome === "answered") instruction = stopInstruction(result.ask, result.outcome);
+    // An instruction the owner left while this stop waited ends the stop as no answer.
+    else if (result !== undefined)
+      instruction = await takeInstructions(connection.daemon, result.ask.sessionId);
+  }
   if (instruction === undefined || instruction.trim() === "") {
-    return stop("the owner let the agent stop, or did not answer");
+    return stop("no instruction from the owner, or the owner let the agent stop");
   }
   // Away mode may have been switched off while the hook waited: then the owner
   // is back at the terminal, and no continuation goes out.

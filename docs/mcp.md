@@ -7,9 +7,23 @@ decides anything itself.
 
 | Tool | What it does | Returns |
 | --- | --- | --- |
-| `ask_human` | Queues a question (up to 500 characters, up to 9 options, optional 400-character context) and waits for the owner | JSON: `{"outcome": "answered", "choice": {"option", "text"}` or `"answer", "ownerWords", "channel"}`, or `{"outcome": "no-answer", "reason", "note"}` |
+| `ask_human` | Queues a question (up to 500 characters, up to 9 options, optional 400-character context) and waits for the owner | JSON: `{"outcome": "answered", "choice": {"option", "text"}` or `"answer", "ownerWords", "channel"}`, or `{"outcome": "no-answer", "reason", "note"}`; plus `instructions` and `instructionsNote` when the owner left this session instructions |
 | `notify_human` | Queues a short note (up to 900 characters). Nothing waits for a reply | `{"queued": true, "askId"}`, or an error result |
-| `check_inbox` | Lists instructions the owner left for this session, and the session's 20 most recent asks with their results | JSON, or an error result |
+| `check_inbox` | Lists instructions the owner left for this session (each shown once), and the session's 20 most recent asks with their results | JSON, or an error result |
+
+## Owner instructions (HL-10)
+
+The owner can call the Hotline number, give the PIN, hear every session's
+status and leave one session an instruction ([inbound line](daemon.md#inbound-line)).
+Only instructions the daemon confirmed against the owner's own words in the
+call transcript are queued. A session picks its instructions up at its next
+ask: when `ask_human` returns (any outcome from the daemon, or its own
+timeout), the server takes them (`POST /v1/sessions/:id/instructions/take`,
+`via: "ask"`) and adds them to the result as
+`instructions: [{"text", "receivedAt"}]` with a note that they are not the
+answer to the question. `check_inbox` hands them over too. Each instruction is
+handed over once; if fetching them fails, the answer is still returned and the
+instructions stay queued. A cancelled `ask_human` takes none.
 
 ## Rules it keeps
 
@@ -60,8 +74,10 @@ daemon is not running yet, the next tool call registers. If the daemon has
 forgotten the session, the server registers again once. When the client closes
 the server, the server waits for running calls and then ends the session
 (`POST /v1/sessions/:id/end`), which cancels its open asks. A server that is
-killed cannot do that, so its session stays until the daemon expires stale
-sessions (HL-10).
+killed cannot do that: the daemon ends a session nobody has heard from for 6
+hours that has no open ask and no queued instruction
+([session lifetime](daemon.md#session-lifetime)), and the server registers
+again on its next call if it is still running.
 
 One known gap fails safe: if creating an ask times out on the client after
 the daemon stored it, `ask_human` reports `no-answer` while the ask stays open
