@@ -47,6 +47,8 @@ async function writeSetup(overrides: Record<string, unknown> = {}) {
     sms: { provider: "fake" },
     tunnel: { publicUrl: "https://hotline-fake.example.com" },
     secrets: { store: "file" },
+    // `hotline init` asked, and the owner chose the reply judge.
+    judge: { backend: "auto" },
     ...overrides,
   };
   await writePrivateFile(join(setup.hotlineHome, "config.json"), JSON.stringify(config));
@@ -312,6 +314,32 @@ describe("hotline doctor reply judge (HL-09d)", () => {
     const api = await cli(["doctor", "--home", setup.home], context(healthy(), {}, new FakeJudgeHost({})));
     expect(judgeLines(api.stdout)).toEqual([expect.stringMatching(/^PASS\s+judge\s+anthropic-api: /)]);
     expect(api.stdout + api.stderr).not.toContain(key);
+  });
+
+  it("warns when no judge was chosen yet, and neither looks for a CLI nor sends anything", async () => {
+    await writeSetup({ judge: {} });
+    const host = new FakeJudgeHost({ claude: CLAUDE_PATH }, () => agreed);
+    const result = await cli(["doctor", "--home", setup.home, "--check-judge"], context(healthy(), {}, host));
+    expect(judgeLines(result.stdout)).toEqual([
+      expect.stringMatching(
+        /^WARN\s+judge\s+not chosen: nothing is sent.*hotline init --force --non-interactive --judge <auto\|claude-code\|codex\|anthropic-api\|off>/,
+      ),
+    ]);
+    expect(host.found).toEqual([]);
+    expect(host.runs).toEqual([]);
+  });
+
+  it("names the PATH it looked on when no CLI is found", async () => {
+    await writeSetup();
+    const result = await cli(
+      ["doctor", "--home", setup.home],
+      context(healthy(), { PATH: "/usr/bin:/bin" }, new FakeJudgeHost({})),
+    );
+    expect(judgeLines(result.stdout)).toEqual([
+      expect.stringMatching(
+        /^WARN\s+judge\s+none: neither claude nor codex is on the PATH \(\/usr\/bin:\/bin\)/,
+      ),
+    ]);
   });
 
   it("passes when judge.backend is off, and sends nothing anywhere", async () => {

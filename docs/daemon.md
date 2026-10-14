@@ -431,15 +431,21 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
       allow. A call's held decisions are all checked at once, so a slow judge
       costs one timeout per call, not one per ask. The post-call webhook is
       answered once they are checked, so a judged reply delays that response
-      by up to 20 seconds.
+      by up to 20 seconds. The judge runs only there, after the call has
+      ended: `submit_answer` during the call only holds the answer and never
+      waits for it, so the owner hears no silence on the line while it runs
+      (`judge-wiring.test.ts`). The queue places no other call until this one
+      has ended, so no live call waits on it either.
 
     **The model-backed judge (HL-09d, `reply-judge.ts`).** A plan change at
     the owner's direction: the reply goes to the owner's own agent provider,
     on the plan the owner already pays for. `runDaemon` picks the judge once
     at start (`selectReplyJudge`), logs it (`reply judge`, with the backend
     and why) and records the backend in the `daemon.started` audit entry.
-    With config `judge.backend: "auto"` (the default) it takes the first
-    available of:
+    Until the owner has chosen (`judge.backend` unset; `hotline init` asks
+    once or takes `--judge`) it is `FailClosedJudge`: nothing is looked up,
+    run or sent. With `judge.backend: "auto"` it takes the first available
+    of:
     1. **Claude Code CLI** (`claude` on the PATH), on the owner's login:
        `claude -p --output-format json --model haiku --no-session-persistence
        --settings '{"disableAllHooks":true}' --strict-mcp-config --mcp-config
@@ -462,9 +468,14 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
     the PATH: nothing is run to find out, so neither the daemon nor `hotline
     doctor` calls a model at start. Each CLI run happens in a fresh, empty
     temporary directory (removed afterwards; Codex's schema and answer files
-    sit in a second one), with `HOTLINE_JUDGE=1` in its environment, the
+    sit in a second one), with an allowlisted environment (`judgeChildEnv`:
+    `JUDGE_BASE_ENV`, that is `PATH`, `HOME`, user, locale, XDG and proxy
+    variables, plus the CLI's own login variables, `CLAUDE_CODE_LOGIN_ENV` or
+    `CODEX_LOGIN_ENV`; never a `HOTLINE_*` variable) and `HOTLINE_JUDGE=1`, the
     prompt on stdin (the owner's words never appear in a process's
-    arguments) and a kill after `JUDGE_TIMEOUT_MS`. `HOTLINE_JUDGE=1` makes
+    arguments) and a kill after `JUDGE_TIMEOUT_MS`. Codex's answer is read
+    only from its `--output-last-message` file; no file is `unclear`. A CLI
+    not found names the `PATH` searched in the selection's detail. `HOTLINE_JUDGE=1` makes
     `hotline hook` and `hotline mcp` do nothing (exit 0, no output, no daemon
     contact): a second guard, after hooks and MCP servers are switched off for
     the run, so the judge's own session can never phone the owner. Each reply

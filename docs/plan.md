@@ -174,10 +174,13 @@ diff, user-level or `--project`. Tests run it against temporary home directories
   login (`claude -p`, a small model), the Codex CLI on the owner's login
   (`codex exec`), and an optional Anthropic API key. Each CLI run is isolated
   (empty temporary directory, no hooks, no MCP servers, no tools, nothing
-  saved). A yes with a condition ("yes if the tests pass") or taken back is
-  never an approval; errors and timeouts are "unclear". With no backend, or
-  `judge.backend: "off"`, such replies are texted instead. High-risk approvals
-  still need the PIN or a confirming text.
+  saved, and only the CLI's own login variables from the environment). A yes
+  with a condition ("yes if the tests pass") or taken back is never an
+  approval; errors and timeouts are "unclear". Nothing is sent until the owner
+  chooses the judge: `hotline init` asks once (Enter is yes) or takes
+  `--judge`, and an unset `judge.backend` sends nothing. With no backend, no
+  choice, or `judge.backend: "off"`, such replies are texted instead. High-risk
+  approvals still need the PIN or a confirming text.
 - Rate limits (calls per hour and per day), quiet hours, batching, and a monthly
   cost estimate shown by `hotline doctor`.
 - Expected cost for about 60 minutes of calls and 200 texts a month: roughly

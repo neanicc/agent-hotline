@@ -8,18 +8,24 @@ import {
   ANTHROPIC_MESSAGES_URL,
   AnthropicApiJudge,
   CLAUDE_CODE_JUDGE_MODEL,
+  CLAUDE_CODE_LOGIN_ENV,
   ClaudeCodeJudge,
+  CODEX_LOGIN_ENV,
   CodexJudge,
   checkedVerdict,
   claudeJudgeArgs,
+  JUDGE_BASE_ENV,
   JUDGE_OUTPUT_SCHEMA,
   type JudgeOutput,
+  type JudgeSpawn,
+  judgeChildEnv,
   judgePrompt,
   judgeTestMode,
   judgeVoiceDecision,
   nodeJudgeHost,
   parseJudgeOutput,
   type ReadAsk,
+  runJudgeProcess,
   selectReplyJudge,
   vetoesAgreement,
 } from "../src/index.js";
@@ -166,6 +172,7 @@ describe("ClaudeCodeJudge", () => {
     expect(run?.args).not.toContain("--bare");
     expect(run?.args.join(" ")).not.toContain("ship");
     expect(run?.options.env).toEqual({ HOTLINE_JUDGE: "1" });
+    expect(run?.options.inherit).toEqual(CLAUDE_CODE_LOGIN_ENV);
     expect(run?.options.timeoutMs).toBe(1_234);
     expect(run?.options.input).toBe(judgePrompt(["yeah let's ship that one"]));
     expect(run?.cwdEntries).toEqual([]);
@@ -214,6 +221,7 @@ describe("CodexJudge", () => {
     expect(args).toContain("--output-last-message");
     expect(args.join(" ")).not.toContain("great");
     expect(run?.options.env).toEqual({ HOTLINE_JUDGE: "1" });
+    expect(run?.options.inherit).toEqual(CODEX_LOGIN_ENV);
     expect(run?.cwdEntries).toEqual([]);
     // The schema file sits outside the run's empty cwd.
     expect(args[8]?.startsWith(run?.options.cwd ?? "")).toBe(false);
@@ -234,11 +242,16 @@ describe("CodexJudge", () => {
     expect(schema).toEqual(JUDGE_OUTPUT_SCHEMA);
   });
 
-  it("falls back to stdout when no answer file was written, and fails closed on a non-zero exit", async () => {
-    const stdoutOnly = new FakeJudgeHost({ codex: CODEX }, () => ({
-      raw: { exitCode: 0, stdout: JSON.stringify(declined), stderr: "" },
-    }));
-    expect(await new CodexJudge({ host: stdoutOnly, command: CODEX }).judge(["nah"])).toBe("declined");
+  it("fails closed when no answer file was written, whatever stdout holds, and on a non-zero exit", async () => {
+    // stdout may hold progress output; only the --output-last-message file is the answer.
+    for (const output of [agreed, declined]) {
+      const stdoutOnly = new FakeJudgeHost({ codex: CODEX }, () => ({
+        raw: { exitCode: 0, stdout: JSON.stringify(output), stderr: "" },
+      }));
+      expect(await new CodexJudge({ host: stdoutOnly, command: CODEX }).judge(["sounds great"])).toBe(
+        "unclear",
+      );
+    }
     const failing = new FakeJudgeHost({ codex: CODEX }, () => ({
       raw: { exitCode: 2, stdout: JSON.stringify(agreed), stderr: "" },
     }));
@@ -351,6 +364,145 @@ describe("selectReplyJudge", () => {
     await judge.judge(["yes, the key is sk-live-0000"]);
     expect(host.runs[0]?.reply).toEqual(["yes, the key is [redacted]"]);
   });
+
+  it("sends nothing anywhere until the owner has chosen, even with both CLIs and a key", async () => {
+    const { host, selected } = select(undefined, both, "sk-ant-fake");
+    const none = await selected;
+    expect(none).toMatchObject({ backend: "none", detail: expect.stringContaining("not set") });
+    expect(await none.judge.judge(["yeah let's ship that one"])).toBe("unclear");
+    expect(host.found).toEqual([]);
+    expect(host.runs).toEqual([]);
+  });
+
+  it("names the PATH it looked on when a CLI is missing", async () => {
+    const host = new FakeJudgeHost({});
+    const missing = await selectReplyJudge({
+      choice: "claude-code",
+      host,
+      searchPath: "/usr/bin:/bin",
+      fetch: noFetch,
+    });
+    expect(missing.detail).toBe(
+      "judge.backend is claude-code, but claude is not on the PATH (/usr/bin:/bin)",
+    );
+    const none = await selectReplyJudge({
+      choice: "auto",
+      host,
+      searchPath: "/usr/bin:/bin",
+      fetch: noFetch,
+    });
+    expect(none.detail).toContain("neither claude nor codex is on the PATH (/usr/bin:/bin)");
+  });
+});
+
+describe("the agent CLI's environment", () => {
+  const daemonEnv = {
+    PATH: "/usr/bin:/bin",
+    HOME: "/Users/owner",
+    LANG: "en_CA.UTF-8",
+    HTTPS_PROXY: "http://proxy.example.test:3128",
+    CLAUDE_CONFIG_DIR: "/Users/owner/.claude-alt",
+    OPENAI_API_KEY: "sk-openai-fake-0001",
+    HOTLINE_HOME: "/Users/owner/.hotline",
+    HOTLINE_ANTHROPIC_API_KEY: "sk-ant-fake-hotline-0001",
+    HOTLINE_TWILIO_AUTH_TOKEN: "fake_twilio_token_0001",
+    HOTLINE_PIN: "482913",
+    GITHUB_TOKEN: "ghp_fake0001",
+    AWS_SECRET_ACCESS_KEY: "fake-aws-secret",
+    UNSET_VALUE: undefined,
+  };
+
+  it("passes only the basics and the CLI's own login variables, never Hotline's", () => {
+    const claude = judgeChildEnv(daemonEnv, { env: { HOTLINE_JUDGE: "1" }, inherit: CLAUDE_CODE_LOGIN_ENV });
+    expect(claude).toEqual({
+      PATH: "/usr/bin:/bin",
+      HOME: "/Users/owner",
+      LANG: "en_CA.UTF-8",
+      HTTPS_PROXY: "http://proxy.example.test:3128",
+      CLAUDE_CONFIG_DIR: "/Users/owner/.claude-alt",
+      HOTLINE_JUDGE: "1",
+    });
+    const codex = judgeChildEnv(daemonEnv, { env: { HOTLINE_JUDGE: "1" }, inherit: CODEX_LOGIN_ENV });
+    expect(codex).toEqual({
+      PATH: "/usr/bin:/bin",
+      HOME: "/Users/owner",
+      LANG: "en_CA.UTF-8",
+      HTTPS_PROXY: "http://proxy.example.test:3128",
+      OPENAI_API_KEY: "sk-openai-fake-0001",
+      HOTLINE_JUDGE: "1",
+    });
+  });
+
+  it("never passes a HOTLINE_ variable through inherit, and keeps no basics that name one", () => {
+    const env = judgeChildEnv(daemonEnv, { env: {}, inherit: ["HOTLINE_ANTHROPIC_API_KEY", "HOTLINE_HOME"] });
+    expect(Object.keys(env).filter((name) => name.startsWith("HOTLINE_"))).toEqual([]);
+    expect(JUDGE_BASE_ENV.some((name) => name.startsWith("HOTLINE_"))).toBe(false);
+  });
+
+  it("is what the spawned CLI gets: no shell, the run's cwd, stdin carries the prompt", async () => {
+    const { EventEmitter } = await import("node:events");
+    const { PassThrough } = await import("node:stream");
+    const spawned: { file: string; args: readonly string[]; options: Parameters<JudgeSpawn>[2] }[] = [];
+    let stdin = "";
+    const fakeSpawn: JudgeSpawn = (file, args, options) => {
+      spawned.push({ file, args, options });
+      const child = Object.assign(new EventEmitter(), {
+        stdin: new PassThrough(),
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+      });
+      child.stdin.setEncoding("utf8").on("data", (chunk: string) => {
+        stdin += chunk;
+      });
+      child.stdin.on("finish", () => {
+        child.stdout.end(claudeResult(JSON.stringify(agreed)).stdout);
+        child.stderr.end();
+        setImmediate(() => child.emit("close", 0, null));
+      });
+      return child as unknown as ReturnType<JudgeSpawn>;
+    };
+    const result = await runJudgeProcess(fakeSpawn, daemonEnv, CLAUDE, ["-p"], {
+      cwd: "/tmp/hotline-judge-fake",
+      env: { HOTLINE_JUDGE: "1" },
+      inherit: CLAUDE_CODE_LOGIN_ENV,
+      input: "the prompt",
+      timeoutMs: 1_234,
+    });
+    expect(result).toEqual({ exitCode: 0, stdout: claudeResult(JSON.stringify(agreed)).stdout, stderr: "" });
+    expect(stdin).toBe("the prompt");
+    expect(spawned).toHaveLength(1);
+    const [run] = spawned;
+    expect(run?.options).toEqual({
+      cwd: "/tmp/hotline-judge-fake",
+      env: judgeChildEnv(daemonEnv, { env: { HOTLINE_JUDGE: "1" }, inherit: CLAUDE_CODE_LOGIN_ENV }),
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 1_234,
+    });
+    expect(JSON.stringify(run?.options.env)).not.toMatch(/sk-ant-fake-hotline|fake_twilio|482913|ghp_|aws/);
+  });
+
+  it("rejects when the CLI is killed, so the judge finds the reply unclear", async () => {
+    const { EventEmitter } = await import("node:events");
+    const { PassThrough } = await import("node:stream");
+    const fakeSpawn: JudgeSpawn = () => {
+      const child = Object.assign(new EventEmitter(), {
+        stdin: new PassThrough(),
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+      });
+      setImmediate(() => child.emit("close", null, "SIGTERM"));
+      return child as unknown as ReturnType<JudgeSpawn>;
+    };
+    await expect(
+      runJudgeProcess(fakeSpawn, daemonEnv, CLAUDE, [], {
+        cwd: "/tmp/hotline-judge-fake",
+        env: {},
+        inherit: [],
+        input: "",
+        timeoutMs: 10,
+      }),
+    ).rejects.toThrow(/killed by SIGTERM/);
+  });
 });
 
 describe("the default host under test mode", () => {
@@ -360,7 +512,13 @@ describe("the default host under test mode", () => {
     // `node` is on the PATH of every test run, yet nothing is found.
     expect(await host.find("node")).toBeUndefined();
     await expect(
-      host.run(process.execPath, ["--version"], { cwd: ".", env: {}, input: "", timeoutMs: 1_000 }),
+      host.run(process.execPath, ["--version"], {
+        cwd: ".",
+        env: {},
+        inherit: [],
+        input: "",
+        timeoutMs: 1_000,
+      }),
     ).rejects.toThrow(/test mode/);
   });
 

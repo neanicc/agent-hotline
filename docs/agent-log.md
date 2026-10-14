@@ -2329,3 +2329,29 @@ Template:
   judged no, and texts without a judge), CLI tests for doctor, init, and the
   hook and MCP guards. Mutation checks: no post-check (16 tests fail), the
   judge not passed in `runDaemon` (3 fail).
+- Staff review at 13f2765 (84, 0 P0/P1, 3 P2, 2 P3), fixed in the same PR:
+  - P2 (default egress without opt-in): `judge.backend` has no default now.
+    Unset means the owner has not chosen and works like `off`: nothing is
+    looked up, run or sent. `hotline init` explains the judge and asks once
+    (`[Y/n]`; Enter or yes is `auto`, or keeps a backend chosen earlier; no is
+    `off`; three unclear answers stop `init` before anything is written), or
+    takes `--judge <choice>`. `--non-interactive` without `--judge` records
+    nothing. `doctor` warns "not chosen" and says how to choose. This keeps
+    the owner's "least friction" (one Enter at setup) while the owner's words
+    never leave the machine without a recorded choice; the owner can make
+    `auto` the default again if they prefer.
+  - P2 (whole daemon environment passed to the CLI): `judgeChildEnv` builds
+    the child's environment from an allowlist, `JUDGE_BASE_ENV` (PATH, HOME,
+    user, locale, XDG, proxy and CA variables) plus the CLI's own login
+    variables (`CLAUDE_CODE_LOGIN_ENV`, `CODEX_LOGIN_ENV`), and drops every
+    `HOTLINE_*` name. `runJudgeProcess` takes the spawn function, so a test
+    checks the exact spawn options without running anything.
+  - P2 (20 s of dead air on a live call): not the case. The judge runs only
+    in the post-call webhook, after the owner hung up; `submit_answer` during
+    the call holds the answer without judging it, and the queue places no
+    other call until this one has ended. A wiring test now proves no tool call
+    during the call sees a judge run. `JUDGE_TIMEOUT_MS` stays 20 s.
+  - P3 (PATH of a daemon with a short PATH): the selection's detail names the
+    PATH searched, in the daemon's `reply judge` log line and in `doctor`.
+  - P3 (Codex answer from stdout): only the `--output-last-message` file
+    counts; no file is `unclear`, whatever stdout holds.

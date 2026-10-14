@@ -26,7 +26,7 @@ describe("the default judge host in test mode", () => {
   it("refuses to run an agent CLI without spawning anything", async () => {
     const host = nodeJudgeHost({ PATH: process.env.PATH ?? "" });
     await expect(
-      host.run("/usr/bin/true", [], { cwd: dir, env: {}, input: "", timeoutMs: 1_000 }),
+      host.run("/usr/bin/true", [], { cwd: dir, env: {}, inherit: [], input: "", timeoutMs: 1_000 }),
     ).rejects.toThrow(/test mode/);
     expect(await host.find("node")).toBeUndefined();
     expect(spawn).not.toHaveBeenCalled();
@@ -43,6 +43,8 @@ describe("the default judge host in test mode", () => {
         secrets: { store: "file" },
         voice: { provider: "fake" },
         sms: { provider: "fake" },
+        // Chosen, so only test mode stands between the daemon and a real CLI.
+        judge: { backend: "auto" },
       }),
     );
     const signals = new EventEmitter();
@@ -68,7 +70,10 @@ describe("the default judge host in test mode", () => {
     signals.emit("SIGTERM");
     expect(await exit).toBe(0);
     const judgeLine = lines.map((line) => JSON.parse(line)).find((entry) => entry.msg === "reply judge");
-    expect(judgeLine).toMatchObject({ backend: "none" });
+    expect(judgeLine).toMatchObject({
+      backend: "none",
+      detail: expect.stringContaining("neither claude nor codex is on the PATH"),
+    });
     expect(spawn).not.toHaveBeenCalled();
   });
 });

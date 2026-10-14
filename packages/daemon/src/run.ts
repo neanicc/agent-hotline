@@ -311,12 +311,17 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
     const caller = options.providers?.voice ?? (await voiceProvider(config, secrets, redactor, fetch));
     const texter = options.providers?.sms ?? smsProvider(config, twilio, redactor, fetch);
     // The reply judge: the owner's own Claude Code or Codex login, else the
-    // optional API key, else none (such replies are texted).
-    const anthropicKey = config.judge.backend === "off" ? undefined : await secrets.get("anthropic.apiKey");
+    // optional API key, else none (such replies are texted). None, too, until
+    // the owner has chosen (`judge.backend` unset).
+    const choice = config.judge.backend;
+    const anthropicKey =
+      choice === undefined || choice === "off" ? undefined : await secrets.get("anthropic.apiKey");
     if (anthropicKey !== undefined) redactor.addSecret(anthropicKey);
+    const searchPath = options.env.PATH;
     const judge = await selectReplyJudge({
-      choice: config.judge.backend,
+      choice,
       host: options.judgeHost ?? nodeJudgeHost(options.env),
+      ...(searchPath === undefined ? {} : { searchPath }),
       ...(anthropicKey === undefined ? {} : { apiKey: anthropicKey }),
       fetch,
       redact: (text) => redactor.text(text),

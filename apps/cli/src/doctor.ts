@@ -13,6 +13,7 @@ import {
 import type { CliContext, Output } from "./cli.js";
 import { costLines, readUsage } from "./cost.js";
 import { ElevenLabsAdmin } from "./elevenlabs-admin.js";
+import { JUDGE_CHOICES } from "./init.js";
 import { agentConfigFiles, type ConfigLocation, configLocation, readConfigFile } from "./install.js";
 import { fetchFor, lastFour, secretStoreFor } from "./setup.js";
 
@@ -362,14 +363,25 @@ async function judgeCheck(
 ): Promise<Check[]> {
   const name = "judge";
   const { nodeJudgeHost, selectReplyJudge } = await import("@hotline/daemon");
+  const searchPath = context.env.PATH;
   const selection = await selectReplyJudge({
     choice: config.judge.backend,
     host: context.judgeHost ?? nodeJudgeHost(context.env),
+    ...(searchPath === undefined ? {} : { searchPath }),
     ...(apiKey === undefined ? {} : { apiKey }),
     // Only the API backend uses it, and only for --check-judge.
     fetch: (url, init) => fetchFor(context)(url, init),
   });
   if (selection.backend === "none") {
+    if (config.judge.backend === undefined) {
+      return [
+        {
+          status: "warn",
+          name,
+          detail: `not chosen: nothing is sent, and a reply that is not a plain yes or no is texted; choose with hotline init --force --non-interactive --judge <${JUDGE_CHOICES}> (see docs/install.md)`,
+        },
+      ];
+    }
     if (config.judge.backend === "off") {
       return [
         {

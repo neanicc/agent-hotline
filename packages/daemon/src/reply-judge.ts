@@ -36,12 +36,17 @@
 // - `codex exec --ephemeral --ignore-user-config --ignore-rules --sandbox
 //   read-only --skip-git-repo-check --output-schema <file> -`.
 // The prompt goes in on stdin, so the owner's words never appear in a process
-// argument list.
+// argument list. The CLI's environment is an allowlist (`judgeChildEnv`): the
+// process basics, network setup and that CLI's own login variables. Hotline's
+// own `HOTLINE_*` variables and credentials never reach it.
+//
+// Nothing is sent until the owner chooses: with `judge.backend` unset (no
+// choice recorded yet) the judge is `FailClosedJudge`. `hotline init` asks once.
 //
 // Tests and CI never run a real CLI or reach the network: every backend takes
 // an injected `JudgeHost` or fetch, and the default host refuses to find or
 // run anything under the test runner or `HOTLINE_TEST_MODE=1`.
-import { spawn } from "node:child_process";
+import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -67,8 +72,13 @@ export const MAX_JUDGED_REPLY_CHARS = 500;
 export interface JudgeRunOptions {
   /** The empty temporary directory the CLI runs in. */
   cwd: string;
-  /** Added to the daemon's own environment. */
+  /** Set in the CLI's environment (`HOTLINE_JUDGE=1`). */
   env: Readonly<Record<string, string>>;
+  /**
+   * The daemon's environment variables this CLI's own login and config need,
+   * beyond `JUDGE_BASE_ENV` (`judgeChildEnv`). Nothing else is passed on.
+   */
+  inherit: readonly string[];
   /** Written to the CLI's stdin. */
   input: string;
   /** The process is killed after this long. */
@@ -88,10 +98,117 @@ export function judgeTestMode(env: Readonly<Record<string, string | undefined>>)
 }
 
 /**
+ * What every agent CLI run may take from the daemon's environment: the
+ * process basics it needs to start and find the owner's home, and the network
+ * setup it needs to reach its provider.
+ */
+export const JUDGE_BASE_ENV = [
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "TMPDIR",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "TZ",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_STATE_HOME",
+  "XDG_CACHE_HOME",
+  "HTTPS_PROXY",
+  "https_proxy",
+  "HTTP_PROXY",
+  "http_proxy",
+  "ALL_PROXY",
+  "all_proxy",
+  "NO_PROXY",
+  "no_proxy",
+  "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+] as const;
+/** The Claude Code CLI's own login and config variables (its OAuth login itself lives in the Keychain). */
+export const CLAUDE_CODE_LOGIN_ENV = [
+  "CLAUDE_CONFIG_DIR",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+] as const;
+/** The Codex CLI's own login and config variables. */
+export const CODEX_LOGIN_ENV = ["CODEX_HOME", "OPENAI_API_KEY", "OPENAI_BASE_URL"] as const;
+
+/**
+ * The environment an agent CLI run gets: `JUDGE_BASE_ENV` and the run's own
+ * `inherit` names, taken from the daemon's environment, plus the run's `env`.
+ * Nothing else, so Hotline's own variables (`HOTLINE_*`, credentials among
+ * them) and anything unrelated the daemon was started with stay behind.
+ */
+export function judgeChildEnv(
+  daemonEnv: Readonly<Record<string, string | undefined>>,
+  options: Pick<JudgeRunOptions, "env" | "inherit">,
+): Record<string, string> {
+  const child: Record<string, string> = {};
+  for (const name of [...JUDGE_BASE_ENV, ...options.inherit]) {
+    const value = daemonEnv[name];
+    if (value !== undefined && !name.startsWith("HOTLINE_")) child[name] = value;
+  }
+  return { ...child, ...options.env };
+}
+
+/** The part of child_process.spawn `runJudgeProcess` uses, so a test can stand in for it. */
+export type JudgeSpawn = (
+  file: string,
+  args: readonly string[],
+  options: { cwd: string; env: Record<string, string>; stdio: ["pipe", "pipe", "pipe"]; timeout: number },
+) => ChildProcessWithoutNullStreams;
+
+/**
+ * Runs one agent CLI (no shell) in `options.cwd` with `judgeChildEnv`, writes
+ * the prompt to its stdin and collects its output. Killed after
+ * `options.timeoutMs`; a kill rejects.
+ */
+export function runJudgeProcess(
+  spawnProcess: JudgeSpawn,
+  daemonEnv: Readonly<Record<string, string | undefined>>,
+  file: string,
+  args: readonly string[],
+  options: JudgeRunOptions,
+): Promise<ExecResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawnProcess(file, args, {
+      cwd: options.cwd,
+      env: judgeChildEnv(daemonEnv, options),
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: options.timeoutMs,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (code, signal) => {
+      if (signal !== null) reject(new Error(`${file} was killed by ${signal}`));
+      else resolve({ exitCode: code ?? 1, stdout, stderr });
+    });
+    child.stdin.on("error", () => {
+      // The process may exit before reading stdin; its exit code reports that.
+    });
+    child.stdin.end(options.input);
+  });
+}
+
+/**
  * The real host: looks commands up on `env.PATH` and runs them with
- * child_process.spawn (no shell). Under test mode it finds nothing and refuses
- * to run anything, so a test that forgot to inject a host never starts a real
- * agent CLI.
+ * `runJudgeProcess` (child_process.spawn, no shell, `judgeChildEnv`). Under
+ * test mode it finds nothing and refuses to run anything, so a test that
+ * forgot to inject a host never starts a real agent CLI.
  */
 export function nodeJudgeHost(env: Readonly<Record<string, string | undefined>>): JudgeHost {
   const testMode = judgeTestMode(env);
@@ -113,31 +230,7 @@ export function nodeJudgeHost(env: Readonly<Record<string, string | undefined>>)
     run(file, args, options) {
       if (testMode)
         return Promise.reject(new Error("test mode: the reply judge never runs a real agent CLI"));
-      return new Promise((resolve, reject) => {
-        const child = spawn(file, args, {
-          cwd: options.cwd,
-          env: { ...process.env, ...env, ...options.env },
-          stdio: ["pipe", "pipe", "pipe"],
-          timeout: options.timeoutMs,
-        });
-        let stdout = "";
-        let stderr = "";
-        child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
-          stdout += chunk;
-        });
-        child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
-          stderr += chunk;
-        });
-        child.on("error", reject);
-        child.on("close", (code, signal) => {
-          if (signal !== null) reject(new Error(`${file} was killed by ${signal}`));
-          else resolve({ exitCode: code ?? 1, stdout, stderr });
-        });
-        child.stdin.on("error", () => {
-          // The process may exit before reading stdin; its exit code reports that.
-        });
-        child.stdin.end(options.input);
-      });
+      return runJudgeProcess(spawn, env, file, args, options);
     },
   };
 }
@@ -320,6 +413,7 @@ export class ClaudeCodeJudge implements ReplyJudge {
         this.options.host.run(this.options.command, claudeJudgeArgs(), {
           cwd,
           env: JUDGE_RUN_ENV,
+          inherit: CLAUDE_CODE_LOGIN_ENV,
           input: judgePrompt(reply),
           timeoutMs: this.options.timeoutMs ?? JUDGE_TIMEOUT_MS,
         }),
@@ -374,12 +468,15 @@ export class CodexJudge implements ReplyJudge {
           this.options.host.run(this.options.command, codexJudgeArgs(schemaPath, lastMessagePath), {
             cwd,
             env: JUDGE_RUN_ENV,
+            inherit: CODEX_LOGIN_ENV,
             input: judgePrompt(reply),
             timeoutMs: this.options.timeoutMs ?? JUDGE_TIMEOUT_MS,
           }),
         );
         if (result.exitCode !== 0) return "unclear";
-        const answer = await readFile(lastMessagePath, "utf8").catch(() => result.stdout);
+        // Only the answer file counts: stdout may hold progress output, so no file is no answer.
+        const answer = await readFile(lastMessagePath, "utf8").catch(() => undefined);
+        if (answer === undefined) return "unclear";
         return checkedVerdict(parseJudgeOutput(answer), reply);
       });
     } catch {
@@ -449,8 +546,14 @@ export interface JudgeSelection {
 }
 
 export interface SelectJudgeOptions {
-  choice: JudgeBackendChoice;
+  /** `judge.backend`; undefined when the owner has not chosen yet, which sends nothing. */
+  choice: JudgeBackendChoice | undefined;
   host: JudgeHost;
+  /**
+   * The PATH the host looks on, named in the detail when a CLI is not found:
+   * a daemon started with a shorter PATH than the owner's shell misses it.
+   */
+  searchPath?: string;
   /** The `anthropic.apiKey` secret, if set. */
   apiKey?: string;
   fetch: HttpFetch;
@@ -463,7 +566,7 @@ export interface SelectJudgeOptions {
  * Picks the judge: the configured backend, or with `auto` the first available
  * of the Claude Code CLI, the Codex CLI and the API key. A CLI counts as
  * available when it is on the PATH; nothing is run and no model is called to
- * find out. Otherwise (or `off`) `FailClosedJudge`.
+ * find out. Otherwise (or `off`, or no choice yet) `FailClosedJudge`.
  */
 export async function selectReplyJudge(options: SelectJudgeOptions): Promise<JudgeSelection> {
   const selected = await pickReplyJudge(options);
@@ -481,7 +584,11 @@ async function pickReplyJudge(options: SelectJudgeOptions): Promise<JudgeSelecti
     judge: new FailClosedJudge(),
     detail,
   });
+  if (choice === undefined) {
+    return none("no reply judge chosen yet (judge.backend is not set), so nothing is sent");
+  }
   if (choice === "off") return none("judge.backend is off");
+  const onPath = options.searchPath === undefined ? "the PATH" : `the PATH (${options.searchPath})`;
   if (choice === "auto" || choice === "claude-code") {
     const command = await host.find("claude");
     if (command !== undefined) {
@@ -491,7 +598,7 @@ async function pickReplyJudge(options: SelectJudgeOptions): Promise<JudgeSelecti
         detail: `Claude Code CLI (${command}) on your login, model ${CLAUDE_CODE_JUDGE_MODEL}`,
       };
     }
-    if (choice === "claude-code") return none("judge.backend is claude-code, but claude is not on the PATH");
+    if (choice === "claude-code") return none(`judge.backend is claude-code, but claude is not on ${onPath}`);
   }
   if (choice === "auto" || choice === "codex") {
     const command = await host.find("codex");
@@ -502,7 +609,7 @@ async function pickReplyJudge(options: SelectJudgeOptions): Promise<JudgeSelecti
         detail: `Codex CLI (${command}) on your login, ${CODEX_JUDGE_REASONING} reasoning effort`,
       };
     }
-    if (choice === "codex") return none("judge.backend is codex, but codex is not on the PATH");
+    if (choice === "codex") return none(`judge.backend is codex, but codex is not on ${onPath}`);
   }
   if (options.apiKey !== undefined) {
     return {
@@ -514,6 +621,6 @@ async function pickReplyJudge(options: SelectJudgeOptions): Promise<JudgeSelecti
   return none(
     choice === "anthropic-api"
       ? "judge.backend is anthropic-api, but the Anthropic API key is not in the secret store"
-      : "neither claude nor codex is on the PATH and no Anthropic API key is stored",
+      : `neither claude nor codex is on ${onPath} and no Anthropic API key is stored`,
   );
 }

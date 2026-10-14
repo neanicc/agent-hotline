@@ -190,9 +190,11 @@ export const Config = z.strictObject({
    * what a spoken reply to an approval read-back means when the fast path
    * cannot. `auto` takes the first available: the Claude Code CLI, the Codex
    * CLI, then the `anthropic.apiKey` secret. `off` sends nothing anywhere:
-   * such replies are never approvals and the ask is texted.
+   * such replies are never approvals and the ask is texted. Unset means the
+   * owner has not chosen yet and works like `off`: the owner's words leave the
+   * machine for a model only after an explicit choice (`hotline init` asks once).
    */
-  judge: z.strictObject({ backend: JudgeBackendChoice.default("auto") }).prefault({}),
+  judge: z.strictObject({ backend: JudgeBackendChoice.optional() }).prefault({}),
   /** Rate assumptions for `hotline doctor`'s cost estimate; each a non-negative number. */
   costs: z
     .strictObject({

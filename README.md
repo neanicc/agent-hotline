@@ -128,9 +128,11 @@ so the rules are strict:
   Codex CLI on your login, else an optional Anthropic API key. Each run is
   isolated: an empty temporary folder, no hooks, no MCP servers, no tools,
   nothing saved. A yes with a condition ("yes if the tests pass") or taken back
-  is never an approval, and an error or timeout counts as unclear. Set
-  `judge.backend` to `"off"` to send nothing; such replies are then texted to
-  you. `hotline doctor` shows which one is used
+  is never an approval, and an error or timeout counts as unclear. Nothing is
+  sent until you choose it: `hotline init` asks once (or takes `--judge`), and
+  `judge.backend: "off"` or no choice sends nothing; such replies are then
+  texted to you. The CLI gets only its own login and basic environment, never
+  Hotline's credentials. `hotline doctor` shows which one is used
   ([daemon.md](docs/daemon.md), [install.md](docs/install.md)).
 - **Local first.** Config, the PIN (stored only as a scrypt hash), transcripts and
   the audit log stay on your Mac. Credentials live in the macOS Keychain or a

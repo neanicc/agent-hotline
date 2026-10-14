@@ -4,7 +4,7 @@
 // never from flags, because a process's arguments are visible to other users.
 import { randomBytes } from "node:crypto";
 import { chmod, lstat, mkdir, readFile } from "node:fs/promises";
-import { parseConfig, type SecretName, SecretStoreChoice } from "@hotline/core";
+import { JudgeBackendChoice, parseConfig, type SecretName, SecretStoreChoice } from "@hotline/core";
 import type { CliContext, Output } from "./cli.js";
 import { lastFour, secretStoreFor, section } from "./setup.js";
 
@@ -23,18 +23,46 @@ export const SECRET_ENV: ReadonlyArray<readonly [SecretName, string, string]> = 
 export const ANTHROPIC_KEY_ENV = "HOTLINE_ANTHROPIC_API_KEY";
 export const PIN_ENV = "HOTLINE_PIN";
 
-/** What `init` prints about the reply judge. */
+/** What `init` prints about the reply judge, before asking about it. */
 export function judgeExplanation(): string {
   return [
     "Reply judge: when you answer a read-back with something other than a plain yes",
-    'or no ("yeah, let\'s ship that one"), Hotline asks a small model what you meant.',
+    'or no ("yeah, let\'s ship that one"), Hotline can ask a small model what you meant.',
     "It uses your own Claude Code login (claude -p, model haiku) if claude is",
     "installed, else your Codex login (codex exec), else an Anthropic API key from",
     `${ANTHROPIC_KEY_ENV}. Only your short spoken reply is sent, never the request`,
     'or anything an agent wrote. A yes with a condition ("yes if the tests pass")',
-    'is not an approval. With none of these, or judge.backend "off" in the config,',
-    "such replies are texted to you instead. hotline doctor shows which one is used.",
+    'is not an approval. With the judge off (judge.backend "off"), or none of these',
+    "installed, such replies are texted to you instead. hotline doctor shows which one is used.",
   ].join("\n");
+}
+/** The line `init` ends with: what was recorded for the reply judge. */
+export function judgeStatus(choice: JudgeBackendChoice | undefined): string {
+  if (choice === undefined) {
+    return `reply judge: not chosen, so nothing is sent; choose with hotline init --force --judge <${JUDGE_CHOICES}>`;
+  }
+  if (choice === "off") return "reply judge: off (nothing is sent; such replies are texted)";
+  return `reply judge: ${choice} (only your short spoken reply is sent; hotline doctor shows the backend)`;
+}
+/** The `--judge` values: `judge.backend`'s choices. */
+export const JUDGE_CHOICES = JudgeBackendChoice.options.join("|");
+export const JUDGE_QUESTION =
+  "Use the reply judge (sends only your short spoken reply, on your own account)? [Y/n]: ";
+/** How many unrecognized answers to the judge question before `init` gives up. */
+const JUDGE_ASKS = 3;
+
+/**
+ * The owner's answer to `JUDGE_QUESTION`: Enter or yes keeps a backend chosen
+ * earlier, else `auto`; no is `off`. Undefined for anything else.
+ */
+function judgeAnswer(answer: string, earlier: unknown): JudgeBackendChoice | undefined {
+  const said = answer.trim().toLowerCase();
+  if (said === "" || said === "y" || said === "yes") {
+    const kept = JudgeBackendChoice.safeParse(earlier);
+    return kept.success && kept.data !== "off" ? kept.data : "auto";
+  }
+  if (said === "n" || said === "no") return "off";
+  return undefined;
 }
 /** Shortest PIN `init` accepts without a warning. */
 export const RECOMMENDED_PIN_DIGITS = 6;
@@ -55,6 +83,8 @@ export function initUsage(): string {
     "  --agent-phone-number-id <id>  The Twilio number's id in ElevenLabs (Phone Numbers)",
     "  --voice-provider <elevenlabs|fake>   --sms-provider <twilio|fake>",
     "  --secret-store <auto|keychain|file>",
+    `  --judge <${JUDGE_CHOICES}>`,
+    "                                The reply judge (asked once if not given; unset sends nothing)",
     "  --force                       Replace the settings of an existing config",
     "  --non-interactive             Never ask; fail if something required is missing",
     "",
@@ -74,6 +104,7 @@ const FLAGS = {
   "--voice-provider": "voiceProvider",
   "--sms-provider": "smsProvider",
   "--secret-store": "secretStore",
+  "--judge": "judge",
 } as const;
 type Flag = (typeof FLAGS)[keyof typeof FLAGS];
 
@@ -192,6 +223,24 @@ export async function initCommand(
       }
       section(raw, "secrets").store = flags.secretStore;
     }
+    if (flags.judge !== undefined) {
+      if (!JudgeBackendChoice.safeParse(flags.judge).success) {
+        throw new InitError(`--judge must be one of ${JUDGE_CHOICES.split("|").join(", ")}`);
+      }
+      section(raw, "judge").backend = flags.judge;
+    } else if (prompt !== undefined) {
+      // The judge sends the owner's words to a model, so it is the owner's
+      // explicit choice: --judge, or this one question. Without either it stays
+      // as it was, and unset sends nothing.
+      out.stdout(judgeExplanation());
+      const earlier = (raw.judge as { backend?: unknown } | undefined)?.backend;
+      let choice: JudgeBackendChoice | undefined;
+      for (let attempt = 0; attempt < JUDGE_ASKS && choice === undefined; attempt++) {
+        choice = judgeAnswer(await prompt.ask(JUDGE_QUESTION), earlier);
+      }
+      if (choice === undefined) throw new InitError("answer y or n for the reply judge; nothing was changed");
+      section(raw, "judge").backend = choice;
+    }
     raw.version = 1;
     // Validate everything before touching the disk.
     const config = parseConfig(raw);
@@ -247,7 +296,8 @@ export async function initCommand(
     }
     for (const label of stored) out.stdout(`stored: ${label}`);
     for (const label of missing) out.stdout(`not set: ${label} (run hotline init --force again to add it)`);
-    out.stdout(judgeExplanation());
+    if (flags.judge !== undefined || prompt === undefined) out.stdout(judgeExplanation());
+    out.stdout(judgeStatus(config.judge.backend));
     out.stdout(
       [
         "Next:",

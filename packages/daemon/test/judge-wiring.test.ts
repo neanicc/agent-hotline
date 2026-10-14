@@ -6,7 +6,7 @@ import { scriptedHuman } from "@hotline/providers";
 import { afterEach, describe, expect, it } from "vitest";
 import type { JudgeOutput } from "../src/index.js";
 import { FakeJudgeHost } from "./fake-judge.js";
-import { answerOf, type Hotline, startHotline } from "./hotline-harness.js";
+import { answerOf, type Hotline, type HotlineOptions, startHotline } from "./hotline-harness.js";
 
 const BATCH_MS = 20_000;
 
@@ -29,8 +29,15 @@ const scriptedModel = () =>
     (reply) => verdicts[reply.join(" ")] ?? { verdict: "unclear", conditional: false, retracted: false },
   );
 
-async function replyToReadBack(said: string, judgeHost?: FakeJudgeHost) {
-  hotline = await startHotline(judgeHost === undefined ? {} : { judgeHost });
+/** The owner chose the judge (`hotline init` records `judge.backend`). */
+const CHOSEN = { judge: { backend: "auto" } };
+
+async function replyToReadBack(
+  said: string,
+  judgeHost?: FakeJudgeHost,
+  options: Omit<HotlineOptions, "judgeHost"> = { config: CHOSEN },
+) {
+  hotline = await startHotline(judgeHost === undefined ? options : { ...options, judgeHost });
   const h = hotline;
   const session = await h.registerSession();
   const request: Ask = h.addAsk(session, {
@@ -83,5 +90,43 @@ describe("the reply judge in the running daemon (HL-09d)", () => {
     const { h, verdict } = await replyToReadBack("yeah let's ship that one");
     expect(verdict).toBe("waiting");
     expect(h.sms.sent).toHaveLength(1);
+  });
+
+  it("sends the owner's words nowhere until a judge was chosen, even with claude on the PATH", async () => {
+    const host = scriptedModel();
+    const { h, verdict } = await replyToReadBack("yeah let's ship that one", host, {});
+    expect(verdict).toBe("waiting");
+    expect(host.found).toEqual([]);
+    expect(host.runs).toEqual([]);
+    expect(h.sms.sent).toHaveLength(1);
+    const started = h.daemon.store.listAudit().find((entry) => entry.event === "daemon.started");
+    expect(started?.detail).toMatchObject({ judge: "none" });
+  });
+
+  it("judges only after the call has ended: no tool call during the call waits for it", async () => {
+    const host = scriptedModel();
+    const runsDuringToolCalls: number[] = [];
+    let runsBeforePostCall: number | undefined;
+    const { verdict } = await replyToReadBack("yeah let's ship that one", host, {
+      config: CHOSEN,
+      voiceClient: (real) => ({
+        tool: async (name, body) => {
+          const answer = await real.tool(name, body);
+          runsDuringToolCalls.push(host.runs.length);
+          return answer;
+        },
+        postCall: async (payload) => {
+          runsBeforePostCall = host.runs.length;
+          await real.postCall(payload);
+        },
+      }),
+    });
+    expect(verdict).toBe("allow");
+    // The live call's submit_answer returned before the judge was ever asked;
+    // the judge ran for the post-call webhook, once the owner had hung up.
+    expect(runsDuringToolCalls.length).toBeGreaterThan(0);
+    expect(runsDuringToolCalls.every((runs) => runs === 0)).toBe(true);
+    expect(runsBeforePostCall).toBe(0);
+    expect(host.runs).toHaveLength(1);
   });
 });
