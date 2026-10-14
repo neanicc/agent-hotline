@@ -1,0 +1,231 @@
+# Security model and threat model
+
+Agent Hotline is a phone line that can steer coding agents on the owner's Mac,
+so it is a remote control for that machine. This document says what Hotline
+protects, from whom, where each rule is enforced and tested, and which risks
+are accepted for Tier 1. It is the HL-13 security pass (#14). The
+[README](../README.md#security-model) has the short version for users;
+[daemon.md](daemon.md), [hooks.md](hooks.md) and [contracts.md](contracts.md)
+have the mechanism details this document links to.
+
+Code, tests and scenario results are the evidence. Where this document and the
+code disagree, the code wins and this document is out of date.
+
+## Assets
+
+| Asset | Where it lives | Why it matters |
+| --- | --- | --- |
+| The owner's decisions (approvals, answers, instructions) | `hotline.db` (`answers`, `instructions`, audit log) | An approval runs a command on the Mac; an instruction becomes an agent's next prompt |
+| Provider credentials: Twilio auth token and account SID, ElevenLabs API key, tool secret, webhook secret | macOS Keychain (service `agent-hotline`) or `~/.hotline/secrets.json` (`0600`) | Sign or forge webhooks, place calls and texts on the owner's account |
+| The per-install agent API token | Same secret store (`daemon.apiToken`) | Lets a local process open, read and cancel asks |
+| The owner's PIN | Only as a scrypt hash, `owner.pinHash` in `~/.hotline/config.json` (`0600`) | Unlocks inbound calls and high-risk voice approvals |
+| SMS confirmation codes | Orchestrator state in `hotline.db` (`daemon_state`) | Approve a permission request by text |
+| Transcripts, ask text, audit log | `hotline.db`, local only | Hold project details and the owner's words |
+| Secrets in the project (`.env`, keys, tokens in files and command lines) | The developer's repositories | Must never reach Twilio, ElevenLabs or logs |
+| The owner's phone number and attention | Config; the phone | Spam, cost, and calls at night |
+
+## Actors
+
+- **The owner.** Trusted. Proves themselves by answering the configured phone
+  (outbound calls), by caller ID plus the PIN (inbound calls and high-risk voice
+  approvals), or by texting from the owner's number with a request's single-use
+  code (text approvals).
+- **Coding agents and every other process running as the owner's user.**
+  Partly trusted. They are meant to use the agent API with the shared token, and
+  their text (questions, command previews, diffs, tool input) is untrusted data
+  that can never approve itself. They can also read everything the owner's user
+  can read, which is the main accepted risk below.
+- **Strangers on the phone network or SMS.** Untrusted. They can call or text
+  the Hotline number and spoof caller ID.
+- **Providers (Twilio, ElevenLabs and the LLM inside the ElevenLabs agent).**
+  Trusted to deliver calls and texts and to sign their webhooks; not trusted with
+  more than short redacted summaries. The voice model is treated as able to make
+  things up: its tool calls are checked against the post-call transcript.
+- **The network and the tunnel.** Untrusted. Anyone on the internet can reach the
+  tunnel's public URL and send anything to it.
+
+## Trust boundaries
+
+```text
+ owner's phone ── PSTN ── Twilio / ElevenLabs ──HTTPS── tunnel ──► 127.0.0.1:<port+1>  webhook listener, /hooks/* only
+                                    ▲                                    │ verify signature or secret, then parse
+                                    │ redacted summaries                 ▼
+                                    └──────────────────────────── hotline daemon ── hotline.db, ~/.hotline (0600), Keychain
+                                                                         ▲
+ Claude Code / Codex ── MCP server, hook adapters ──► 127.0.0.1:<port>   agent API, Bearer token + loopback Host on every route
+```
+
+1. **Internet to webhook listener.** Only the webhook port is meant to be
+   forwarded by the tunnel. It serves `/hooks/*` and nothing else; every route
+   must declare a verifier, and everything unverified gets the same bare `403`
+   ([daemon.md, Webhooks](daemon.md#webhooks)).
+2. **Local processes to agent API.** A separate port on 127.0.0.1, so a tunnel
+   pointed at the webhook port cannot reach it. Every route, including unknown
+   paths, needs the token and a loopback `Host` header (DNS rebinding)
+   ([daemon.md, Agent API](daemon.md#agent-api)).
+3. **Daemon to providers.** Outbound only to the owner's number; only redacted,
+   length-capped summaries leave the machine.
+4. **Agent text to the owner.** Everything an agent wrote is fenced as
+   `<agent_text>` for the voice model and checked against the owner's own words
+   in the transcript before it counts.
+5. **Daemon to disk.** `~/.hotline` is `0700`, its files `0600`, refused if a
+   symlink, owned by another user or readable by group or others.
+
+## Invariants: where they are enforced and tested
+
+Each row names the main enforcement points and a few of the tests that prove
+them. Scenario names are from the suite in `eval/` ([eval.md](eval.md)).
+
+| Invariant | Enforced in | Tested by |
+| --- | --- | --- |
+| **Owner only.** Outbound goes only to the owner; other callers and texters get a generic rejection; inbound needs the PIN first | Providers take the owner's number at construction and have no recipient argument (`providers/src/sms.ts`, `twilio-sms.ts`, `elevenlabs-voice.ts`); `twilioSmsRoute` (`fromOwner`, `GENERIC_SMS_REPLY`); `elevenLabsRoutes` (`ownerOnCall`, PIN before `get_status`, `send_instruction`, inbound `submit_answer`); `PinGate` (`pin.ts`) | `providers/test/sms.test.ts` "has no way to text anyone but the owner"; `daemon/test/sms-webhook.test.ts` "gives any other number one generic reply and never reaches the handler"; `elevenlabs-webhook.test.ts` "refuses an answer on an inbound call until the PIN, since caller ID can be spoofed"; scenarios `inbound-other-number-rejected`, `inbound-wrong-pin-rejected` |
+| **Verify every webhook.** Signature or secret before parsing; bare `403`, logged without body | `buildWebhookServer` (`server.ts`: no verifier means `403`, precheck before the body, only a literal `true` passes); `validTwilioSignature`; `sameSecret` for tool calls; `freshPostCallHeader` and `validPostCallSignature` for post-call | `server.test.ts` "reject with 403 when the verifier returns %s"; `exposure.test.ts` "refuses every public route without its provider's proof, with the same bare 403"; `sms-webhook.test.ts` "refuses a wrong signature, a wrong auth token and another account"; scenarios `unsigned-webhook-rejected`, `replayed-webhook-rejected` |
+| **Only `/hooks/*` is public; agent API is local and token-gated** | `LOOPBACK_HOST` (not configurable), two ports, `buildAgentApi`'s `onRequest` hook (Host, then token, on every route and on 404s) | `exposure.test.ts` (HL-13): with Twilio and ElevenLabs fully configured, every route each listener registered is audited (public routes under `/hooks`, every agent API route `401` without the token, `403` with a foreign Host, `404` on the public port); `server.test.ts` "bind 127.0.0.1 only, on two different ports" |
+| **Decisions come from the human.** Recorded only from the owner's words or keypresses, transcript excerpt stored; agent text never approves; the voice model cannot invent a decision | `answerProblem` (core contracts) and `HotlineStore.recordAnswer` re-checking it; `confirmVoiceDecision` and `replyVerdict` (`voice-confirm.ts`, read-back plus a clear yes, `FailClosedJudge`); `smsAnswer` (code required); `confirmInstructions` | `orchestration.test.ts` "agent text claiming approval still needs the owner's words"; `voice-confirm.test.ts` "never takes a caller's or the agent's words"; HL-13's `sms-reply.property.test.ts` and `voice-reply.property.test.ts`; scenario `agent-text-cannot-self-approve` |
+| **High risk needs the PIN or a confirming text** | `classifyPermission` sets the class; `answerProblem` refuses a high-risk `allow` with `confirmation: "none"`; the hook keeps the stricter of its own and the daemon's class | `contracts.test.ts` "needs the PIN or a confirming text for a high-risk approval"; `hook-adapter.test.ts` "never lets a daemon that stored 'low' lower the hook's own high-risk class"; HL-13's `permission-risk.property.test.ts`; scenario `high-risk-needs-pin` |
+| **Silence is not consent** | Queue `noAnswer` paths and `permissionVerdict` (core); every hook failure path denies (`hook-adapter.ts`) | `queue.property.test.ts` "silence never yields approval..."; `hook-adapter.test.ts` "denies every no-answer reason"; scenarios `silence-denies`, `unclear-answer-denies` and the self-test |
+| **Send third parties the minimum.** Redact before anything leaves the machine | `createRedactor` (`redact.ts`) with the daemon's own secrets registered; `callVariables` and `describeAsk` (`MAX_SPOKEN_ASK_LENGTH`); `prepareSmsText`; the hook names unknown tool arguments, never their values | `redact.test.ts`; HL-13's `redact.property.test.ts`; `elevenlabs-voice.test.ts` "sends only redacted, length-capped summaries"; scenario `secrets-redacted-before-send` |
+| **Bounded noise and cost** | Config bounds (`callsPerHour` and the rest can never be 0); `rateLimitAllows` and the queue; quiet hours; batching; open-ask caps (`MAX_OPEN_ASKS`, `MAX_OPEN_ASKS_TOTAL`); live-session cap; Stop loop guards | `queue.test.ts` "texts once the hourly call limit is used up, and calls again an hour later"; `agent-routes.test.ts` "cap open asks across all sessions..."; `hook-adapter.test.ts` "continues up to maxConsecutiveContinuations in a row..."; scenarios `rate-limit-holds-calls`, `quiet-hours-texts-instead`, `stop-loop-capped` |
+| **No permission escalation** | Strict hook output schemas allow only `allow` or a deny (`core/src/hooks.ts`); outside away mode the hook prints nothing | `hooks-secrets.test.ts` "never rewrites input or adds permission rules"; `hook-adapter.test.ts` "never prints interrupt, updatedInput or updatedPermissions" |
+| **Testable without a phone** | Pure core (purity scan); providers need an injected `fetch`; fakes for every provider | `purity.test.ts`; `voice.test.ts` "needs an injected fetch in test mode" |
+
+## Webhook replay protection and rate limits (HL-13 review)
+
+What protects each public route against replays and floods today, and what a
+daemon restart loses. "Memory" means state lost on restart; "SQLite" means it is
+kept in `hotline.db`.
+
+| Mechanism | State | Notes |
+| --- | --- | --- |
+| Twilio signature (`validTwilioSignature`), exact public URL, own `AccountSid` | none | Twilio signs no timestamp, so freshness rests on the SID records and the reply rules below |
+| SMS `MessageSid` dedupe in the route (last 1000) | memory | Retries wait for an attempt in flight; only a successful handling counts |
+| Owner texts claimed by SID before any effect (`inbound_messages`, kept 400 days) | SQLite | A replay after a restart is ignored (`orchestration.test.ts` "remembers handled messages across a restart") |
+| Text reply binding: a reply must be first seen 10 s or more after the text; a bare reply needs exactly one waiting ask; approvals need that ask's single-use code; one wrong code burns every waiting code | SQLite | A replayed old "YES 123456" cannot approve a newer request |
+| Generic replies to strangers, 5 an hour | memory | Global, not per sender |
+| ElevenLabs tool shared secret (`sameSecret`), checked before the body is read | none | Static: no timestamp or nonce |
+| Tool-call dedupe (`submit_answer`, `verify_pin`, `send_instruction`; 2 h, 1000 live, refuses rather than evicts) | memory | Keyed on the exact body |
+| Post-call HMAC with timestamp: at most 30 min old, 5 min ahead | none | Freshness checked before the body is read |
+| Post-call replay memory (type plus conversation id, 35 min, 1000, `503` when full) | memory | Backed by the persisted call state: a replay after a restart changes nothing (`orchestration.test.ts` "a replayed post-call event after a restart changes nothing") |
+| PIN: 2 tries a call, 6 failures an hour, 10 a day, per direction | memory | See follow-ups |
+| PIN lockout texts, one an hour per direction | memory | Every lockout is audited |
+| Webhook body before verification: 64 KiB by default (HL-13, was 256 KiB); post-call 1 MiB with 4 in flight and a 5 s body deadline | none | `server.test.ts` "read at most 64 KiB before verifying..." |
+| Call and text rate limits (rolling hour and day) | SQLite (orchestrator state) | If both saved rows are unreadable the hourly windows count as full |
+| Open asks per session and in total, live sessions | SQLite | `429` past the cap |
+
+HL-13 confirmed these by reading the code and their tests, and added the body
+cap. Gaps it found, all failing safe (none approves anything), are listed under
+[follow-ups](#follow-ups).
+
+## Fuzz and property tests (HL-13)
+
+| File | Property | Bugs it found, fixed failing closed |
+| --- | --- | --- |
+| `packages/daemon/test/redact.property.test.ts` | Random registered secrets, values under secret-looking names, PINs and fake phone numbers embedded in JSON, nested JSON, form-encoded, URL query, `.env` (quoted, unquoted, `export`), YAML, HTTP-header and logfmt text never leave a 6-character piece in the output; random 16 KiB hostile shapes stay within a fixed ratio of benign text | A value after an encoded segment that opened a quote (`"token":"+,rest"`) kept its tail; an unquoted value stopped at a quote (`token=a'rest`); the JWT pattern was quadratic on `eyJ-eyJ-...` |
+| `packages/core/test/permission-risk.property.test.ts` | Obfuscated variants of 50+ high-risk commands (wrappers, quoting, `$'...'`, `${...}`, braces, globs, case, fullwidth and Cyrillic lookalikes, zero-width and no-break spaces, absolute command paths, attached option values, `cd`, environment prefixes, NFD) never classify as low; Codex argv arrays likewise; for random command lines the classifier calls low, `bash -n` and `zsh -n` must accept them and zsh's own word split (`${(z)...}`, the command passed as data, never run) must match `splitShell` | `git show HEAD:.env` was low (a revision's `:` was not a path boundary); `; ls`, `ls ;;` and `ls\n;` were low though bash refuses them; `ls &>>x` was low though macOS's bash 3.2 refuses it; `rg` options were a denylist, so `--hostname-bin` (runs a program) and unknown options were low |
+| `packages/core/test/sms-reply.property.test.ts` | Random and word-salad texts approve only as `<yes word> <that request's code>`; nothing approves when no code was sent; conditional, negated, hedged or wrong-code yeses never approve | none |
+| `packages/daemon/test/voice-reply.property.test.ts` | The voice fast path never agrees with a reply holding a refusal, negation, condition or hedge, in one turn or split across turns; a random reply it agrees with has no doubt marker | none |
+| `packages/daemon/test/exposure.test.ts` | The exposure audit above | none |
+
+The timing checks use `test/linear-time.ts`: the fastest of seven interleaved
+runs on hostile text against benign text of the same length, at most 100 times
+slower. On the dev Mac benign 16 KiB takes about 0.19 ms, the slowest linear
+hostile shape about 40 times that, and the quadratic pattern HL-04 removed
+about 440 times. The old "under 50 ms" checks, which flaked under parallel load,
+now use the same ratio.
+
+The bash differential only checks syntax, since bash has no way to split words
+without running them. zsh is not installed on Ubuntu runners, so there the zsh
+half skips and macOS CI runs it.
+
+## Limits of the permission classifier
+
+The classifier ([hooks.md](hooks.md#risk-classes-plan-question-6)) decides how
+much proof an approval needs, never whether one is needed: every permission
+request still needs the owner's own yes, and every failure denies. Its limits:
+
+- It judges text, not execution. It does not see the shell's aliases,
+  functions, `PATH` or rc files; an agent that already edited a script the
+  allowlist runs (`pnpm test`) gets that script run on a spoken yes. Writes to
+  `package.json`, `.git/`, `node_modules/` and package-manager config are high,
+  but an earlier low-risk edit by the same agent in the same away window is not
+  remembered (follow-up).
+- Read tools (`Read`, `Grep`, `Glob`) aimed outside the project are low unless
+  the path looks like a credential (`docs/hooks.md` records this as the
+  intended default). The read result reaches the agent, not a third party.
+- The tokenizer refuses anything bash and zsh might expand or read differently.
+  The differential test covers the separators, quotes, redirections and file
+  descriptors it accepts, against zsh's lexer and bash's parser; it cannot prove
+  the absence of every differential.
+- Codex shell requests are always high, because Codex does not send the folder
+  or sandbox setting to the hook.
+
+## Limits of the redactor
+
+The redactor is a safety net under the logging contract (request logs carry
+method and path only; bodies and headers of webhooks are never logged). It errs
+towards removing too much. Accepted gaps, each found by a probe or the fuzzer
+and none a current leak:
+
+- A registered secret re-encoded another way: base64, upper-cased, or split
+  across lines.
+- A YAML block scalar under a secret name (`auth_token: >` and the next lines):
+  only the first line goes. A long token on the next line is still removed as an
+  opaque run.
+- An unquoted value with spaces under a secret name (`PASSWORD=two words`): only
+  the first word goes. Quoted values go whole.
+- A phone number written with slashes (`+1/555/555/0100`).
+
+## Accepted residual risks (Tier 1)
+
+- **Same-user processes can read every secret.** Any process running as the
+  owner, coding agents included, can read the Keychain items without a prompt
+  (`/usr/bin/security` is on their access list), the `0600` files and
+  `hotline.db`, including pending text confirmation codes. With the Twilio or
+  ElevenLabs secrets such a process can sign webhooks. HL-13a (verify by pull,
+  [#69](https://github.com/neanicc/agent-hotline/pull/69), open when this was
+  written) makes a signed webhook only a trigger: before a text or call decides
+  anything the daemon pulls the message or conversation from the provider, so a
+  forged body confirms nothing, and stores codes only as hashes. What remains
+  after it: a process holding the provider API keys can place calls and send
+  texts on the owner's account through the providers' APIs, and can read or
+  change the config (owner number, public URL) and away-mode state. Hotline
+  protects against other people and other accounts, not against code running as
+  the owner. Use narrowly scoped keys.
+- **One install token for every agent.** All local sessions share it, so one
+  session can read or cancel another session's asks and read its instructions.
+  No agent API route can answer an ask, so this cannot approve anything.
+- **The classifier only sets proof strength** (see its limits above).
+- **Instructions are delivered at most once.** A queued instruction is handed
+  to the session's next ask or Stop hook, which acknowledges it before passing it
+  on; a hook killed between the acknowledgement and its output loses that
+  instruction rather than delivering it twice ([hooks.md](hooks.md#stop-stop)). Held instructions (said
+  on a call, waiting for the post-call transcript) are dropped on a daemon
+  restart and the owner is texted that they did not go through.
+- **Some counters live in memory.** The PIN failure budgets, tool-call and
+  post-call replay memories, the route's SID set, stranger-reply and lockout-text
+  throttles reset on a restart. Approvals stay safe across a restart (SID claims,
+  single-use codes and call state are in SQLite), but a restart gives a PIN
+  guesser a fresh hourly and daily budget. See follow-ups.
+- **A PIN covers the whole call**, not one ask: after the PIN, a high-risk ask
+  later on the same call needs only the read-back and a yes.
+- **On an outbound call, whoever answers the owner's phone is the owner**, up to
+  the PIN for high-risk requests.
+- **The tunnel's own configuration is the owner's.** Hotline cannot check that
+  the tunnel forwards only the webhook port; it has no per-IP rate limit (every
+  request arrives from 127.0.0.1). Tunnel-level rate limiting is advisable.
+
+## Follow-ups
+
+Tracked on GitHub; each fails safe today.
+
+- Persist the PIN failure budgets, the forgery-alarm hourly text limit (HL-13a)
+  and held inbound instructions in SQLite, and the tool-call and post-call replay
+  memories, so a restart resets none of them. These touch HL-13a's files and wait
+  for #69.
+- Put a `maxInFlight` and a body deadline on the Twilio SMS and ElevenLabs tool
+  routes, as the post-call route has.
+- Count texts sent outside the queue (TwiML replies, inbound-line notices,
+  lockout texts, crash reports) against the text rate limit.
+- Raise a package-script run to high after the same away window edited
+  `package.json` or a script it runs.
+- Consider making read tools aimed outside the project high.

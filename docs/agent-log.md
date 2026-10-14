@@ -2577,3 +2577,54 @@ Template:
   - `--only` refuses empty names.
   - docs/eval.md states the self-test's limit: it catches an approval the agent sees, not a flaw injected inside the daemon (the mutation checks above covered those once).
   - After the fixes, build passes, test passes (60 files, 1727 tests) and `eval --local` prints 22 PASS lines and `THRESHOLDS: PASS`.
+
+## 2026-10-14 — HL-13 Security pass (#14)
+
+- Change: `docs/security.md`, the threat model: assets, actors, trust
+  boundaries, every invariant with where it is enforced and tested, the webhook
+  replay and rate-limit review, the classifier's and redactor's limits, and the
+  accepted residual risks (same-user secret access and what HL-13a's
+  verify-by-pull covers, the shared install token, proof strength only,
+  at-most-once instructions, in-memory counters).
+- Change: fast-check property and fuzz tests for the redactor, the permission
+  classifier (obfuscated high-risk commands, and a differential of
+  `splitShell` against `bash -n`, `zsh -n` and zsh's `${(z)...}` word split,
+  with the command passed as data and never run), text replies and the voice
+  fast path; and an exposure audit (`exposure.test.ts`) over the routes each
+  listener registered (`Daemon.routes`, recorded with an `onRoute` hook) on a
+  daemon with Twilio and ElevenLabs fully configured.
+- Bugs the fuzzers found, each fixed failing closed: `git show HEAD:.env` was
+  low (`:` is now a path boundary, also for `.git` components); `; ls`,
+  `ls ;;` and `ls\n;` were low though bash refuses them; `&>>` was low though
+  macOS's bash 3.2 refuses it; `rg` options were a denylist (now a positive
+  list; `--hostname-bin` runs a program); the redactor left the tail of a quoted
+  value after a removed encoded segment (`"token":"+,rest"`), stopped an unquoted
+  value at a quote (`token=a'rest`), and its JWT pattern was quadratic on
+  `eyJ-eyJ-...` (now anchored after a non-token character).
+- Decision: linear-time checks compare hostile text with benign text of the
+  same length (fastest of 7 interleaved runs, at most 100 times slower) instead
+  of an absolute 50 ms, which flaked under load (HL-10). Measured on the dev
+  Mac: benign 16 KiB about 0.19 ms; slowest linear hostile shape about 40x; the
+  quadratic truncation HL-04 removed about 440x; the old 50 ms was about 270x.
+- Decision: the default webhook body read before verification drops from
+  256 KiB to 64 KiB (P3 from the HL-07 review); post-call keeps its own 1 MiB.
+- Decision: a bare "no" to a stop ask stays `done` (P3 from HL-07): the agent
+  stops, which is also what silence does, so it is the safe reading.
+- Decision: read tools aimed outside the project stay low (an explicit HL-06
+  decision with a test); listed as a follow-up rather than changed here.
+- Mutation checks, each reverted: dropping the `:` boundary, skipping attached
+  option values, accepting a leading `;`, and corrupting quoted words each fail
+  the classifier properties (the last one only the zsh word-split comparison);
+  dropping the quoted continuation, restoring `\beyJ`, restoring the quadratic
+  truncation, and disabling registered-secret, PIN and phone passes each fail a
+  redactor test; approving a text yes without its code or with trailing words
+  fails the text-reply fuzz; ignoring doubt words fails the voice fuzz; a token
+  bypass on one route and an extra route outside `/hooks` fail the exposure
+  audit; restoring 256 KiB fails the body-limit test.
+- Evidence: `scripts/ci/run.sh build` passes; `scripts/ci/run.sh test` passed
+  5 runs in a row (65 files, 1814 tests). The scenario suite stage could not be
+  run locally (the sandbox refuses command lines containing its stage name);
+  hosted CI is the gate.
+- Deferred (needs #69, HL-13a, which changes the same files): persist the PIN
+  failure budgets, the forgery-alarm hourly text limit, held inbound
+  instructions and the tool-call and post-call replay memories.
