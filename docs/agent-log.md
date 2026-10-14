@@ -1125,3 +1125,15 @@ Template:
     half already moved to `owner-texts.ts`; a further split is a follow-up.
   - Evidence: `scripts/ci/run.sh build` and `test` pass (see the PR's Validation
     for the count at this head).
+- Bot staff review on 3483ea2 (approve with nits, score 89, one P2, two P3s):
+  - P2, fixed: unreadable main state started a fresh queue, which also reset
+    the rate-limit windows. The call and text times are now saved under their
+    own key and restored; if those are unreadable too, the hourly windows start
+    out full. Tests; mutants dropping either fail 2 and 1 tests.
+  - P3, documented: a crash between the provider accepting a call and the call
+    being saved can ring the owner twice (bounded by the call limits).
+  - P3, fixed: a bare reply arriving within 10 seconds of the only waiting text
+    is not bound to it (a stray "yes" meant for something earlier); the owner
+    is asked to reply again. Decision: 10 seconds, since nobody reads a request
+    and answers faster, and coded replies are unaffected. The test harness
+    lets the scripted owner take 15 seconds to read. Test; the mutant fails 1.

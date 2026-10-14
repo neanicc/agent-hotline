@@ -45,6 +45,8 @@ import { confirmVoiceDecision, type ReadAsk } from "./voice-confirm.js";
 
 /** Key of the orchestrator's saved state in the store. */
 export const ORCHESTRATOR_STATE_KEY = "orchestrator";
+/** Key of the call and text times, saved apart from the main state. */
+export const RATE_STATE_KEY = "orchestrator.rates";
 /** A timer never fires sooner than this after the last step, so overdue work cannot spin. */
 const MIN_TIMER_MS = 100;
 const MAX_TIMER_MS = 2 ** 31 - 1;
@@ -118,7 +120,11 @@ interface SavedState {
    * start (see `#recover`).
    */
   pending: PendingAction[];
+  /** When each waiting ask's text went out, by ask id; a bare reply right after it is not bound. */
+  textedAt: Record<string, string>;
 }
+
+const RateStateSchema = z.strictObject({ callTimes: z.array(z.number()), textTimes: z.array(z.number()) });
 
 const QueuedAskSchema = z.strictObject({
   ask: Ask,
@@ -178,6 +184,7 @@ const SavedStateSchema = z.strictObject({
   ),
   codes: z.record(z.string(), z.string()),
   pending: z.array(PendingActionSchema).default([]),
+  textedAt: z.record(z.string(), z.iso.datetime()).default({}),
 });
 
 const OPEN: ReadonlySet<AskStatus> = new Set<AskStatus>(["pending", "in-flight"]);
@@ -210,6 +217,7 @@ export class CallOrchestrator {
       calls: [],
       codes: {},
       pending: [],
+      textedAt: {},
     };
     // Webhooks or agent requests that arrive before `start` wait for it.
     this.#chain = new Promise<void>((resolve) => {
@@ -233,8 +241,10 @@ export class CallOrchestrator {
     const saved = SavedStateSchema.safeParse(stored);
     if (saved.success) this.#state = saved.data as SavedState;
     else if (stored !== undefined) {
-      // Unreadable state fails closed: open asks are queued afresh below.
+      // Unreadable state fails closed: open asks are queued afresh below, and the
+      // rate limits keep counting what was already sent (or start out full).
       this.#log.warn({}, "call orchestration state unreadable; starting a new queue");
+      this.#restoreRates();
     }
     this.#unsubscribe.push(
       this.#store.onAskAdded((ask) => {
@@ -595,7 +605,12 @@ export class CallOrchestrator {
         .filter((q) => q.texted && q.duplicateOf === undefined)
         .map((q) => {
           const code = this.#state.codes[q.ask.id];
-          return { ask: q.ask, ...(code === undefined ? {} : { code }) };
+          const sent = this.#state.textedAt[q.ask.id];
+          return {
+            ask: q.ask,
+            ...(code === undefined ? {} : { code }),
+            ...(sent === undefined ? {} : { sentAt: new Date(sent) }),
+          };
         }),
     });
     switch (plan.type) {
@@ -608,6 +623,9 @@ export class CallOrchestrator {
       }
       case "nothing-waiting":
         return TEXT_REPLIES.nothingWaiting;
+      case "too-soon":
+        this.#store.appendAudit("sms.too-soon", { messageSid }, receivedAt);
+        return TEXT_REPLIES.tooSoon;
       case "ambiguous":
         this.#store.appendAudit("sms.ambiguous", { messageSid, waiting: plan.waiting }, receivedAt);
         return TEXT_REPLIES.ambiguous(plan.waiting);
@@ -698,6 +716,29 @@ export class CallOrchestrator {
 
   #save(): void {
     this.#store.putState(ORCHESTRATOR_STATE_KEY, this.#state);
+    // Kept apart too, so losing the main state never resets the rate limits.
+    const { callTimes, textTimes } = this.#state.queue;
+    this.#store.putState(RATE_STATE_KEY, { callTimes, textTimes });
+  }
+
+  /**
+   * After unreadable main state: the saved call and text times, or, if those are
+   * unreadable too, hourly windows treated as full from now, so a corrupt state
+   * can never set off a burst of calls or texts.
+   */
+  #restoreRates(): void {
+    const rates = RateStateSchema.safeParse(this.#store.getState(RATE_STATE_KEY));
+    const queue = this.#state.queue;
+    if (rates.success) {
+      queue.callTimes = rates.data.callTimes;
+      queue.textTimes = rates.data.textTimes;
+      return;
+    }
+    const now = this.#options.clock().getTime();
+    const { callsPerHour, textsPerHour } = this.#options.settings.rateLimits;
+    queue.callTimes = Array.from({ length: callsPerHour }, () => now);
+    queue.textTimes = Array.from({ length: textsPerHour }, () => now);
+    this.#store.appendAudit("orchestration.rates-reset", {}, new Date(now));
   }
 
   #schedule(): void {
@@ -851,6 +892,8 @@ export class CallOrchestrator {
       );
       return [{ type: "text-failed", askId }];
     }
+    this.#state.textedAt[askId] = this.#options.clock().toISOString();
+    this.#save();
     this.#store.setAskStatus(askId, "in-flight");
     this.#store.appendAudit("text.sent", { reason, confirmationCode: code !== undefined }, now, {
       askId,
@@ -874,6 +917,7 @@ export class CallOrchestrator {
   #resolve(action: Extract<QueueAction, { type: "resolve" }>, now: Date): void {
     const { askId, outcome } = action;
     delete this.#state.codes[askId];
+    delete this.#state.textedAt[askId];
     this.#save();
     const ask = this.#store.getAsk(askId);
     const ids = { askId, ...(ask === undefined ? {} : { sessionId: ask.sessionId }) };

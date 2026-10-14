@@ -38,6 +38,8 @@ const TOOL_SECRET = "fake-elevenlabs-tool-secret-orch";
 const WEBHOOK_SECRET = "fake-elevenlabs-webhook-secret-orch";
 /** 17:58 in Toronto: outside the default quiet hours (22:00 to 08:00). */
 export const START = new Date("2026-10-13T21:58:00.000Z");
+/** How long the scripted owner takes to read a text before replying. */
+export const READING_MS = 15_000;
 
 let pinHash: Promise<string> | undefined;
 
@@ -78,8 +80,14 @@ export interface Hotline {
   addAsk(sessionId: string, fields: Partial<Ask> & Pick<Ask, "kind" | "text">): Ask;
   /** The agent API's outcome long poll. */
   outcome(askId: string, waitSeconds?: number): Promise<{ state: string; outcome?: AskOutcome }>;
-  /** A signed Twilio webhook for a text to the Hotline number; returns the reply text, if any. */
-  text(body: string, options?: { from?: string; messageSid?: string }): Promise<string | undefined>;
+  /**
+   * A signed Twilio webhook for a text to the Hotline number; returns the reply text, if any.
+   * The fake clock first moves on `READING_MS` (the owner reads before replying) unless `instantly`.
+   */
+  text(
+    body: string,
+    options?: { from?: string; messageSid?: string; instantly?: boolean },
+  ): Promise<string | undefined>;
   stop(): Promise<number>;
 }
 
@@ -225,7 +233,9 @@ export async function startHotline(options: HotlineOptions = {}): Promise<Hotlin
         outcome?: AskOutcome;
       };
     },
-    async text(body, { from = OWNER, messageSid: sid = messageSid() } = {}) {
+    async text(body, { from = OWNER, messageSid: sid = messageSid(), instantly = false } = {}) {
+      await orchestrator.idle();
+      if (!instantly) clock.now = new Date(clock.now.getTime() + READING_MS);
       const params: [string, string][] = [
         ["MessageSid", sid],
         ["AccountSid", ACCOUNT_SID],

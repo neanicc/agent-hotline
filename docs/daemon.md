@@ -265,14 +265,21 @@ store, the providers and the webhooks through core's pure queue
   (`text-sent`, `text-failed`, `call-ended`), and sets one timer for
   `nextWakeAt` (at least 100 ms away). On start it restores that state, drops
   asks that closed while it was down, and queues open asks it did not know.
-  Unreadable state fails closed: open asks are queued afresh. Nothing else runs
-  until start has finished: webhooks and agent requests wait for it.
+  Unreadable state fails closed: open asks are queued afresh. The call and text
+  times are also saved under their own key, so the rate limits keep counting
+  what was already sent; if those are unreadable too, the hourly call and text
+  windows start out full (`orchestration.rates-reset`), so corrupt state can
+  never set off a burst. Nothing else runs until start has finished: webhooks
+  and agent requests wait for it.
 - **Crash recovery.** Each step's actions are saved with the queue state that
   assumes them and crossed off one by one as they are carried out. On start,
   whatever the last run left undone is finished (`orchestration.recovered`): a
   call that may or may not have been placed counts as failed, so the queue's
-  retry rules apply (the owner may be called again); a text is sent again (at
-  least once); recording an answer, closing an ask and ending a call are
+  retry rules apply. Known limit: a crash between the provider accepting a call
+  and its record being saved leaves a call Hotline no longer knows about; its
+  answers are not served, and the retry may ring the owner a second time while
+  the first call is still ringing (bounded by the call limits). A text is sent
+  again (at least once); recording an answer, closing an ask and ending a call are
   idempotent. A post-call event's call stays live until all of its answers
   have reached the queue, so ElevenLabs' retry after a failure applies them
   again and the queue ignores the ones already applied.
@@ -385,7 +392,10 @@ store, the providers and the webhooks through core's pure queue
   `status` waits for HL-10; `stop` and Twilio's keywords get no reply of
   Hotline's own. Any other text answers only an ask Hotline texted that is
   still open, and only one: a `YES <code>` reply names the ask with that code;
-  otherwise there must be exactly one such ask. With several waiting the reply
+  otherwise there must be exactly one such ask, texted at least 10 seconds
+  before the reply arrived. A quicker bare reply (a stray "yes" meant for
+  something earlier) is not used, and the owner is asked to read the text and
+  reply again. With several waiting the reply
   answers nothing and the owner is told to text `call me`. `smsAnswer` then
   turns the text into an answer, which goes through the queue and
   `recordAnswer`.

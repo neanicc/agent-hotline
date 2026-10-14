@@ -5,7 +5,8 @@
 // Safety rules this file keeps:
 // - A reply answers only an ask Hotline texted that is still open, and only
 //   one: a `YES <code>` names the ask with that code; without a code there
-//   must be exactly one waiting ask. Several waiting fail closed.
+//   must be exactly one waiting ask, texted at least `MIN_REPLY_DELAY_MS`
+//   before the reply arrived. Several waiting fail closed.
 // - A code that matches no waiting ask burns every waiting code (the plan says
 //   so); a code that matched is spent whatever happens next.
 // - `smsAnswer` (core) decides what the words mean; free text never approves.
@@ -16,10 +17,19 @@ import { type Answer, type Ask, parseSmsReply, type SmsReply, smsAnswer } from "
 const SMS_ASK_LENGTH = 300;
 const SMS_OPTION_LENGTH = 80;
 
+/**
+ * A reply without a code that arrives sooner than this after the text it would
+ * answer is not bound to it: nobody reads a request and answers that fast, so
+ * it was most likely meant for something earlier (a stray "yes").
+ */
+export const MIN_REPLY_DELAY_MS = 10_000;
+
 /** One ask waiting on a text reply, with the confirmation code its text carried, if any. */
 export interface WaitingText {
   ask: Ask;
   code?: string;
+  /** When its text went out. */
+  sentAt?: Date;
 }
 
 export type TextPlan =
@@ -29,6 +39,8 @@ export type TextPlan =
   | { type: "nothing-waiting" }
   /** Several asks wait on texts and the reply names none of them: nothing is recorded. */
   | { type: "ambiguous"; waiting: number }
+  /** A reply without a code that came too soon after the one waiting text to be an answer to it. */
+  | { type: "too-soon" }
   /** A code that matches no waiting ask: burn every waiting code. */
   | { type: "code-mismatch" }
   /** The reply points at `ask` but does not answer it. `codeUsed`: spend its code. */
@@ -67,6 +79,9 @@ export function planTextReply({ body, messageSid, receivedAt, optedOut, waiting 
     return { type: "ambiguous", waiting: waiting.length };
   } else {
     target = waiting[0];
+    const sentAt = target?.sentAt?.getTime();
+    if (sentAt !== undefined && receivedAt.getTime() - sentAt < MIN_REPLY_DELAY_MS)
+      return { type: "too-soon" };
   }
   if (target === undefined) return { type: "nothing-waiting" };
   const result = smsAnswer({
@@ -102,6 +117,8 @@ export const TEXT_REPLIES = {
   ambiguous: (waiting: number) =>
     `Hotline: ${waiting} requests are waiting, so a reply cannot say which one it answers. Nothing was recorded. Text CALL ME to go through them by phone.`,
   notCalling: (reason: string) => `Hotline: not calling, ${reason}.`,
+  tooSoon:
+    "Hotline: a request was just texted to you, so that reply was not used for it. Read it, then reply again.",
 } as const;
 
 /** One plain line of agent text, cut to `max`. */

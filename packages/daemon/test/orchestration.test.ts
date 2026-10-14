@@ -597,6 +597,19 @@ describe("texts bind to exactly one texted ask", () => {
     expect((await h.outcome(question.id)).state).toBe("waiting");
   });
 
+  it("does not bind a bare reply that arrives right after the text, such as a stray yes", async () => {
+    const h = await start({ config: QUIET });
+    const session = await h.registerSession();
+    const request = permission(h, session, "low");
+    await h.advance(BATCH_MS);
+    expect(h.sms.sent).toHaveLength(1);
+    expect(await h.text("yes", { instantly: true })).toContain("a request was just texted to you");
+    expect(h.daemon.store.getAnswer(request.id)).toBeUndefined();
+    // Once the owner has had time to read it, the same reply counts.
+    expect(await h.text("yes")).toBe("Hotline: got it.");
+    expect(await verdict(h, request)).toBe("allow");
+  });
+
   it("answers nothing when no ask was texted", async () => {
     const h = await start();
     const session = await h.registerSession();

@@ -16,12 +16,16 @@ import {
   CallOrchestrator,
   type CallOrchestratorOptions,
   type HotlineStore,
+  ORCHESTRATOR_STATE_KEY,
   openStore,
+  RATE_STATE_KEY,
 } from "../src/index.js";
 
 const OWNER = "+15555550100";
 const START = new Date("2026-10-13T21:58:00.000Z");
 const MINUTE = 60_000;
+/** The owner reads a text before replying; quicker replies are not bound to it. */
+const READ_MS = 15_000;
 const PIN_HASH = `scrypt$15$8$1$${"s".repeat(22)}$${"h".repeat(43)}`;
 /** Quiet hours all day, so every ask is texted. */
 const settings = policySettings(
@@ -105,6 +109,38 @@ const hangingSms: SmsProvider = { name: "fake", sendToOwner: () => new Promise((
 const hangingVoice: VoiceProvider = { name: "fake", callOwner: () => new Promise<PlacedCall>(() => {}) };
 const sid = (n: number) => `SM${n.toString(16).padStart(32, "0")}`;
 
+describe("unreadable state", () => {
+  it("keeps the saved call and text times, so the rate limits still hold", async () => {
+    const sms = new FakeSmsProvider({ ownerNumber: OWNER });
+    const first = await orchestrator({ sms });
+    // Use up the hourly text limit (10).
+    for (let i = 0; i < 10; i++) addAsk({ kind: "notify", toolName: undefined, text: `note ${i}` });
+    await advance(first, 20_000);
+    expect(sms.sent).toHaveLength(10);
+    await first.stop();
+    store.putState(ORCHESTRATOR_STATE_KEY, { version: 99 });
+
+    const second = await orchestrator({ sms });
+    addAsk({ kind: "notify", toolName: undefined, text: "one more" });
+    await advance(second, 20_000);
+    expect(sms.sent).toHaveLength(10);
+  });
+
+  it("treats the hourly windows as full when the call and text times are unreadable too", async () => {
+    store.putState(ORCHESTRATOR_STATE_KEY, { version: 99 });
+    store.putState(RATE_STATE_KEY, "garbage");
+    const sms = new FakeSmsProvider({ ownerNumber: OWNER });
+    const target = await orchestrator({ sms });
+    addAsk();
+    await advance(target, 20_000);
+    expect(sms.sent).toHaveLength(0);
+    expect(store.listAudit().map((e) => e.event)).toContain("orchestration.rates-reset");
+    await advance(target, 60 * MINUTE);
+    // The ask expired meanwhile, as no answer; nothing was ever sent in a burst.
+    expect(sms.sent).toHaveLength(0);
+  });
+});
+
 describe("crash recovery", () => {
   it("sends a text the last run decided on but never sent", async () => {
     const first = await orchestrator({ sms: hangingSms });
@@ -120,6 +156,7 @@ describe("crash recovery", () => {
     expect(sms.sent.map((s) => s.text)).toEqual([expect.stringContaining(ask.text)]);
     expect(store.listAudit().map((e) => e.event)).toContain("orchestration.recovered");
     expect(store.getAsk(ask.id)?.status).toBe("in-flight");
+    clock.now = new Date(clock.now.getTime() + READ_MS);
     expect(await second.ownerText({ messageSid: sid(1), body: "yes", receivedAt: clock.now })).toBe(
       "Hotline: got it.",
     );
@@ -197,6 +234,7 @@ describe("owner texts that fail", () => {
     const target = await orchestrator({ sms: new FakeSmsProvider({ ownerNumber: OWNER }) });
     const ask = addAsk();
     await advance(target, 20_000);
+    clock.now = new Date(clock.now.getTime() + READ_MS);
     const append = store.appendAudit.bind(store);
     store.appendAudit = (event, ...rest) => {
       if (event === "sms.received") throw new Error("disk full");
