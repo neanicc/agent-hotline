@@ -41,8 +41,19 @@ export function speakableName(text: string): string {
     .trim();
 }
 
+/**
+ * Cuts to at most `max` UTF-16 units (what the `Session` contract counts), on a
+ * code point boundary, so an emoji or other astral character is never split
+ * into a lone surrogate.
+ */
 function cut(text: string, max: number): string {
-  return text.length <= max ? text : `${text.slice(0, max - ELLIPSIS.length).trimEnd()}${ELLIPSIS}`;
+  if (text.length <= max) return text;
+  let kept = "";
+  for (const char of text) {
+    if (kept.length + char.length > max - ELLIPSIS.length) break;
+    kept += char;
+  }
+  return `${kept.trimEnd()}${ELLIPSIS}`;
 }
 
 /** The last path segment of an absolute or relative POSIX path, ignoring trailing slashes. */

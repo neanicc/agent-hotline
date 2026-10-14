@@ -889,3 +889,13 @@ Template:
   - HL-10: `get_status` should read sessions by these nicknames.
   - Live check: whether the persona is short enough on a real line, and
     whether ElevenLabs reads "Claude 2 in demo-app" naturally.
+- Bot staff reviews on #35 (two rounds, approve with nits, score 92, P3s only):
+  - P3, fixed: nicknames are cut on a code point boundary, so an astral
+    character is never split into a lone surrogate. Test included; cutting by
+    code units fails it.
+  - P3, test added: a folder named like an instruction stays inside its
+    `<agent_text>` fence when read out.
+  - P3, left as is: a configured name ending in a number can match another
+    session's numbered name (names are labels, never identity), and dedupe
+    reads every session at registration (cheap at Tier 1 scale; HL-10 may
+    expire stale sessions).
