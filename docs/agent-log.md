@@ -3214,7 +3214,11 @@ Template:
   hosted CI is the gate.
 - Deferred (needs #69, HL-13a, which changes the same files): persist the PIN
   failure budgets, the forgery-alarm hourly text limit, held inbound
-  instructions and the tool-call and post-call replay memories.
+  instructions and the tool-call and post-call replay memories. #69 had not
+  landed when this PR opened; it landed during review, after which this PR
+  caught up with main and `docs/security.md` describes HL-13a as merged. The
+  persistence work stays a separate ticket, #78 (HL-13b), so this PR stays
+  reviewable. The exposure audit passes unchanged against HL-13a's routes.
 - Review fix (staff review P2 on #77): the rg option lists are exported and
   audited by hand against `rg --help` of ripgrep 14.1.1 (every letter and name
   is a search, filter or output option; `-h` is help). A test checks them

@@ -40,12 +40,15 @@ code disagree, the code wins and this document is out of date.
 - **Providers (Twilio, ElevenLabs and the LLM inside the ElevenLabs agent).**
   Trusted to deliver calls and texts and to sign their webhooks; not trusted with
   more than short redacted summaries. The voice model is treated as able to make
-  things up: its tool calls are checked against the post-call transcript.
-- **The reply judge's model (HL-09d).** The owner's own agent provider (Claude
-  Code or Codex on the owner's login, or the Anthropic API with the owner's
-  key) sees only the owner's redacted reply turns to a read-back, never
-  agent-written text. Its `agreed` can only be taken away by the post-check,
-  never added; an error or timeout is "not confirmed".
+  things up: its tool calls are checked against the post-call transcript. Since
+  HL-13a every decision is also checked against the provider's own record.
+- **The reply judge's model (HL-09d, HL-09e).** Only once the owner chooses a
+  backend (`hotline init` or `judge.backend`), the owner's own agent provider
+  (Claude Code or Codex on the owner's plan login, or the Anthropic API when
+  chosen explicitly) sees the owner's redacted reply turns to a read-back, never
+  agent-written text, in an isolated run that gets none of Hotline's
+  credentials. Its `agreed` can only be taken away by the post-check, never
+  added; an error or timeout is "not confirmed" ([README](../README.md#security-model)).
 - **The network and the tunnel.** Untrusted. Anyone on the internet can reach the
   tunnel's public URL and send anything to it.
 
@@ -105,6 +108,7 @@ kept in `hotline.db`.
 | Twilio signature (`validTwilioSignature`), exact public URL, own `AccountSid` | none | Twilio signs no timestamp, so freshness rests on the SID records and the reply rules below |
 | SMS `MessageSid` dedupe in the route (last 1000) | memory | Retries wait for an attempt in flight; only a successful handling counts |
 | Owner texts claimed by SID before any effect (`inbound_messages`, kept 400 days) | SQLite | A replay after a restart is ignored (`orchestration.test.ts` "remembers handled messages across a restart") |
+| Verify by pull (HL-13a): an owner text counts only if Twilio's own record of that SID is inbound, from the owner, with the same body and at most 15 minutes old; every ElevenLabs tool call and post-call event is checked against the pulled conversation | none (pulled per request) | A forged or replayed body confirms nothing; the forgery alarm texts the owner at most once an hour (memory) |
 | Text reply binding: a reply must be first seen 10 s or more after the text; a bare reply needs exactly one waiting ask; approvals need that ask's single-use code; one wrong code burns every waiting code | SQLite | A replayed old "YES 123456" cannot approve a newer request |
 | Generic replies to strangers, 5 an hour | memory | Global, not per sender |
 | ElevenLabs tool shared secret (`sameSecret`), checked before the body is read | none | Static: no timestamp or nonce |
@@ -193,10 +197,12 @@ by a probe or the fuzzer and none a current leak:
   (`/usr/bin/security` is on their access list), the `0600` files and
   `hotline.db`, including pending text confirmation codes. With the Twilio or
   ElevenLabs secrets such a process can sign webhooks. HL-13a (verify by pull,
-  [#69](https://github.com/neanicc/agent-hotline/pull/69), open when this was
-  written) makes a signed webhook only a trigger: before a text or call decides
-  anything the daemon pulls the message or conversation from the provider, so a
-  forged body confirms nothing, and stores codes only as hashes. What remains
+  [#69](https://github.com/neanicc/agent-hotline/pull/69)) makes a signed
+  webhook only a trigger: before a text or call decides anything the daemon
+  pulls the message or conversation from the provider, so a forged body
+  confirms nothing (it is audited as a possible forgery and the owner is texted,
+  at most once an hour), and codes are stored only as hashes
+  ([contracts.md](contracts.md#secrets-secretsts)). What remains
   after it: a process holding the provider API keys can place calls and send
   texts on the owner's account through the providers' APIs, and can read or
   change the config (owner number, public URL) and away-mode state. Hotline
@@ -231,8 +237,8 @@ Tracked on GitHub; each fails safe today.
 
 - Persist ([#78](https://github.com/neanicc/agent-hotline/issues/78)) the PIN failure budgets, the forgery-alarm hourly text limit (HL-13a)
   and held inbound instructions in SQLite, and the tool-call and post-call replay
-  memories, so a restart resets none of them. These touch HL-13a's files and wait
-  for #69.
+  memories, so a restart resets none of them. These touch HL-13a's files, which
+  #69 changed while this pass was in review, so they are a separate ticket.
 - Put a `maxInFlight` and a body deadline on the Twilio SMS and ElevenLabs tool
   routes, as the post-call route has.
 - Count texts sent outside the queue (TwiML replies, inbound-line notices,
