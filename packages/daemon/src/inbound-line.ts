@@ -291,6 +291,10 @@ export class InboundLine {
 
   #hold(voice: VoiceInstruction): SendInstructionResult {
     const now = voice.receivedAt;
+    // Forget expired calls (and the oldest past the cap) first, so this call's
+    // memory is read only after, never pushed to once it was let go. Calls
+    // whose post-call event never came then stop counting against the caps.
+    this.#forget(now, voice.conversationId);
     const call = this.#calls.get(voice.conversationId);
     // Only a number the status on this call read out.
     const sessionId =
@@ -300,8 +304,6 @@ export class InboundLine {
     const session = sessionId === undefined ? undefined : this.#store.getSession(sessionId);
     if (call === undefined || session === undefined || session.state === "ended") return "unknown-session";
     if (voice.instruction.trim() === "" || voice.ownerWords.trim() === "") return "invalid";
-    // Calls whose post-call event never came stop counting against the caps.
-    this.#forget(now);
     const held = [...this.#calls.values()].flatMap((memory) => memory.held.filter((h) => !h.done));
     const queued = this.#store.listInstructions({ status: "queued" });
     const forSession = (list: readonly { sessionId: string }[]) =>
@@ -329,7 +331,7 @@ export class InboundLine {
 
   /** This call's memory, created if new; forgets expired calls, and the oldest past `MAX_CALLS`. */
   #memory(conversationId: string, now: Date): CallMemory {
-    this.#forget(now);
+    this.#forget(now, conversationId);
     let memory = this.#calls.get(conversationId);
     if (memory === undefined) {
       memory = { sessionIds: [], nicknames: [], held: [], expires: now.getTime() + CALL_MEMORY_MS };
@@ -339,10 +341,12 @@ export class InboundLine {
   }
 
   /** Forgets calls past `CALL_MEMORY_MS` (their instructions are never queued), and the oldest past `MAX_CALLS`. */
-  #forget(now: Date): void {
+  #forget(now: Date, keep?: string): void {
     let lost = 0;
     for (const [id, memory] of this.#calls) {
-      if (memory.expires > now.getTime() && this.#calls.size <= MAX_CALLS) continue;
+      // The call being served is never evicted for space, only when it expired.
+      const spare = id === keep || this.#calls.size <= MAX_CALLS;
+      if (memory.expires > now.getTime() && spare) continue;
       this.#calls.delete(id);
       // The voice agent told the owner these were queued: say they were not.
       for (const held of memory.held.filter((h) => !h.done)) {

@@ -2423,6 +2423,14 @@ Template:
   must not confirm, which `instruction-confirm.test.ts` already has
   ("confirmInstruction corpus"). Left as a note: surfacing the session-cap
   429 in `hotline doctor` (P3, build lane).
+- Review fixes, twelfth round (bot staff review of 93d4e6f): `send_instruction`
+  now forgets expired calls before it reads its own call's memory, and the
+  call being served is never the one evicted for space, so it can never
+  answer `queued` into memory it already let go (P2; a test past the
+  1000-call cap fails with the old order). The review's other P2 was that CI
+  was still pending when it ran; CI on 93d4e6f was green. P3s: the reply-judge
+  follow-up is proposed as an issue below; this entry runs long and the
+  per-round history is also in the PR description.
 - Decision: sessions are named by number. `get_status` numbers live sessions
   by registration and remembers, per call, which number is which session;
   `send_instruction` takes only a number that call's status read out

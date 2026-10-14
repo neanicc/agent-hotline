@@ -190,6 +190,21 @@ describe("status", () => {
     expect(instruct(heard + 1)).toBe("unknown-session");
   });
 
+  it("never answers queued for an instruction it then forgets, even past the call memory's cap", async () => {
+    session("s-1", "Claude in demo-app");
+    line.getStatus(call("conv-0"));
+    for (let i = 1; i <= 1000; i++) line.getStatus(call(`conv-${i}`));
+    const result = instruct(1, "run the tests", "conv-0");
+    await line.postCall(transcript("conv-0", "session 1, run the tests"), now, false);
+    // Either the call was already let go (the instruction is refused), or it is kept and queued.
+    if (result === "queued") expect(store.listInstructions().map((i) => i.text)).toEqual(["run the tests"]);
+    else expect(result).toBe("unknown-session");
+    // The call being served is never the one evicted for space.
+    expect(instruct(1, "run the tests", "conv-1000")).toBe("queued");
+    await line.postCall(transcript("conv-1000", "session 1, run the tests"), now, false);
+    expect(store.listInstructions().filter((i) => i.sourceId === "conv-1000")).toHaveLength(1);
+  });
+
   it("keeps session numbers stable for the whole call, even when sessions come and go", () => {
     session("s-a", "Claude in alpha");
     now = new Date(START.getTime() + 1000);
