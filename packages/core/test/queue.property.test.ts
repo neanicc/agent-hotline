@@ -1,7 +1,8 @@
 // Property tests for the ask queue: random asks, clocks, settings and provider events.
 // The core claim: silence (no pickup, dropped or failed calls, unclear answers, failed
 // texts, cancellation, timeouts) never yields an approval, and an `answered` outcome
-// only ever carries an owner answer that passed `answerProblem` when it arrived.
+// only ever carries an owner answer that passed `answerProblem` when it arrived. A
+// `call me` text is part of the silent mix: it can place a call but never answers.
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
@@ -10,6 +11,7 @@ import {
   AskOutcome,
   answerProblem,
   type CallEnd,
+  comparePriority,
   type Decision,
   inQuietHours,
   nextWakeAt,
@@ -55,6 +57,7 @@ type Command =
     }
   | { kind: "call-ended"; result: CallEnd; current: boolean }
   | { kind: "unclear" | "text-sent" | "text-failed" | "cancel"; pick: number }
+  | { kind: "call-me" }
   | {
       kind: "answer";
       pick: number;
@@ -105,6 +108,10 @@ const silentCommand: fc.Arbitrary<Command> = fc.oneof(
       pick: fc.nat(),
     }),
     weight: 2,
+  },
+  {
+    arbitrary: fc.constant({ kind: "call-me" as const }),
+    weight: 1,
   },
 );
 
@@ -189,6 +196,9 @@ function run(settings: PolicySettings, start: number, commands: Command[]): Run 
       case "cancel":
         h.send({ type: command.kind, askId: pick(command.pick) });
         break;
+      case "call-me":
+        h.send({ type: "call-me" });
+        break;
       case "answer": {
         const contacted = h.state.open.filter(
           (q) => q.duplicateOf === undefined && (q.callAttempts > 0 || q.texted),
@@ -221,10 +231,38 @@ function checkInvariants({ h, asks }: Run): void {
   const callTimes: number[] = [];
   const textTimes: number[] = [];
 
+  const within = (times: number[], at: number, window: number) =>
+    times.filter((t) => t > at - window && t <= at).length;
+
   for (const entry of h.log) {
     const calls = ofType(entry.actions, "place-call");
     expect(calls.length).toBeLessThanOrEqual(1);
+    // The owner texted `call me`: the calls that may happen now, by priority.
+    const ownerAsked = entry.event.type === "call-me";
+    const callMeAsks = entry.before.open
+      .filter(
+        (q) =>
+          q.duplicateOf === undefined &&
+          q.ask.kind !== "notify" &&
+          (q.phase === "waiting" || q.phase === "texted") &&
+          Date.parse(q.ask.expiresAt) > entry.at,
+      )
+      .sort((a, b) => comparePriority(a.ask, b.ask));
+    if (
+      ownerAsked &&
+      callMeAsks.length > 0 &&
+      entry.before.call === undefined &&
+      within(callTimes, entry.at, HOUR) < settings.rateLimits.callsPerHour &&
+      within(callTimes, entry.at, DAY) < settings.rateLimits.callsPerDay
+    ) {
+      // With an open ask, no call in progress and a call left, `call me` always calls now.
+      expect(calls.map((call) => call.askIds)).toEqual([
+        callMeAsks.slice(0, settings.maxAsksPerCall).map((q) => q.ask.id),
+      ]);
+    }
     for (const call of calls) {
+      // Every action is fixed in shape: a call names asks, never a number to dial.
+      expect(Object.keys(call).sort()).toEqual(["askIds", "callId", "type"]);
       // One call at a time: a new call only after the previous one ended or was given up on.
       const previous = entry.before.call;
       if (previous !== undefined) {
@@ -233,16 +271,28 @@ function checkInvariants({ h, asks }: Run): void {
       }
       expect(call.askIds.length).toBeGreaterThan(0);
       expect(call.askIds.length).toBeLessThanOrEqual(settings.maxAsksPerCall);
-      // A retry is never called before its delay is over; only new asks join early.
+      // A retry is never called before its delay is over; only new asks join early. The one
+      // exception is a call the owner asked for, which may also call during quiet hours.
       for (const askId of call.askIds) {
         const q = entry.before.open.find((open) => open.ask.id === askId);
-        if (q !== undefined && q.callAttempts > 0) expect(q.readyAt).toBeLessThanOrEqual(entry.at);
+        if (!ownerAsked && q !== undefined && q.callAttempts > 0) {
+          expect(q.readyAt).toBeLessThanOrEqual(entry.at);
+        }
       }
       const quiet = inQuietHours(settings.quietHours, new Date(entry.at));
       for (const askId of call.askIds) {
         const ask = asks.get(askId);
         expect(ask?.kind).not.toBe("notify");
-        if (quiet) expect(ask?.urgent && settings.quietHours.allowUrgentCalls).toBe(true);
+        if (quiet && !ownerAsked) expect(ask?.urgent && settings.quietHours.allowUrgentCalls).toBe(true);
+      }
+      if (ownerAsked) {
+        // `call me` never interrupts a call in progress; one given up on as stuck is hung up first.
+        const previous = entry.before.call;
+        if (previous !== undefined) {
+          expect(entry.at - previous.placedAt).toBeGreaterThanOrEqual(settings.callStuckAfterMs);
+          expect(ofType(entry.actions, "end-call")).toEqual([{ type: "end-call", callId: previous.id }]);
+        }
+        for (const askId of call.askIds) expect(callMeAsks.map((q) => q.ask.id)).toContain(askId);
       }
       callTimes.push(entry.at);
     }
@@ -318,9 +368,7 @@ function checkInvariants({ h, asks }: Run): void {
   }
   expect(h.state.open).toEqual([]);
 
-  // Rate limits hold over every rolling hour and day.
-  const within = (times: number[], at: number, window: number) =>
-    times.filter((t) => t > at - window && t <= at).length;
+  // Rate limits hold over every rolling hour and day, `call me` calls included.
   for (const at of callTimes) {
     expect(within(callTimes, at, HOUR)).toBeLessThanOrEqual(settings.rateLimits.callsPerHour);
     expect(within(callTimes, at, DAY)).toBeLessThanOrEqual(settings.rateLimits.callsPerDay);

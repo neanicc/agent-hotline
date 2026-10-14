@@ -487,6 +487,208 @@ describe("enqueue checks", () => {
   });
 });
 
+describe("call me", () => {
+  const callMe = { type: "call-me" } as const;
+
+  it("calls at once about the open asks, by priority, without waiting out the batch window", () => {
+    const h = new Harness(settings);
+    h.ask({ id: "q1" });
+    h.ask({ id: "p1", kind: "permission", sessionId: "session-2" });
+    h.ask({ id: "n1", kind: "notify", text: "Tests pass." });
+    expect(h.send(callMe)).toEqual([{ type: "place-call", callId: "test-1", askIds: ["p1", "q1"] }]);
+    expect(h.state.open.map((q) => [q.ask.id, q.phase, q.ask.status, q.callAttempts])).toEqual([
+      ["q1", "calling", "in-flight", 1],
+      ["p1", "calling", "in-flight", 1],
+      ["n1", "waiting", "pending", 0],
+    ]);
+    // The notification still goes by text once its batch window ends.
+    expect(h.advance(20 * SECOND)).toEqual([{ type: "send-text", askId: "n1", reason: "notify" }]);
+  });
+
+  it("calls about an ask already texted; the owner can answer on the call or still by text", () => {
+    const h = new Harness(makeSettings({}, { maxCallAttempts: 1 }));
+    h.ask({ id: "q1" });
+    h.ask({ id: "q2", text: "Second question?" });
+    h.advance(20 * SECOND);
+    expect(h.send({ type: "call-ended", callId: "test-1", result: "no-pickup" })).toEqual([
+      { type: "send-text", askId: "q1", reason: "after-call" },
+      { type: "send-text", askId: "q2", reason: "after-call" },
+    ]);
+    expect(h.send(callMe)).toEqual([{ type: "place-call", callId: "test-2", askIds: ["q1", "q2"] }]);
+    const voice = h.send({
+      type: "answer",
+      answer: makeAnswer("q1", { type: "option", option: 1 }, h.now, { channel: "voice" }),
+    });
+    expect(ofType(voice, "resolve").map((r) => [r.askId, r.outcome.outcome])).toEqual([["q1", "answered"]]);
+    // The call ends with q2 open: it goes back to awaiting the text it already has, with no new text.
+    expect(h.send({ type: "call-ended", callId: "test-2", result: "answered" })).toEqual([]);
+    expect(h.state.open.map((q) => [q.ask.id, q.phase])).toEqual([["q2", "texted"]]);
+    const sms = h.send({
+      type: "answer",
+      answer: makeAnswer("q2", { type: "option", option: 2 }, h.now, { channel: "sms" }),
+    });
+    expect(ofType(sms, "resolve").map((r) => [r.askId, r.outcome.outcome])).toEqual([["q2", "answered"]]);
+  });
+
+  it("counts its call as the ask going out, so a retry after it keeps its own delay", () => {
+    // Found by the property suite: the call came before the batch window ended.
+    const h = new Harness(makeSettings({}, { retryDelayMs: 0 }));
+    h.ask({ id: "q1" });
+    h.send(callMe);
+    expect(h.state.open[0]?.readyAt).toBe(h.now);
+    expect(h.send({ type: "call-ended", callId: "test-1", result: "no-pickup" })).toEqual([
+      { type: "place-call", callId: "test-2", askIds: ["q1"] },
+    ]);
+  });
+
+  it("calls about an ask waiting out its retry delay", () => {
+    const h = new Harness(settings);
+    h.ask({ id: "q1" });
+    h.advance(20 * SECOND);
+    h.send({ type: "call-ended", callId: "test-1", result: "no-pickup" });
+    expect(h.send(callMe)).toEqual([{ type: "place-call", callId: "test-2", askIds: ["q1"] }]);
+  });
+
+  it("is ignored while a call is in progress", () => {
+    const h = new Harness(settings);
+    h.ask({ id: "q1" });
+    h.advance(20 * SECOND);
+    h.ask({ id: "q2", text: "Second question?" });
+    expect(h.send(callMe)).toEqual([
+      { type: "ignored", event: "call-me", reason: "a call is already in progress" },
+    ]);
+    expect(h.state.call?.askIds).toEqual(["q1"]);
+    expect(h.state.callTimes).toHaveLength(1);
+
+    // The reason is the live call even when every open ask is already on it.
+    const busy = new Harness(settings);
+    busy.ask({ id: "q1" });
+    busy.advance(20 * SECOND);
+    expect(busy.send(callMe)).toEqual([
+      { type: "ignored", event: "call-me", reason: "a call is already in progress" },
+    ]);
+  });
+
+  it("hangs up a call already given up on as stuck, then calls", () => {
+    const h = new Harness(settings);
+    h.ask({ id: "q1" });
+    h.advance(20 * SECOND);
+    h.now += 15 * MINUTE;
+    expect(h.send(callMe)).toEqual([
+      { type: "end-call", callId: "test-1" },
+      { type: "place-call", callId: "test-2", askIds: ["q1"] },
+    ]);
+  });
+
+  it("overrides quiet hours for that one call only", () => {
+    const h = new Harness(settings, NIGHT);
+    h.ask({ id: "q1" });
+    expect(h.advance(20 * SECOND)).toEqual([{ type: "send-text", askId: "q1", reason: "quiet-hours" }]);
+    expect(h.send(callMe)).toEqual([{ type: "place-call", callId: "test-1", askIds: ["q1"] }]);
+    // Not picked up: no retry call in quiet hours; the ask keeps waiting on its text.
+    expect(h.send({ type: "call-ended", callId: "test-1", result: "no-pickup" })).toEqual([]);
+    expect(h.advance(10 * MINUTE)).toEqual([]);
+    // A new ask is texted, not called: the override covered one call.
+    h.ask({ id: "q2", text: "Second question?" });
+    expect(h.advance(20 * SECOND)).toEqual([{ type: "send-text", askId: "q2", reason: "quiet-hours" }]);
+    expect(ofType(h.allActions, "place-call")).toHaveLength(1);
+  });
+
+  it("keeps a text failure that arrives during the call, then texts again when the call ends", () => {
+    const h = new Harness(makeSettings({}, { maxCallAttempts: 1 }));
+    h.ask({ id: "q1" });
+    h.advance(20 * SECOND);
+    h.send({ type: "call-ended", callId: "test-1", result: "no-pickup" });
+    expect(h.send(callMe)).toEqual([{ type: "place-call", callId: "test-2", askIds: ["q1"] }]);
+    // The after-call text was still going out; it fails while the owner's call rings.
+    expect(h.send({ type: "text-failed", askId: "q1" })).toEqual([]);
+    expect(h.state.open[0]?.texted).toBe(false);
+    const sms = makeAnswer("q1", { type: "option", option: 1 }, h.now, { channel: "sms" });
+    expect(ofType(h.send({ type: "answer", answer: sms }), "ignored")[0]?.reason).toBe(
+      "the ask was never texted",
+    );
+    expect(h.send({ type: "call-ended", callId: "test-2", result: "no-pickup" })).toEqual([
+      { type: "send-text", askId: "q1", reason: "after-call" },
+    ]);
+    expect(h.send({ type: "text-failed", askId: "q1" })).toEqual([
+      {
+        type: "resolve",
+        askId: "q1",
+        outcome: { outcome: "no-answer", askId: "q1", reason: "failed" },
+        status: "expired",
+      },
+    ]);
+  });
+
+  it("reports an unanswered text, not the call-me call, when a texted ask expires", () => {
+    const h = new Harness(settings, NIGHT);
+    h.ask({ id: "q1" });
+    h.advance(20 * SECOND);
+    h.send(callMe);
+    h.send({ type: "text-sent", askId: "q1" });
+    expect(h.send({ type: "call-ended", callId: "test-1", result: "dropped" })).toEqual([]);
+    const [resolved] = ofType(h.advance(30 * MINUTE), "resolve");
+    expect(resolved?.outcome).toEqual({ outcome: "no-answer", askId: "q1", reason: "timeout" });
+  });
+
+  it("keeps texting over the call limit, and says why", () => {
+    const h = new Harness(makeSettings({ rateLimits: { callsPerHour: 1 } }));
+    h.ask({ id: "q1" });
+    h.advance(20 * SECOND);
+    h.send({ type: "call-ended", callId: h.callId, result: "answered" });
+    h.ask({ id: "q2", text: "Second question?" });
+    expect(h.send(callMe)).toEqual([
+      { type: "ignored", event: "call-me", reason: "over the call limit; open asks keep going by text" },
+    ]);
+    expect(h.advance(20 * SECOND)).toEqual([{ type: "send-text", askId: "q2", reason: "call-limit" }]);
+    expect(h.state.callTimes).toHaveLength(1);
+  });
+
+  it("is ignored with nothing open to call about", () => {
+    const empty = new Harness(settings);
+    const ignored = { type: "ignored", event: "call-me", reason: "no open asks to call about" };
+    expect(empty.send(callMe)).toEqual([ignored]);
+    expect(empty.state).toEqual(createQueue("test"));
+
+    // A notification needs no answer, so it is not worth a call.
+    const notified = new Harness(settings);
+    notified.ask({ id: "n1", kind: "notify", text: "Tests pass." });
+    expect(notified.send(callMe)).toEqual([ignored]);
+
+    // An ask past its expiry (no tick since) is ended, not called about.
+    const late = new Harness(settings);
+    late.ask({ id: "q1", ttlMs: 5 * MINUTE });
+    late.now += 5 * MINUTE;
+    expect(late.send(callMe)).toEqual([
+      ignored,
+      {
+        type: "resolve",
+        askId: "q1",
+        outcome: { outcome: "no-answer", askId: "q1", reason: "timeout" },
+        status: "expired",
+      },
+    ]);
+  });
+
+  it("is never an answer: a call-me call that ends without one still denies", () => {
+    const h = new Harness(settings);
+    const p1 = makeAsk({ id: "p1", kind: "permission", risk: "high", createdAt: h.now });
+    h.send({ type: "ask", ask: p1 });
+    expect(h.send(callMe)).toEqual([{ type: "place-call", callId: "test-1", askIds: ["p1"] }]);
+    expect(ofType(h.send(callMe), "ignored")).toHaveLength(1);
+    expect(h.send({ type: "call-ended", callId: "test-1", result: "answered" })).toEqual([
+      { type: "send-text", askId: "p1", reason: "after-call" },
+    ]);
+    // Asked again after the text: a second call, not picked up. Still no decision.
+    expect(h.send(callMe)).toEqual([{ type: "place-call", callId: "test-2", askIds: ["p1"] }]);
+    expect(h.send({ type: "call-ended", callId: "test-2", result: "no-pickup" })).toEqual([]);
+    // The text is still out, so the expiry reports an unanswered text, not the missed call.
+    const [resolved] = ofType(h.advance(30 * MINUTE), "resolve");
+    expect(resolved?.outcome).toEqual({ outcome: "no-answer", askId: "p1", reason: "timeout" });
+    expect(resolved && permissionVerdict(p1, resolved.outcome)).toBe("deny");
+  });
+});
+
 describe("purity", () => {
   it("does not modify the state it is given and returns the same result for the same input", () => {
     const state = Object.freeze(createQueue("test"));
