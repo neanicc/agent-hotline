@@ -2260,6 +2260,242 @@ Template:
     entry to record the owner's direction, and the quotes are what the
     decisions rest on.
 
+## 2026-10-14 — HL-10 Inbound line (#11)
+
+- Change: the owner can call the Hotline number, give the PIN, hear every live
+  session's status and leave one session an instruction; a `status` text gets
+  the same status. New `packages/daemon/src/inbound-line.ts` (status,
+  `send_instruction`, post-call confirmation, lockout texts, inbound call
+  records), `instruction-confirm.ts` (pure confirmation) and `sessions.ts`
+  (session lifetime). Store migration 4 adds `instructions`. Agent API: the
+  inbox now hands queued instructions over, and
+  `POST /v1/sessions/:id/instructions/take` does the same for the MCP server
+  (after `ask_human`) and the Stop hook. Agent definition v5 (inbound steps).
+- Decision: an instruction is held until the post-call transcript backs it,
+  like other voice decisions. Reason: the model writes `instruction`,
+  `owner_words` and `session_number`, the status it read holds agent text, and
+  an instruction becomes an agent's next prompt. The rules as finally
+  shipped (after the security review below): the owner's whole utterance is
+  the instruction plus at most a leading session reference and filler;
+  exactly one session identified outside the instruction's words; the
+  read-back "For session <n>, <name>: <instruction>. Send it?" with a clear yes
+  (the owner's protocol from HL-14c and HL-09c); no retraction in the owner's
+  next reply.
+- Review fixes (security review of 270c8db, coordinator): (1) a digit or
+  number word anywhere near the instruction named a session, so "in session
+  one, add test two" named both 1 and 2 and the model chose; now exactly one
+  identifier, outside the instruction's words. (2) `ownerSaid` matched a
+  substring, so "don't push to main" confirmed "push to main"; now the
+  utterance must be the instruction and nothing else but a session reference
+  and filler. (3) Turns matching model-supplied `otherInstructions` were
+  skipped by the take-back check, so the model could launder "never mind" as
+  another instruction; the parameter and its call site in `inbound-line.ts`
+  are gone, each instruction is checked alone, and retractions are never
+  excused. (4) The read-back and a yes to it are required; the prompt says so
+  (still definition v5, which this PR introduced and nobody has deployed, so no
+  second bump). (5) Owner numbers are compared with `sameE164` (both sides
+  valid E.164 and identical, no normalising) in the ElevenLabs routes, the
+  post-call owner check and the SMS webhook; the PIN is only ever checked
+  through `verify_pin`. (6) One tokeniser, `speechTokens` in providers, for
+  `ownerSaid`, `voice-confirm.ts` and `instruction-confirm.ts`, with tests for
+  curly apostrophes, fullwidth letters and combining marks. The swap leaves
+  voice-confirm's decisions as they were (all 1457 earlier tests pass),
+  except that a combining mark with no precomposed form no longer splits a
+  word. (7) The status's agent text stays fenced and capped (name 60, latest
+  ask 120), and agent turns never count as the owner's words.
+- Review fixes, second round (security review of 570a218, bot staff review
+  and Greptile on 570a218): (1) the take-back check now covers the rest of
+  the call after the owner's yes, and counts doubt markers and bare
+  negations ("no", "don't", "stop", "hold off", "wait") as well as
+  retractions. The only exception is the utterance of another instruction
+  that `confirmInstructions` confirmed on its own (judged together, repeated
+  until stable), and never a turn with a retraction. It over-blocks ("no,
+  that's all" drops the instruction) by decision: the owner can say it again
+  or text it. (2) The queued text is the owner's own words for exactly the
+  validated tokens, cut from the transcript, never the model's `instruction`;
+  redacted first, then `plainInstruction` keeps only letters, digits, spaces
+  and plain punctuation. (3) `takeInstructions` drops instructions past their
+  6 hours in the same transaction instead of delivering them. (4) An ended
+  session's inbox and take routes answer 404, and `check_inbox` registers
+  again at once. (5) `get_status` remembers only the sessions it read out.
+  (6) Held instructions get a fixed id and `addInstruction` is idempotent, so
+  a retried post-call event stores each once. (7) Open-ask counts use every
+  open ask. (8) Held instructions are forgotten after one hour, not two, and
+  forgotten calls stop counting against the caps. The read-back reply uses a
+  fixed yes lexicon and fails closed; switching to HL-09c's reply judge when
+  it lands is a follow-up.
+- Review fixes, third round (bot staff review of aaf01c8, two P2s and two
+  P3s): every word of the read-back reply must now be a yes or one of the few
+  words around one ("yes, send it", "go ahead"), so "send it to the other
+  one" or "fine, but later" is not a yes; a table of near-miss replies tests
+  it, and "sounds good" alone fails closed by decision. The Stop hook checks
+  away mode and saves the continuation count before it takes instructions,
+  so it never marks one delivered that it then cannot pass on. The
+  `requirePhoneNumber` comment is back in place; the restart gap is in
+  docs/daemon.md. Evidence: build passes, test passed 57 files, 1492 tests,
+  three times in a row.
+- Review fixes, fourth round (bot staff review of 146a44a, two P2s): held
+  instructions forgotten after an hour without a post-call event are now
+  audited and texted to the owner as not passed on (a restart still drops
+  them silently; HL-13), and the Stop hook skips the instruction lookup when
+  the payload has no usable session id, so it never registers a throwaway
+  session. P3s left as notes: the inbox GET hands instructions over (the
+  MCP server's `check_inbox` is its only reader on this Mac), the status text
+  carries the latest ask's redacted text to the owner's number, and the
+  lockout catch stays a commented no-op.
+- Review fixes, fifth round (bot staff review of 544dee0, two P2s): hand-over
+  is two steps, `GET /v1/sessions/:id/instructions` (list, with ids) and
+  `POST .../instructions/ack` (mark those ids delivered), replacing the
+  one-step take route. The Stop hook acknowledges only after away mode and its
+  continuation count are settled, and the MCP server just before it returns,
+  so an instruction is never marked delivered and then lost; the inbox, whose
+  response carries them, still acknowledges at once. At the 20-session cap a
+  new registration ends the longest-idle session that has nothing open and
+  has been idle 15 minutes (`session.evicted`) instead of refusing, so
+  restarted agents without a session id cannot lock registrations out for 6
+  hours, while a looping agent cannot evict sessions in use. P3s left as
+  notes: a second `get_status` on one call renumbers sessions (the read-back
+  names the number and session, and the owner confirms it); queuing an
+  instruction cancels the session's open stop even while it is on a live
+  call, by decision, since the instruction replaces the owner's answer to it;
+  the English lexicon follow-up to HL-09c's reply judge stays open.
+  Evidence: build passes, test passed 57 files, 1496 tests.
+- Review fixes, sixth round (bot staff review of 8f5dd39, two P2s and a P3):
+  how many instructions each call holds is saved in `daemon_state`
+  (`inbound.held`, counts only), so after a restart the next start audits
+  them (`restarted`) and texts the owner once; and a session name's words
+  count as a session reference only when the owner named the session by
+  name, never once they gave a number and never a word of the instruction,
+  so an agent folder named like a command cannot split the owner's words.
+  `sessions.ts` declarations are back in order. Evidence: build passes, test
+  passed 57 files, 1498 tests, four of six full runs; the other two each
+  failed one timing test this PR does not touch (`redact.test.ts`, "decodes
+  16 KiB of hostile escapes in under 50 ms", 74 and 150 ms under a load
+  average near 6), which passed five runs alone. Its limit is unchanged.
+  The commit subject of 07d7290 runs past 72 characters; it is pushed, so it
+  stays (no history rewrite).
+- Review fixes, seventh round (bot staff review of 07d7290, two P2s): the MCP
+  server no longer acknowledges instructions once the client gave up on
+  `ask_human` (they stay queued), with a test that fails without the guard;
+  delivery is documented as at most once in docs/mcp.md and docs/hooks.md;
+  and a corpus test pins the over-blocking and refused cases of
+  `confirmInstruction`, so a later edit cannot loosen them unnoticed.
+  Splitting `instruction-confirm.ts` (tokeniser and span, session
+  reference, retraction) is a proposed follow-up. Evidence: build passes,
+  test passed 57 files, 1511 tests, three times in a row.
+- Review fixes, eighth round (bot staff review of cc444bf, one P2 and two
+  P3s): an instruction whose owner words hold a symbol that
+  `plainInstruction` would strip ("use C++") is now refused and the owner
+  texted, never queued altered (P3). Left as is, by decision: the
+  at-most-once window between acknowledging an instruction and the hook
+  printing or the MCP result reaching the agent (P2, which the review marks
+  not a blocker). Closing it needs a receipt from the agent, which neither
+  agent offers; the window is documented, and the failure mode is that the
+  agent does not act. Unfenced agent text in the `status` SMS (P3) stays: it
+  goes only to the owner's number, and no text can approve without a code.
+- Catch-up with main after HL-09c (#54): `voice-confirm.ts` conflicted. HL-09c's
+  read-back confirmation is kept whole; only its local tokeniser now calls
+  the shared `speechTokens`/`normalizeSpeech`. 58 files, 1711 tests pass.
+  The instruction read-back reply still uses the fixed yes lexicon; moving it
+  to HL-09c's reply judge is the follow-up.
+- Review fixes, ninth round (bot staff review of 6ff22c2, one P2 and a P3):
+  session numbers are stable for the whole call (a session keeps the number
+  it was first read out with, new ones get the next unused number, ended
+  ones' numbers are never reused), so a second status cannot shift what
+  "session 2" means; the stale doc comment above `isReference` is gone.
+  P3s left as notes: the SMS status's latest-ask text and the yes words in
+  `FILLER`.
+- Review fixes, tenth round (bot staff review of 3e52c7b, two P2s): the inbox
+  route only lists queued instructions (with ids), and `check_inbox`
+  acknowledges them just before it returns and not once the client gave up,
+  like `ask_human`, so a lost inbox response never loses an instruction. And
+  the owner now gets one text after every call that gave instructions, with
+  counts only: that they were queued, or which were not passed on, since the
+  voice agent said `queued` before the transcript was checked. P3s left: the
+  confirmation heuristics (the live check should watch the drop rate) and a
+  `MAX_REASON` guard that the caps make unreachable. Evidence: 58 files, 1712
+  tests pass.
+- Review fixes, eleventh round (bot staff review of 83fde92): the `status`
+  SMS now carries state and counts only, never agent-written ask text, with
+  an end-to-end test pinning its exact content (P2); the note returned with
+  instructions says the agent's usual permission prompts still apply (P3).
+  The other P2 asked for a table-driven corpus of transcripts that must and
+  must not confirm, which `instruction-confirm.test.ts` already has
+  ("confirmInstruction corpus"). Left as a note: surfacing the session-cap
+  429 in `hotline doctor` (P3, build lane).
+- Review fixes, twelfth round (bot staff review of 93d4e6f): `send_instruction`
+  now forgets expired calls before it reads its own call's memory, and the
+  call being served is never the one evicted for space, so it can never
+  answer `queued` into memory it already let go (P2; a test past the
+  1000-call cap fails with the old order). The review's other P2 was that CI
+  was still pending when it ran; CI on 93d4e6f was green. P3s: the reply-judge
+  follow-up is proposed as an issue below; this entry runs long and the
+  per-round history is also in the PR description.
+- Final review (bot staff review of 4288071): approve with nits, no P0 to P2.
+  P3 fixed: a held instruction keeps a snapshot of the session names the
+  owner had heard. P3s left: the one-hour call memory, already stated in
+  docs/daemon.md, and keeping the matcher's word lists small until the live
+  check shows real drop rates.
+- Decision: sessions are named by number. `get_status` numbers live sessions
+  by registration and remembers, per call, which number is which session;
+  `send_instruction` takes only a number that call's status read out
+  (`unknown-session` otherwise), per the HL-14 comment on #11.
+- Decision: delivery at the Stop hook goes through the hook's continuation
+  path. The hook takes queued instructions before asking anyone (no call for
+  that stop), and a stop already waiting is cancelled by a new instruction
+  for its session, after which the hook takes it. Rejected: answering the stop
+  ask with the instruction through the queue, which accepts a voice answer only
+  for an ask on the call in progress; that would need a core queue change.
+  Hook change kept small for HL-06b: two helpers and one block in `stopHook`.
+- Decision (plan open question 3, recommended default): instructions are
+  delivered at the next ask or Stop hook only; nothing mid-turn.
+- Decision: inbound calls answer no asks. Plan section 4D lists status and
+  instructions only, so answering asks on an inbound call stays out of scope;
+  call orchestration still refuses `submit_answer` on calls it did not place.
+- Decision: session lifetime. A session idle for 6 hours with no open ask and
+  no queued instruction is ended (`session.expired`), checked before each new
+  registration and status read; queued instructions expire after 6 hours; at
+  most 20 live sessions (a new one past that gets 429, an existing one can
+  refresh). Ending a session drops its queued instructions.
+- Decision: caps of 5 instructions per call, 3 waiting per session and 20 in
+  all; instructions redacted and cut to 1000 characters before storage.
+- Decision: a PIN lockout is texted to the owner at most once an hour per
+  direction, quiet hours or not. An instruction that was not confirmed (or
+  whose session ended) gets one text after the call saying it was not passed
+  on, so silence never looks like delivery.
+- Not needed: the HL-09b P3 (OwnerTexts keeping `OrchestratorState.data`
+  across an await). Nothing here reloads orchestrator state, and the new
+  `status` reply path has no await; the instructions live in the store, not
+  the orchestrator state.
+- Evidence: `scripts/ci/run.sh build` passes; `scripts/ci/run.sh test` 57
+  files, 1369 tests, passed three times in a row. After catching up with main
+  (HL-06b #46 and #52, no conflicts outside this log), build passes and test
+  passed 57 files, 1457 tests, three times in a row. After the security
+  review fixes: build passes and test passed 57 files, 1467 tests, three times
+  in a row; mutation checks on the new rules, each reverted: extra words
+  allowed (4 tests fail), several sessions named accepted (1), read-back
+  skipped (2), take-back skipped (3). After the second round: build passes
+  and test passed 57 files, 1475 tests, three times in a row; mutations,
+  each reverted: take-back limited to the next reply (1 test fails), the
+  model's text stored instead of the owner's words (1). New end-to-end tests
+  (`apps/cli/test/inbound-line.test.ts`) run the real daemon routes with the
+  fake voice and SMS providers, then the real hook adapter and MCP server:
+  PIN, status, instruction, delivery at the Stop hook (no call placed) and at
+  `ask_human` and `check_inbox` (once); a waiting stop picking one up; wrong
+  PIN; the lockout text; a stranger's call and text; a spoofed owner number
+  without the PIN; a take-back and a paraphrase never queued; the status text.
+  Mutation checks, each reverted: `confirmInstruction` always confirming
+  (9 tests fail), the Stop hook skipping queued instructions (3 unit tests and
+  1 end-to-end test fail). Scenario suite not built yet (HL-12). Real Claude
+  Code or Codex runs not done: they would use the developer's real config and
+  credentials.
+- Open issues or follow-ups: Codex's MCP server registers without a session
+  id, so a Codex session shows as two sessions in the status (MCP and hooks);
+  an instruction reaches whichever one the owner named. The transcript rules
+  are tested on the fake's transcripts only; real ElevenLabs turn splitting
+  needs the live check. PinGate counters and the held instructions are in
+  memory (HL-13).
+
 ## 2026-10-14 — HL-09d Model-backed reply judge on the owner's agent login (#56)
 
 - Owner direction (autopilot session, recorded on #1 and #56): approvals are
@@ -2362,3 +2598,16 @@ Template:
     pipes and rejects then, whether or not the process ever closes.
   - `JudgeOutput` was a non-strict zod object, so an answer with an extra
     field still approved. It is strict now, like `JUDGE_OUTPUT_SCHEMA`.
+- Catch-up with main after HL-10 (#55): `run.ts` and `orchestrator.ts`
+  conflicts resolved by keeping both sides (the judge and the inbound line).
+  HL-10 made a PIN-verified inbound call able to `submit_answer` while an
+  outbound call's post-call webhook is being judged, and every
+  orchestration step was serialized behind the judge (up to 20 s). The judge
+  now runs outside those steps: `CallOrchestrator.postCall` reads the held
+  answers in one step, awaits `VoiceCalls.judgeHeld` outside the chain, and
+  applies the checks in a second step; a held answer that changed meanwhile
+  is checked by the fast path alone (fails closed). A wiring test holds the
+  judge open and shows a tick and an owner text still run (mutation: judging
+  inside the step fails it). HL-10's inbound instruction confirmation
+  (`instruction-confirm.ts`) keeps its own checks and does not use the reply
+  judge; wiring it in is a follow-up that needs its own scenarios.

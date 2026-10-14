@@ -310,7 +310,12 @@ decision it submits or what `owner_words` it sends.
   calls to the daemon's real routes with the tool secret and signs the post-call
   webhooks, so the scenario suite exercises authentication too.
   `playPending()` plays placed calls in order (a call without a script is not
-  picked up); `inboundCall(script, from)` plays a call in. Transcript turns are
+  picked up); `inboundCall(script, from)` plays a call in. A `status` step's
+  agent turn reads the status out (fences dropped), and an `instruct` step's
+  owner turn is followed by the agent's read-back ("For session <n>:
+  <instruction>. Send it?") and the owner's `reply` (default "yes"; `null`
+  skips the read-back, as a confused model would) before `send_instruction`,
+  then "Sent.", as the definition v5 prompt says (HL-10). Transcript turns are
   timed with the injected `clock`. The fake ends a call
   when a tool answers `end_call: true`, as the prompt tells the real agent to.
 

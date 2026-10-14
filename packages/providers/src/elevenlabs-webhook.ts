@@ -11,6 +11,7 @@
 // more than 5 minutes in the future, and compares in constant time.
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
+import { sameE164 } from "./sms.js";
 
 export const SIGNATURE_HEADER = "elevenlabs-signature";
 /** The SDK's tolerance for an old timestamp. */
@@ -144,7 +145,7 @@ function ownerFrom(
   direction: "inbound" | "outbound" | undefined,
   externalNumber: string | null | undefined,
 ): number | undefined {
-  if (owner === undefined || externalNumber !== owner.ownerNumber) return undefined;
+  if (owner === undefined || !sameE164(externalNumber, owner.ownerNumber)) return undefined;
   if (direction === "outbound") {
     return owner.placedCall(conversationId) ? Number.NEGATIVE_INFINITY : undefined;
   }
@@ -238,12 +239,33 @@ export function parsePostCallEvent(body: unknown, owner?: OwnerContext): PostCal
   return typeof type === "string" ? { type: "other" } : undefined;
 }
 
-function words(text: string): string {
+/** Apostrophe look-alikes a transcript may use, as in "don’t". */
+const APOSTROPHES = /[’‘ʼ`´′＇]/g;
+
+/**
+ * Spoken text in a canonical form for comparing words: NFKC first (fullwidth
+ * letters, ligatures), then lower case, apostrophe look-alikes as `'`, and any
+ * combining mark left over dropped. The one normalisation every owner-words
+ * check uses (`ownerSaid`, the daemon's voice and instruction confirmation),
+ * so the same words can never pass one check and fail another.
+ */
+export function normalizeSpeech(text: string): string {
   return text
-    .toLowerCase()
     .normalize("NFKC")
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
-    .trim();
+    .toLowerCase()
+    .replace(APOSTROPHES, "'")
+    .replace(/\p{M}+/gu, "");
+}
+
+/** The words of `text`: `normalizeSpeech`, then split on anything but letters and digits. */
+export function speechTokens(text: string): string[] {
+  return normalizeSpeech(text)
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((word) => word.length > 0);
+}
+
+function words(text: string): string {
+  return speechTokens(text).join(" ");
 }
 
 /**

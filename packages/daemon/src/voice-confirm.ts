@@ -48,7 +48,13 @@
 // unclear; `judgeVoiceDecision` asks the injected judge about those, with a
 // timeout.
 import type { AskKind, Decision } from "@hotline/core";
-import { MAX_SPOKEN_ASK_LENGTH, ownerSaid, type TranscriptTurn } from "@hotline/providers";
+import {
+  MAX_SPOKEN_ASK_LENGTH,
+  normalizeSpeech,
+  ownerSaid,
+  speechTokens,
+  type TranscriptTurn,
+} from "@hotline/providers";
 
 /** One ask as it was read out on the call, for finding its reading in the transcript. */
 export interface ReadAsk {
@@ -224,18 +230,17 @@ function retracts(text: string): boolean {
 }
 /** Words in an agent turn that ask the owner for a yes, besides a question mark. */
 const ASKS_FOR_YES = wordSet("yes confirm");
-/** Apostrophe look-alikes a transcript may use for "don't". */
-const APOSTROPHES = /[’‘ʼ`´′]/g;
 const QUESTION_MARK = /[?？¿]/u;
 
+// One normalisation for every owner-words comparison (`ownerSaid` and
+// instruction-confirm.ts use it too): NFKC, lower case, apostrophe
+// look-alikes as `'`, combining marks dropped.
 function normalized(text: string): string {
-  return text.toLowerCase().normalize("NFKC").replace(APOSTROPHES, "'");
+  return normalizeSpeech(text);
 }
 
 function tokens(text: string): string[] {
-  return normalized(text)
-    .split(/[^\p{L}\p{N}]+/u)
-    .filter((word) => word.length > 0);
+  return speechTokens(text);
 }
 
 /**

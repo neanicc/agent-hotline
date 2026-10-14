@@ -17,9 +17,9 @@ Pick any ElevenLabs voice for the caller, including a clone of your own
 ([docs/voice.md](docs/voice.md)).
 
 > Status: pre-alpha, Tier 1 in progress. Outbound calls, texts, permission
-> approvals, away mode, the installer and packaging are built and tested against
-> fake providers. The inbound status line (HL-10), the scenario suite (HL-12) and
-> the security pass (HL-13) are still open, and no live call has been recorded
+> approvals, away mode, the inbound status line, the installer and packaging are
+> built and tested against fake providers. The scenario suite (HL-12) and the
+> security pass (HL-13) are still open, and no live call has been recorded
 > yet ([docs/live-check.md](docs/live-check.md)). Progress:
 > [plan section 9](docs/plan.md#9-tickets).
 

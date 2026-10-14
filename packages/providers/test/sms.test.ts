@@ -5,6 +5,7 @@ import {
   MAX_SMS_LENGTH,
   type SmsProvider,
   SmsSendError,
+  sameE164,
   type TwilioSmsOptions,
   TwilioSmsProvider,
 } from "../src/index.js";
@@ -45,6 +46,30 @@ function twilio(overrides: Partial<TwilioSmsOptions> = {}): TwilioSmsProvider {
     ...overrides,
   });
 }
+
+describe("sameE164", () => {
+  it("matches only the identical, valid E.164 number, with no normalising", () => {
+    const owner = "+15555550100";
+    expect(sameE164(owner, owner)).toBe(true);
+    for (const variant of [
+      "15555550100",
+      "+1 555 555 0100",
+      "+1-555-555-0100",
+      "(555) 555-0100",
+      " +15555550100",
+      "+15555550100​",
+      "＋15555550100",
+      undefined,
+      null,
+      "",
+    ]) {
+      expect(sameE164(variant, owner), String(variant)).toBe(false);
+    }
+    // A malformed expected number never matches, not even itself.
+    expect(sameE164("15555550100", "15555550100")).toBe(false);
+    expect(sameE164("", "")).toBe(false);
+  });
+});
 
 describe("TwilioSmsProvider", () => {
   it("posts one form-encoded message to the owner from the Twilio number", async () => {

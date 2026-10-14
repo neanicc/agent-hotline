@@ -3,7 +3,9 @@
 //
 //   POST /v1/sessions                      register a session (or refresh one by agentSessionId)
 //   POST /v1/sessions/:sessionId/asks      queue a question, notification, permission request or stop
-//   GET  /v1/sessions/:sessionId/inbox     owner instructions and this session's recent asks
+//   GET  /v1/sessions/:sessionId/inbox     owner instructions (handed over) and this session's recent asks
+//   GET  /v1/sessions/:sessionId/instructions        the owner's queued instructions, with ids
+//   POST /v1/sessions/:sessionId/instructions/ack    mark those ids delivered
 //   GET  /v1/asks/:askId/outcome           the outcome, waiting up to `waitSeconds` for one
 //   POST /v1/asks/:askId/cancel            the agent stopped waiting; do not call about it
 //
@@ -27,7 +29,15 @@ import { sessionNickname } from "@hotline/providers";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import type { Redactor } from "./redact.js";
-import type { HotlineStore } from "./store.js";
+import {
+  endSession,
+  evictIdleSession,
+  expireStaleSessions,
+  INSTRUCTION_TTL_MS,
+  liveSessions,
+  MAX_LIVE_SESSIONS,
+} from "./sessions.js";
+import { type HotlineStore, type Instruction, InstructionDelivery } from "./store.js";
 
 /** Longest an outcome request may wait before answering "still waiting". */
 export const MAX_OUTCOME_WAIT_SECONDS = 30;
@@ -116,11 +126,30 @@ const OutcomeQuery = z.strictObject({
   waitSeconds: z.coerce.number().int().min(0).max(MAX_OUTCOME_WAIT_SECONDS).default(0),
 });
 
-/** An owner instruction waiting for a session. HL-10 fills this queue; until then it is empty. */
+/**
+ * An owner instruction for a session, handed over once (HL-10): the owner's own
+ * words from a call, confirmed against the post-call transcript. Never agent text.
+ */
 export interface InboxInstruction {
   text: string;
   receivedAt: string;
 }
+
+const AckInstructionsBody = z.strictObject({
+  via: InstructionDelivery,
+  ids: z.array(Id).min(1).max(20),
+});
+
+const inboxInstruction = (instruction: Instruction): InboxInstruction => ({
+  text: instruction.text,
+  receivedAt: instruction.receivedAt,
+});
+
+/** A queued instruction as the peek lists it: with its id, to acknowledge it by. */
+const listedInstruction = (instruction: Instruction) => ({
+  id: instruction.id,
+  ...inboxInstruction(instruction),
+});
 
 export type OutcomeResponse =
   | { state: "waiting"; ask: Ask }
@@ -128,7 +157,8 @@ export type OutcomeResponse =
 
 export interface InboxResponse {
   session: Session;
-  instructions: InboxInstruction[];
+  /** Queued, not handed over: acknowledge them by id to deliver them. */
+  instructions: (InboxInstruction & { id: string })[];
   asks: { ask: Ask; outcome?: AskOutcome }[];
 }
 
@@ -257,6 +287,36 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
     stopWatching();
   });
 
+  /** A session's queued instructions, oldest first; one past its lifetime is dropped here, never listed. */
+  const queuedInstructions = (sessionId: string): Instruction[] => {
+    const now = clock();
+    const { queued, expired } = store.peekInstructions(
+      sessionId,
+      now,
+      new Date(now.getTime() - INSTRUCTION_TTL_MS),
+    );
+    for (const _ of expired) store.appendAudit("instruction.expired", {}, now, { sessionId });
+    return queued;
+  };
+
+  /** Marks `ids` delivered (those still queued and in their lifetime), each with an audit entry. */
+  const ackInstructions = (
+    sessionId: string,
+    ids: readonly string[],
+    via: InstructionDelivery,
+  ): InboxInstruction[] => {
+    const live = new Set(queuedInstructions(sessionId).map((instruction) => instruction.id));
+    const now = clock();
+    const acked = store.ackInstructions(
+      sessionId,
+      ids.filter((id) => live.has(id)),
+      via,
+      now,
+    );
+    for (const _ of acked) store.appendAudit("instruction.delivered", { via }, now, { sessionId });
+    return acked.map(inboxInstruction);
+  };
+
   /** Resolves when `askId` changes, `ms` pass, the client goes away or the daemon closes. */
   const changeOrTimeout = (askId: string, ms: number, reply: FastifyReply) =>
     new Promise<void>((resolve) => {
@@ -285,6 +345,15 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
     const { agent, cwd, agentSessionId } = body.data;
     const now = clock().toISOString();
     const existing = agentSessionId === undefined ? undefined : store.findLiveSession(agent, agentSessionId);
+    if (existing === undefined) {
+      // A killed agent never ends its session: end the stale ones before counting.
+      expireStaleSessions(store, clock());
+      // At the cap, a long-idle session with nothing open makes room; otherwise 429.
+      if (liveSessions(store).length >= MAX_LIVE_SESSIONS && !evictIdleSession(store, clock())) {
+        store.appendAudit("session.refused", { agent, reason: "too many live sessions" }, clock());
+        return reply.code(429).send({ error: "too many live sessions" });
+      }
+    }
     const session: Session = existing
       ? { ...existing, cwd, lastSeenAt: now }
       : {
@@ -428,22 +497,8 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
     const session = store.getSession(params.data.sessionId);
     if (session === undefined) return reply.code(404).send({ error: "unknown session" });
     if (session.state === "ended") return { ended: false };
-    // Its open asks go too: nobody should be called for an agent that left.
-    const open = store.listAsks(["pending", "in-flight"]).filter((ask) => ask.sessionId === session.id);
-    for (const ask of open) {
-      if (store.setAskStatus(ask.id, "cancelled")) {
-        store.appendAudit("ask.cancelled", { kind: ask.kind, by: "session-end" }, clock(), {
-          askId: ask.id,
-          sessionId: session.id,
-        });
-      }
-    }
-    store.putSession({
-      ...(store.getSession(session.id) ?? session),
-      state: "ended",
-      lastSeenAt: clock().toISOString(),
-    });
-    store.appendAudit("session.ended", {}, clock(), { sessionId: session.id });
+    // Its open asks and queued instructions go too: nobody should be called for an agent that left.
+    endSession(store, session.id, clock(), "agent");
     return { ended: true };
   });
 
@@ -466,12 +521,52 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
     const params = SessionParams.safeParse(request.params);
     if (!params.success) return invalid(reply, params.error);
     const session = store.getSession(params.data.sessionId);
-    if (session === undefined) return reply.code(404).send({ error: "unknown session" });
+    // An ended session (say, expired while idle) is unknown: its client registers again.
+    if (session === undefined || session.state === "ended") {
+      return reply.code(404).send({ error: "unknown session" });
+    }
     await settleDue(store.listSessionAsks(session.id, INBOX_ASK_LIMIT));
     const asks = store.listSessionAsks(session.id, INBOX_ASK_LIMIT).map(outcomeOf);
     const seen = { ...(store.getSession(session.id) ?? session), lastSeenAt: clock().toISOString() };
     store.putSession(seen);
-    const response: InboxResponse = { session: seen, instructions: [], asks };
+    // The inbox lists the owner's queued instructions but hands nothing over:
+    // its reader acknowledges what it passes on (`.../instructions/ack`), so a
+    // lost response never loses an instruction.
+    const instructions = queuedInstructions(session.id).map(listedInstruction);
+    const response: InboxResponse = { session: seen, instructions, asks };
     return response;
+  });
+
+  // After an ask (the MCP server) and around a stop (the Stop hook): the
+  // session's next ask or Stop hook is where an owner instruction is
+  // delivered. Two steps, so a reader acknowledges only what it is about to
+  // pass on: GET lists the queued ones with their ids, POST .../ack marks
+  // those ids delivered and returns the ones that still were queued.
+  const liveSession = (sessionId: string, reply: FastifyReply) => {
+    const session = store.getSession(sessionId);
+    if (session === undefined || session.state === "ended") {
+      void reply.code(404).send({ error: "unknown session" });
+      return undefined;
+    }
+    store.putSession({ ...session, lastSeenAt: clock().toISOString() });
+    return session;
+  };
+
+  app.get("/v1/sessions/:sessionId/instructions", async (request, reply) => {
+    const params = SessionParams.safeParse(request.params);
+    if (!params.success) return invalid(reply, params.error);
+    const session = liveSession(params.data.sessionId, reply);
+    if (session === undefined) return reply;
+    return { instructions: queuedInstructions(session.id).map(listedInstruction) };
+  });
+
+  app.post("/v1/sessions/:sessionId/instructions/ack", async (request, reply) => {
+    const params = SessionParams.safeParse(request.params);
+    if (!params.success) return invalid(reply, params.error);
+    const body = AckInstructionsBody.safeParse(request.body);
+    if (!body.success) return invalid(reply, body.error);
+    const session = liveSession(params.data.sessionId, reply);
+    if (session === undefined) return reply;
+    return { instructions: ackInstructions(session.id, body.data.ids, body.data.via) };
   });
 }

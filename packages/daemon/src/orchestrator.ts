@@ -91,6 +91,8 @@ export interface CallOrchestratorOptions {
   judge?: ReplyJudge;
   /** How long to wait for `judge`; default `JUDGE_TIMEOUT_MS`. */
   judgeTimeoutMs?: number;
+  /** The reply to the owner's `status` text (the inbound line's `statusText`). */
+  status?: () => string;
 }
 
 export class CallOrchestrator {
@@ -131,6 +133,7 @@ export class CallOrchestrator {
       ...(options.sms === undefined ? {} : { sms: options.sms }),
       redact: options.redact,
       ...(options.newCode === undefined ? {} : { newCode: options.newCode }),
+      ...(options.status === undefined ? {} : { status: options.status }),
       log,
       process: processEvent,
     });
@@ -231,9 +234,18 @@ export class CallOrchestrator {
     return this.#run(async () => this.#voice.submitAnswer(answer));
   }
 
-  /** A verified post-call webhook; see `VoiceCalls.postCall`. */
-  postCall(event: Exclude<PostCallEvent, { type: "other" }>, receivedAt: Date): Promise<void> {
-    return this.#run(() => this.#voice.postCall(event, receivedAt));
+  /**
+   * A verified post-call webhook; see `VoiceCalls.postCall`. The held answers
+   * are read in turn with the other steps, the reply judge runs outside them
+   * (`VoiceCalls.judgeHeld`), and its checks are applied in turn again: a slow
+   * judge never holds a tool call on another call, a text or a tick.
+   */
+  async postCall(event: Exclude<PostCallEvent, { type: "other" }>, receivedAt: Date): Promise<void> {
+    // `judgeHeld` reads the held answers before its first await, so inside this step.
+    const { judging } = await this.#run(async () => ({ judging: this.#voice.judgeHeld(event) }));
+    // A failure leaves no checks: `postCall` then uses the fast path alone.
+    const judged = await judging.catch(() => new Map());
+    return this.#run(() => this.#voice.postCall(event, receivedAt, judged));
   }
 
   /**

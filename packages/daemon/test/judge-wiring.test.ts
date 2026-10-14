@@ -129,4 +129,48 @@ describe("the reply judge in the running daemon (HL-09d)", () => {
     expect(runsBeforePostCall).toBe(0);
     expect(host.runs).toHaveLength(1);
   });
+
+  it("a slow judge holds no other orchestration step: ticks and texts go on while it runs", async () => {
+    const host = scriptedModel();
+    let started = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const run = host.run.bind(host);
+    host.run = async (file, args, options) => {
+      started++;
+      await gate;
+      return run(file, args, options);
+    };
+    hotline = await startHotline({ config: CHOSEN, judgeHost: host });
+    const h = hotline;
+    const session = await h.registerSession();
+    const request = h.addAsk(session, {
+      kind: "permission",
+      toolName: "Bash",
+      text: "pnpm test",
+      risk: "low",
+    });
+    await h.advance(BATCH_MS);
+    h.voice.script(scriptedHuman.confirms(1, "sure", "yeah let's ship that one"));
+    const playing = h.voice.playPending();
+    for (let waited = 0; started === 0 && waited < 200; waited++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(started).toBe(1);
+    // The judge is still thinking; other steps are not queued behind it.
+    const blocked = new Promise<string>((resolve) => setTimeout(() => resolve("blocked"), 1_000));
+    expect(await Promise.race([h.orchestrator.tick().then(() => "ran"), blocked])).toBe("ran");
+    expect(await Promise.race([h.text("status", { instantly: true }).then(() => "ran"), blocked])).toBe(
+      "ran",
+    );
+    release();
+    await playing;
+    await h.settle();
+    const result = await h.outcome(request.id);
+    expect(result.outcome === undefined ? "waiting" : permissionVerdict(request, result.outcome)).toBe(
+      "allow",
+    );
+  });
 });

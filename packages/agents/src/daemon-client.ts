@@ -46,9 +46,17 @@ export const OutcomeState = z.discriminatedUnion("state", [
 ]);
 export type OutcomeState = z.infer<typeof OutcomeState>;
 
+/** An instruction the owner gave this session by phone, in their own words. Handed over once. */
+export const OwnerInstruction = z.object({ text: z.string().min(1), receivedAt: z.string() });
+export type OwnerInstruction = z.infer<typeof OwnerInstruction>;
+/** A queued instruction as the daemon lists it, with the id to acknowledge it by. */
+export const ListedInstruction = OwnerInstruction.extend({ id: Id });
+export type ListedInstruction = z.infer<typeof ListedInstruction>;
+
 export const Inbox = z.object({
   session: Session,
-  instructions: z.array(z.object({ text: z.string(), receivedAt: z.string() })),
+  // Queued, not handed over: acknowledge them by id to deliver them.
+  instructions: z.array(ListedInstruction),
   asks: z.array(z.object({ ask: Ask, outcome: AskOutcome.optional() })),
 });
 export type Inbox = z.infer<typeof Inbox>;
@@ -72,6 +80,18 @@ export interface HotlineDaemon {
   outcome(askId: string, waitSeconds: number, signal?: AbortSignal): Promise<OutcomeState>;
   cancelAsk(askId: string): Promise<boolean>;
   inbox(sessionId: string): Promise<Inbox>;
+  /** The owner's queued instructions for the session, oldest first, with ids. Hands nothing over. */
+  peekInstructions(sessionId: string): Promise<ListedInstruction[]>;
+  /**
+   * Marks instructions `ids` delivered, after an ask (`ask`) or at a Stop hook
+   * (`stop`), and returns those that still were queued. Acknowledge only what
+   * is about to be passed on; each is delivered once.
+   */
+  ackInstructions(
+    sessionId: string,
+    ids: readonly string[],
+    via: "ask" | "stop" | "inbox",
+  ): Promise<OwnerInstruction[]>;
   /** Marks the session ended and cancels its open asks. */
   endSession(sessionId: string): Promise<boolean>;
 }
@@ -90,6 +110,8 @@ const SessionResponse = z.object({ session: Session });
 const AskResponse = z.object({ ask: Ask });
 const CancelResponse = z.object({ cancelled: z.boolean() });
 const EndResponse = z.object({ ended: z.boolean() });
+const InstructionsResponse = z.object({ instructions: z.array(OwnerInstruction) });
+const ListedResponse = z.object({ instructions: z.array(ListedInstruction) });
 
 function validPort(port: number): boolean {
   return Number.isInteger(port) && port >= 1 && port <= 65535;
@@ -165,6 +187,27 @@ export class DaemonClient implements HotlineDaemon {
       path: `/v1/sessions/${encodeURIComponent(Id.parse(sessionId))}/inbox`,
       schema: Inbox,
     });
+  }
+
+  peekInstructions(sessionId: string): Promise<ListedInstruction[]> {
+    return this.call({
+      method: "GET",
+      path: `/v1/sessions/${encodeURIComponent(Id.parse(sessionId))}/instructions`,
+      schema: ListedResponse,
+    }).then((response) => response.instructions);
+  }
+
+  ackInstructions(
+    sessionId: string,
+    ids: readonly string[],
+    via: "ask" | "stop" | "inbox",
+  ): Promise<OwnerInstruction[]> {
+    return this.call({
+      method: "POST",
+      path: `/v1/sessions/${encodeURIComponent(Id.parse(sessionId))}/instructions/ack`,
+      body: { via, ids },
+      schema: InstructionsResponse,
+    }).then((response) => response.instructions);
   }
 
   private resolveConnection(): Promise<DaemonConnection> {

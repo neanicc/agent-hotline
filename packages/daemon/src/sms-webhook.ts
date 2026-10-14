@@ -18,7 +18,7 @@
 //
 // Bodies, numbers and message text are never logged; only the message SID and
 // whether the sender was the owner.
-import { type FormParams, prepareSmsText, validTwilioSignature } from "@hotline/providers";
+import { type FormParams, prepareSmsText, sameE164, validTwilioSignature } from "@hotline/providers";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { WebhookRoute } from "./server.js";
 
@@ -183,7 +183,9 @@ export function twilioSmsRoute(options: TwilioSmsRouteOptions): WebhookRoute {
   ): Promise<string | undefined> {
     const receivedAt = options.clock();
     const optOutType = params.get("OptOutType") || undefined;
-    const fromOwner = params.get("From") === options.ownerNumber && params.get("To") === options.smsNumber;
+    // Strict E.164 on both sides: a number variant never collides with the owner's.
+    const fromOwner =
+      sameE164(params.get("From"), options.ownerNumber) && sameE164(params.get("To"), options.smsNumber);
     if (!fromOwner) {
       request.log.info({ messageSid, sender: "other" }, "sms received");
       options.onOtherSender?.(messageSid);
