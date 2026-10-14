@@ -41,6 +41,11 @@ code disagree, the code wins and this document is out of date.
   Trusted to deliver calls and texts and to sign their webhooks; not trusted with
   more than short redacted summaries. The voice model is treated as able to make
   things up: its tool calls are checked against the post-call transcript.
+- **The reply judge's model (HL-09d).** The owner's own agent provider (Claude
+  Code or Codex on the owner's login, or the Anthropic API with the owner's
+  key) sees only the owner's redacted reply turns to a read-back, never
+  agent-written text. Its `agreed` can only be taken away by the post-check,
+  never added; an error or timeout is "not confirmed".
 - **The network and the tunnel.** Untrusted. Anyone on the internet can reach the
   tunnel's public URL and send anything to it.
 
@@ -81,7 +86,7 @@ them. Scenario names are from the suite in `eval/` ([eval.md](eval.md)).
 | **Owner only.** Outbound goes only to the owner; other callers and texters get a generic rejection; inbound needs the PIN first | Providers take the owner's number at construction and have no recipient argument (`providers/src/sms.ts`, `twilio-sms.ts`, `elevenlabs-voice.ts`); `twilioSmsRoute` (`fromOwner`, `GENERIC_SMS_REPLY`); `elevenLabsRoutes` (`ownerOnCall`, PIN before `get_status`, `send_instruction`, inbound `submit_answer`); `PinGate` (`pin.ts`) | `providers/test/sms.test.ts` "has no way to text anyone but the owner"; `daemon/test/sms-webhook.test.ts` "gives any other number one generic reply and never reaches the handler"; `elevenlabs-webhook.test.ts` "refuses an answer on an inbound call until the PIN, since caller ID can be spoofed"; scenarios `inbound-other-number-rejected`, `inbound-wrong-pin-rejected` |
 | **Verify every webhook.** Signature or secret before parsing; bare `403`, logged without body | `buildWebhookServer` (`server.ts`: no verifier means `403`, precheck before the body, only a literal `true` passes); `validTwilioSignature`; `sameSecret` for tool calls; `freshPostCallHeader` and `validPostCallSignature` for post-call | `server.test.ts` "reject with 403 when the verifier returns %s"; `exposure.test.ts` "refuses every public route without its provider's proof, with the same bare 403"; `sms-webhook.test.ts` "refuses a wrong signature, a wrong auth token and another account"; scenarios `unsigned-webhook-rejected`, `replayed-webhook-rejected` |
 | **Only `/hooks/*` is public; agent API is local and token-gated** | `LOOPBACK_HOST` (not configurable), two ports, `buildAgentApi`'s `onRequest` hook (Host, then token, on every route and on 404s) | `exposure.test.ts` (HL-13): with Twilio and ElevenLabs fully configured, every route each listener registered is audited (public routes under `/hooks`, every agent API route `401` without the token, `403` with a foreign Host, `404` on the public port); `server.test.ts` "bind 127.0.0.1 only, on two different ports" |
-| **Decisions come from the human.** Recorded only from the owner's words or keypresses, transcript excerpt stored; agent text never approves; the voice model cannot invent a decision | `answerProblem` (core contracts) and `HotlineStore.recordAnswer` re-checking it; `confirmVoiceDecision` and `replyVerdict` (`voice-confirm.ts`, read-back plus a clear yes, `FailClosedJudge`); `smsAnswer` (code required); `confirmInstructions` | `orchestration.test.ts` "agent text claiming approval still needs the owner's words"; `voice-confirm.test.ts` "never takes a caller's or the agent's words"; HL-13's `sms-reply.property.test.ts` and `voice-reply.property.test.ts`; scenario `agent-text-cannot-self-approve` |
+| **Decisions come from the human.** Recorded only from the owner's words or keypresses, transcript excerpt stored; agent text never approves; the voice model cannot invent a decision | `answerProblem` (core contracts) and `HotlineStore.recordAnswer` re-checking it; `confirmVoiceDecision` and `replyVerdict` (`voice-confirm.ts`, read-back plus a clear yes); replies the fast path cannot decide go to the reply judge (`reply-judge.ts`, HL-09d), whose `agreed` is vetoed by `checkedVerdict` and `vetoesAgreement` on any condition, correction or negation, and fails closed on error or timeout; `smsAnswer` (code required); `confirmInstructions` | `orchestration.test.ts` "agent text claiming approval still needs the owner's words"; `voice-confirm.test.ts` "never takes a caller's or the agent's words"; HL-13's `sms-reply.property.test.ts` and `voice-reply.property.test.ts`; scenario `agent-text-cannot-self-approve` |
 | **High risk needs the PIN or a confirming text** | `classifyPermission` sets the class; `answerProblem` refuses a high-risk `allow` with `confirmation: "none"`; the hook keeps the stricter of its own and the daemon's class | `contracts.test.ts` "needs the PIN or a confirming text for a high-risk approval"; `hook-adapter.test.ts` "never lets a daemon that stored 'low' lower the hook's own high-risk class"; HL-13's `permission-risk.property.test.ts`; scenario `high-risk-needs-pin` |
 | **Silence is not consent** | Queue `noAnswer` paths and `permissionVerdict` (core); every hook failure path denies (`hook-adapter.ts`) | `queue.property.test.ts` "silence never yields approval..."; `hook-adapter.test.ts` "denies every no-answer reason"; scenarios `silence-denies`, `unclear-answer-denies` and the self-test |
 | **Send third parties the minimum.** Redact before anything leaves the machine | `createRedactor` (`redact.ts`) with the daemon's own secrets registered; `callVariables` and `describeAsk` (`MAX_SPOKEN_ASK_LENGTH`); `prepareSmsText`; the hook names unknown tool arguments, never their values | `redact.test.ts`; HL-13's `redact.property.test.ts`; `elevenlabs-voice.test.ts` "sends only redacted, length-capped summaries"; scenario `secrets-redacted-before-send` |
@@ -120,18 +125,21 @@ cap. Gaps it found, all failing safe (none approves anything), are listed under
 
 | File | Property | Bugs it found, fixed failing closed |
 | --- | --- | --- |
-| `packages/daemon/test/redact.property.test.ts` | Random registered secrets, values under secret-looking names, PINs and fake phone numbers embedded in JSON, nested JSON, form-encoded, URL query, `.env` (quoted, unquoted, `export`), YAML, HTTP-header and logfmt text never leave a 6-character piece in the output; random 16 KiB hostile shapes stay within a fixed ratio of benign text | A value after an encoded segment that opened a quote (`"token":"+,rest"`) kept its tail; an unquoted value stopped at a quote (`token=a'rest`); the JWT pattern was quadratic on `eyJ-eyJ-...` |
+| `packages/daemon/test/redact.property.test.ts` | Random registered secrets, values under secret-looking names, PINs and fake phone numbers embedded in JSON, nested JSON, form-encoded, URL query, `.env` (quoted, unquoted, `export`), YAML, HTTP-header and logfmt text never leave a 6-character piece in the output; random 16 KiB hostile shapes are redacted in linear time | A value after an encoded segment that opened a quote (`"token":"+,rest"`) kept its tail; an unquoted value stopped at a quote (`token=a'rest`); the JWT pattern was quadratic on `eyJ-eyJ-...` |
 | `packages/core/test/permission-risk.property.test.ts` | Obfuscated variants of 50+ high-risk commands (wrappers, quoting, `$'...'`, `${...}`, braces, globs, case, fullwidth and Cyrillic lookalikes, zero-width and no-break spaces, absolute command paths, attached option values, `cd`, environment prefixes, NFD) never classify as low; Codex argv arrays likewise; for random command lines the classifier calls low, `bash -n` and `zsh -n` must accept them and zsh's own word split (`${(z)...}`, the command passed as data, never run) must match `splitShell` | `git show HEAD:.env` was low (a revision's `:` was not a path boundary); `; ls`, `ls ;;` and `ls\n;` were low though bash refuses them; `ls &>>x` was low though macOS's bash 3.2 refuses it; `rg` options were a denylist, so `--hostname-bin` (runs a program) and unknown options were low |
 | `packages/core/test/sms-reply.property.test.ts` | Random and word-salad texts approve only as `<yes word> <that request's code>`; nothing approves when no code was sent; conditional, negated, hedged or wrong-code yeses never approve | none |
-| `packages/daemon/test/voice-reply.property.test.ts` | The voice fast path never agrees with a reply holding a refusal, negation, condition or hedge, in one turn or split across turns; a random reply it agrees with has no doubt marker | none |
+| `packages/daemon/test/voice-reply.property.test.ts` | The voice fast path never agrees with a reply holding a refusal, negation, condition or hedge, in one turn or split across turns; a random reply it agrees with has no doubt marker; whatever the model judge says, a reply with a condition, correction or negation is never agreed | none |
 | `packages/daemon/test/exposure.test.ts` | The exposure audit above | none |
 
-The timing checks use `test/linear-time.ts`: the fastest of seven interleaved
-runs on hostile text against benign text of the same length, at most 100 times
-slower. On the dev Mac benign 16 KiB takes about 0.19 ms, the slowest linear
-hostile shape about 40 times that, and the quadratic pattern HL-04 removed
-about 440 times. The old "under 50 ms" checks, which flaked under parallel load,
-now use the same ratio.
+The timing checks use `test/linear-time.ts`, which compares timings taken side
+by side (the fastest of seven interleaved runs each), so load slows both sides
+alike: hostile text against benign text of the same length (at most 100 times
+slower), and the full hostile text against its first quarter (at most 8 times
+longer; linear work grows about 4 times, quadratic about 16). A check fails
+only when both say quadratic. On the dev Mac benign 16 KiB takes about 0.19 ms,
+the slowest linear hostile shapes 40 to 50 times that, and the quadratic
+pattern HL-04 removed about 440 times. The old "under 50 ms" checks, which
+flaked under parallel load, now use the same helper.
 
 The bash differential only checks syntax, since bash has no way to split words
 without running them. zsh is not installed on Ubuntu runners, so there the zsh

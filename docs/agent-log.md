@@ -2825,11 +2825,15 @@ Template:
   value after a removed encoded segment (`"token":"+,rest"`), stopped an unquoted
   value at a quote (`token=a'rest`), and its JWT pattern was quadratic on
   `eyJ-eyJ-...` (now anchored after a non-token character).
-- Decision: linear-time checks compare hostile text with benign text of the
-  same length (fastest of 7 interleaved runs, at most 100 times slower) instead
-  of an absolute 50 ms, which flaked under load (HL-10). Measured on the dev
-  Mac: benign 16 KiB about 0.19 ms; slowest linear hostile shape about 40x; the
+- Decision: linear-time checks replace the absolute 50 ms, which flaked under
+  load (HL-10), with two side-by-side measures (fastest of 7 interleaved runs):
+  hostile against benign text of the same length (at most 100x) and the full
+  hostile text against its first quarter (at most 8x; linear grows about 4x,
+  quadratic about 16x). A check fails only when both say quadratic: with the
+  ratio alone, a linear `%E0,9` shape (about 50x idle) once crossed 100x in a
+  full parallel run. Measured on the dev Mac: benign 16 KiB about 0.19 ms; the
   quadratic truncation HL-04 removed about 440x; the old 50 ms was about 270x.
+  Restoring that truncation or the old JWT pattern still fails the checks.
 - Decision: the default webhook body read before verification drops from
   256 KiB to 64 KiB (P3 from the HL-07 review); post-call keeps its own 1 MiB.
 - Decision: a bare "no" to a stop ask stays `done` (P3 from HL-07): the agent
@@ -2842,11 +2846,11 @@ Template:
   dropping the quoted continuation, restoring `\beyJ`, restoring the quadratic
   truncation, and disabling registered-secret, PIN and phone passes each fail a
   redactor test; approving a text yes without its code or with trailing words
-  fails the text-reply fuzz; ignoring doubt words fails the voice fuzz; a token
+  fails the text-reply fuzz; ignoring doubt words fails the voice fuzz; dropping `vetoesAgreement` from `checkedVerdict` fails the reply-judge fuzz (HL-09d, merged during this ticket); a token
   bypass on one route and an extra route outside `/hooks` fail the exposure
   audit; restoring 256 KiB fails the body-limit test.
 - Evidence: `scripts/ci/run.sh build` passes; `scripts/ci/run.sh test` passed
-  5 runs in a row (65 files, 1814 tests). The scenario suite stage could not be
+  6 runs in a row after catching up with main (68 files, 1935 tests). The scenario suite stage could not be
   run locally (the sandbox refuses command lines containing its stage name);
   hosted CI is the gate.
 - Deferred (needs #69, HL-13a, which changes the same files): persist the PIN

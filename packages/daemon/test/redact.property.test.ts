@@ -14,7 +14,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { createRedactor, MAX_REDACTED_TEXT } from "../src/index.js";
-import { hostileRatio, MAX_HOSTILE_RATIO } from "./linear-time.js";
+import { linearTime } from "./linear-time.js";
 
 /** The shortest piece of a secret that counts as a leak. */
 const WINDOW = 6;
@@ -323,13 +323,13 @@ describe("redactor fuzzing: linear time", () => {
     "0123456789abcdef",
   );
 
-  it("redacts random 16 KiB hostile shapes within a fixed ratio of benign text", () => {
+  it("redacts random 16 KiB hostile shapes in linear time", () => {
     fc.assert(
       fc.property(fc.array(piece, { minLength: 1, maxLength: 6 }), (parts) => {
         const unit = parts.join("");
         const hostile = unit.repeat(Math.ceil(MAX_REDACTED_TEXT / unit.length)).slice(0, MAX_REDACTED_TEXT);
-        const ratio = hostileRatio((input) => known.text(input), hostile);
-        expect(ratio, JSON.stringify(unit)).toBeLessThan(MAX_HOSTILE_RATIO);
+        const measured = linearTime((input) => known.text(input), hostile);
+        expect(measured, JSON.stringify(unit)).toMatchObject({ linear: true });
       }),
       { numRuns: 80 },
     );
@@ -341,7 +341,7 @@ describe("redactor fuzzing: linear time", () => {
     "redacts 16 KiB of %j in linear time",
     (unit) => {
       const hostile = unit.repeat(Math.ceil(MAX_REDACTED_TEXT / unit.length)).slice(0, MAX_REDACTED_TEXT);
-      expect(hostileRatio((input) => known.text(input), hostile)).toBeLessThan(MAX_HOSTILE_RATIO);
+      expect(linearTime((input) => known.text(input), hostile)).toMatchObject({ linear: true });
     },
   );
 });
