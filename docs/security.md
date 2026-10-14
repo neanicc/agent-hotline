@@ -4,7 +4,7 @@ Agent Hotline is a phone line that can steer coding agents on the owner's Mac,
 so it is a remote control for that machine. This document says what Hotline
 protects, from whom, where each rule is enforced and tested, and which risks
 are accepted for Tier 1. It is the HL-13 security pass (#14). The
-[README](../README.md#security-model) has the short version for users;
+[README](../README.md#security-and-privacy) has the short version for users;
 [daemon.md](daemon.md), [hooks.md](hooks.md) and [contracts.md](contracts.md)
 have the mechanism details this document links to.
 
@@ -48,7 +48,7 @@ code disagree, the code wins and this document is out of date.
   chosen explicitly) sees the owner's redacted reply turns to a read-back, never
   agent-written text, in an isolated run that gets none of Hotline's
   credentials. Its `agreed` can only be taken away by the post-check, never
-  added; an error or timeout is "not confirmed" ([README](../README.md#security-model)).
+  added; an error or timeout is "not confirmed" ([README](../README.md#security-and-privacy)).
 - **The network and the tunnel.** Untrusted. Anyone on the internet can reach the
   tunnel's public URL and send anything to it.
 
