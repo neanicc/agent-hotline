@@ -2708,3 +2708,8 @@ Template:
     both ends is refused; an initiation failure ElevenLabs does not have is
     ignored). The run and harness configs gained `call_sid` and
     `agentPhoneNumberId`, which real ElevenLabs tool calls and configs carry.
+  - After catching up with HL-12's scenario suite, its harness got the same
+    backing as the daemon's: the config sets `voice.agentPhoneNumberId`, and
+    `text()` records each owner text in the fake Twilio's log (timed by the
+    fake clock) before posting the webhook. No scenario or pull check changed;
+    the suite prints 22 PASS lines and `THRESHOLDS: PASS` in CI mode.
