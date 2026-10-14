@@ -126,7 +126,9 @@ service, database server or telemetry without a plan change.
   timeout returns "no answer" to the agent: permission requests are denied,
   questions are reported unanswered. Never default to approve.
 - **Send third parties the minimum.** Only short summaries go to Twilio or
-  ElevenLabs. Secrets (API keys, tokens, private keys, `.env` values, passwords)
+  ElevenLabs, and only the owner's short reply text goes to the reply judge's
+  provider (the owner's own Claude Code or Codex login, or the Anthropic API if
+  configured). Secrets (API keys, tokens, private keys, `.env` values, passwords)
   are redacted before anything leaves the machine; file contents are never read
   out wholesale. Transcripts and audit logs stay local.
 - **Bounded noise and cost.** Rate limits, quiet hours (text instead of call),
