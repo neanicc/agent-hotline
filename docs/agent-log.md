@@ -2431,6 +2431,11 @@ Template:
   was still pending when it ran; CI on 93d4e6f was green. P3s: the reply-judge
   follow-up is proposed as an issue below; this entry runs long and the
   per-round history is also in the PR description.
+- Final review (bot staff review of 4288071): approve with nits, no P0 to P2.
+  P3 fixed: a held instruction keeps a snapshot of the session names the
+  owner had heard. P3s left: the one-hour call memory, already stated in
+  docs/daemon.md, and keeping the matcher's word lists small until the live
+  check shows real drop rates.
 - Decision: sessions are named by number. `get_status` numbers live sessions
   by registration and remembers, per call, which number is which session;
   `send_instruction` takes only a number that call's status read out

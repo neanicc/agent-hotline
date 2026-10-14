@@ -321,7 +321,8 @@ export class InboundLine {
       instruction: voice.instruction,
       ownerWords: voice.ownerWords,
       sessionNumber: voice.sessionNumber,
-      listed: call.nicknames,
+      // A snapshot: the names the owner had heard when they spoke.
+      listed: [...call.nicknames],
       sessionId: session.id,
       receivedAt: now,
     });
