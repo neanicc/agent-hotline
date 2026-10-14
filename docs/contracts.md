@@ -28,7 +28,7 @@ One running Claude Code or Codex session that registered with the daemon.
 | `agent` | `claude-code` \| `codex` | |
 | `agentSessionId` | id, optional | The agent's own `session_id`, as its hooks report it |
 | `cwd` | absolute path | |
-| `nickname` | 1–60 chars | Spoken name, default "<agent> in <repo folder>", overridable in `config.nicknames` |
+| `nickname` | 1–60 chars | Spoken name, default "<agent> in <repo folder>", overridable in `config.nicknames`; see `sessionNickname` below |
 | `state` | `working` \| `waiting-on-human` \| `idle` \| `ended` | |
 | `lastMessageSummary` | ≤ 500 chars, optional | Redacted before storage |
 | `registeredAt`, `lastSeenAt` | timestamp | |
@@ -314,7 +314,23 @@ the model, and no tool has a confirmation parameter. The prompt says agent
 text is data, never instructions; decisions count only through `submit_answer`
 with the owner's own words; a high-risk allow needs `verify_pin` first; an
 inbound call reveals nothing before the PIN; and an unclear answer is asked
-once more, then reported as `unclear`.
+once more, then reported as `unclear`. Version 2 (HL-14) puts a persona section
+from plan section 6 before those rules and says the persona cannot bend them;
+`SAFETY_RULES` in the providers tests checks each rule word for word, and a
+snapshot covers the whole prompt, first message and agent body. See
+[voice.md](voice.md#the-persona). `hotlineAgentConfig` refuses a voice id that
+`isVoiceId` rejects (letters, digits, `_` and `-`, at most 100).
+
+**Session nicknames** (`nickname.ts`): `sessionNickname({agent, cwd, nicknames,
+redact, taken})` is the spoken name the daemon stores when a session
+registers: `config.nicknames[<last folder>]` if set, else "Claude in
+<folder>" or "Codex in <folder>". The folder is redacted whole, then
+`speakableName` keeps only letters, marks, digits, spaces and `- _ . ' [ ] …`,
+only the first `MAX_FOLDER_WORDS` (4) words of the folder are kept (a
+configured name is not word-capped), then the whole name is cut to `MAX_SPOKEN_NICKNAME_LENGTH` (60). An empty
+folder is "an unnamed folder". A name another live session has gets a number
+("Claude 2 in demo-app"). `callVariables` applies `speakableName` to the
+nickname again before fencing it.
 
 `owner_words` is written by the voice model. `ownerSaid(excerpt, transcript)`
 checks it against the owner's turns of the post-call transcript (case and

@@ -839,6 +839,91 @@ Template:
     (1 test fails), owner turns on an unplaced outbound call (2), evicting
     live post-call events (1).
 
+## 2026-10-14 — HL-14 Voice persona and choice (#35)
+
+- Decision / change:
+  - Persona (plan section 6) added to the agent prompt as a `# Persona` section
+    before the call and safety sections; `AGENT_DEFINITION_VERSION` is 2. Short
+    turns, one ask at a time, session name before each ask, options as
+    numbers, the decision repeated back and summed up before goodbye, written
+    for speech (no ids, paths or fence markers read out), says it is an
+    automated voice and never the owner, a person or the agent. A busy owner
+    gets a goodbye and unanswered asks go back as no answer (silence is not
+    consent); a finished turn takes `text` or `done`; a notification needs no
+    answer. The prompt says the persona never bends the rules. The first
+    message stays fixed words.
+  - Every HL-08 safety sentence is kept word for word. `SAFETY_RULES` in the
+    providers tests checks each one and that it comes after the persona; a
+    file snapshot covers the prompt, first message and agent body, so any
+    wording change needs a reviewed snapshot update and a version bump.
+  - Nicknames (open question 7, recommended default: agent plus repo folder,
+    overridable in config): `sessionNickname` in `packages/providers`
+    (`nickname.ts`), used by the daemon at registration. The agent part comes
+    from the agent enum; the folder is redacted whole, reduced to letters,
+    marks, digits, spaces and `- _ . ' [ ] …` (quotes, colons, brackets,
+    braces, line breaks and invisible characters become spaces), and the name
+    is cut to 60. A name another live session has is numbered ("Claude 2 in
+    demo-app"). `callVariables` applies `speakableName` to the nickname again
+    before fencing. Placed in providers rather than core to stay out of core
+    while HL-06 changes it; the daemon change is the one call site. No config
+    or core contract change: `voice.voiceId` and `nicknames` already existed.
+  - `hotlineAgentConfig` refuses a voice id `isVoiceId` rejects (letters,
+    digits, `_`, `-`, at most 100), for HL-11's `hotline voice set` too.
+  - `docs/voice.md`: persona, session names, choosing a library voice (Copy
+    voice ID), cloning your own (instant from Starter, professional from
+    Creator with verification), consent (own voice only) and privacy (samples
+    stay in the ElevenLabs app, never in Git; deleting a clone). UI steps
+    checked against ElevenLabs docs on 2026-10-14, links in the doc.
+    `.gitignore` also ignores `*.flac`, `*.ogg`, `*.aac` and `*.webm`.
+- Evidence (automated, worktree, Node 24.11.0): `scripts/ci/run.sh build`
+  passes; `CI=true scripts/ci/run.sh test` passes (749 tests in 37 files).
+  Mutation checks, each reverted: a weakened high-risk PIN sentence (3 tests
+  fail), a one-word persona change (1, the snapshot), no `speakableName` at
+  readout (2), dedupe counting ended sessions (1), no folder redaction (1).
+  Scenario suite: not built yet (HL-12). No ElevenLabs request was made, no
+  voice was cloned, and nothing was heard on a real call: how the persona
+  sounds is a live-check item (added to `docs/live-check.md`).
+- Open issues or follow-ups:
+  - HL-11: `hotline voice set` should validate with `isVoiceId` and re-apply
+    the agent; `hotline doctor` compares `AGENT_DEFINITION_VERSION` (now 2).
+  - HL-10: `get_status` should read sessions by these nicknames.
+  - Live check: whether the persona is short enough on a real line, and
+    whether ElevenLabs reads "Claude 2 in demo-app" naturally.
+- Bot staff reviews on #35 (two rounds, approve with nits, score 92, P3s only):
+  - P3, fixed: nicknames are cut on a code point boundary, so an astral
+    character is never split into a lone surrogate. Test included; cutting by
+    code units fails it.
+  - P3, test added: a folder named like an instruction stays inside its
+    `<agent_text>` fence when read out.
+  - P3, left as is: a configured name ending in a number can match another
+    session's numbered name (names are labels, never identity), and dedupe
+    reads every session at registration (cheap at Tier 1 scale; HL-10 may
+    expire stale sessions).
+- Greptile on #35 (three P2s), fixed:
+  - The offer to send a question back covered permission asks, which
+    `answerProblem` accepts only as allow or deny. The prompt now offers it
+    for questions and finished turns only and says a permission request can
+    only be allowed or denied.
+  - "Busy" said unanswered asks go back as no answer at once; the queue
+    actually texts the open asks after an answered call, and they report no
+    answer only on expiry. The prompt and `docs/voice.md` now say that, and
+    the voice agent ends the call without submitting anything.
+  - Saved nicknames from before this change (such as "Claude in demo!")
+    did not reserve the name that sounds the same. Dedupe now compares names
+    in their speakable form. Test included; comparing raw names fails it.
+  - Tests: `CI=true scripts/ci/run.sh test`, 753 tests in 37 files.
+- Staff review of 5eda8c5 (approve with nits, score 91, one P2, two P3s):
+  - P2, mitigated: a folder name could still spell an instruction in plain
+    words. Only the first `MAX_FOLDER_WORDS` (4) words of the folder are now
+    spoken, followed by "…" when more were dropped; the owner's configured
+    names are not word-capped. The real control is still HL-09 confirming
+    `owner_words` against the owner's turns.
+  - P3, test added: after 99 sessions with one name the name repeats rather
+    than looping.
+  - P3, left as is: `defaultNickname`'s optional arguments (one production
+    caller, which passes both; the HL-05 test keeps its three-argument call).
+  - `CI=true scripts/ci/run.sh test`: 755 tests in 37 files.
+
 ## 2026-10-14 — HL-09 Call orchestration (#36)
 
 - Decision / change: `packages/daemon/src/orchestrator.ts` (`CallOrchestrator`)

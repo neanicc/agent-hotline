@@ -13,7 +13,8 @@ up, or it's quiet hours, you get a text instead and can reply to that. You can
 also call the number yourself, give your PIN, hear what every agent is doing, and
 give one of them a new instruction.
 
-Pick any ElevenLabs voice for the caller, including a clone of your own.
+Pick any ElevenLabs voice for the caller, including a clone of your own
+([docs/voice.md](docs/voice.md)).
 
 > Status: pre-alpha. The workspace builds and tests, but the `hotline` command
 > only prints its version and help so far. Setup for real calls arrives with
