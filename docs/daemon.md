@@ -489,7 +489,11 @@ anyone else's text the generic SMS reply.
     most by filler ("thanks"). So "don't push to main" never confirms "push to
     main", a qualifier after it is never dropped, and every word of the
     instruction comes from the owner's own turns, never from the status or a
-    read-back. `owner_words` must be the owner's words in that utterance;
+    read-back. Session names come from agent folders, so a name word counts
+    as reference only when the owner named the session by name, never once
+    they gave a number ("session one, push to main" never confirms "to main"
+    for a session named "push"), and never a word of the instruction.
+    `owner_words` must be the owner's words in that utterance;
   - exactly one session is identified in that reference (or, when it has none,
     in an owner stretch just before that is only a session reference): by
     "session N" or "number N", an ordinal, a bare digit, or a name matching it
@@ -533,10 +537,11 @@ anyone else's text the generic SMS reply.
   text saying it was not passed on. The held instructions and the call's
   numbering live in memory for an hour. Past that without a post-call event
   they are dropped, audited (`no post-call event`) and the owner gets the same
-  "not passed on" text. A restart before the post-call event drops them
-  without a text, though the voice agent had said `queued` (fail closed; the
-  PinGate's verification is in memory too, so nothing would count as the
-  owner's anyway; persisting them is HL-13 work). The Stop hook looks for
+  "not passed on" text. A restart before the post-call event drops them too
+  (fail closed; the PinGate's verification is in memory, so nothing would
+  count as the owner's anyway), but how many each call held is saved in
+  `daemon_state` (`inbound.held`, counts only), so the next start audits them
+  (`restarted`) and texts the owner once. The Stop hook looks for
   instructions only with the agent's own session id, so it never registers a
   throwaway session to look.
 - **Delivery.** Each instruction is handed over once, oldest first, to the

@@ -2012,6 +2012,15 @@ Template:
   call, by decision, since the instruction replaces the owner's answer to it;
   the English lexicon follow-up to HL-09c's reply judge stays open.
   Evidence: build passes, test passed 57 files, 1496 tests.
+- Review fixes, sixth round (bot staff review of 8f5dd39, two P2s and a P3):
+  how many instructions each call holds is saved in `daemon_state`
+  (`inbound.held`, counts only), so after a restart the next start audits
+  them (`restarted`) and texts the owner once; and a session name's words
+  count as a session reference only when the owner named the session by
+  name, never once they gave a number and never a word of the instruction,
+  so an agent folder named like a command cannot split the owner's words.
+  `sessions.ts` declarations are back in order. Evidence: build passes, test
+  passed 57 files, 1498 tests, three times in a row.
 - Decision: sessions are named by number. `get_status` numbers live sessions
   by registration and remembers, per call, which number is which session;
   `send_instruction` takes only a number that call's status read out

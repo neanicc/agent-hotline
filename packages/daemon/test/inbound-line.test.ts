@@ -291,6 +291,27 @@ describe("send_instruction", () => {
     expect(store.listInstructions()).toEqual([]);
   });
 
+  it("tells the owner after a restart about instructions the previous run still held", async () => {
+    session("s-1", "Claude in demo-app");
+    line.getStatus(call());
+    expect(instruct(1)).toBe("queued");
+    // The daemon stops before the post-call event; a new run starts on the same store.
+    const next = new InboundLine({ store, clock: () => now, redact: (text) => text, sms });
+    await next.recover();
+    expect(sms.sent.map((s) => s.text)).toEqual([expect.stringContaining("was not passed on")]);
+    expect(store.listAudit().find((e) => e.event === "voice.instruction-unconfirmed")?.detail).toEqual({
+      reason: "restarted",
+      count: 1,
+    });
+    // Told once.
+    await next.recover();
+    expect(sms.sent).toHaveLength(1);
+    // A call handled to the end leaves nothing to report.
+    await line.postCall(transcript("conv-1", "session 1, run the tests"), now, false);
+    await new InboundLine({ store, clock: () => now, redact: (text) => text, sms }).recover();
+    expect(sms.sent).toHaveLength(1);
+  });
+
   it("stores the owner's own words, never the model's text", async () => {
     session("s-1", "Claude in demo-app");
     line.getStatus(call());

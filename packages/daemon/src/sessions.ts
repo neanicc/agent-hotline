@@ -9,7 +9,7 @@ import type { HotlineStore } from "./store.js";
 
 /** A session with no open ask that nobody heard from for this long is ended. */
 export const SESSION_IDLE_MS = 6 * 60 * 60 * 1000;
-/** Live sessions at once. A new one past this gets 429; an existing one can always refresh. */
+/** Live sessions at once. Past this a new one evicts a long-idle one or gets 429; an existing one can always refresh. */
 export const MAX_LIVE_SESSIONS = 20;
 /**
  * At the cap, a session idle this long with nothing open makes room for a new
@@ -17,6 +17,10 @@ export const MAX_LIVE_SESSIONS = 20;
  * hours; a looping agent cannot evict sessions that are in use.
  */
 export const EVICT_IDLE_MS = 15 * 60 * 1000;
+/** A queued instruction no session picked up within this long is dropped. */
+export const INSTRUCTION_TTL_MS = 6 * 60 * 60 * 1000;
+
+const OPEN_STATUSES = ["pending", "in-flight"] as const;
 
 /**
  * Ends the longest-idle live session that has no open ask and no queued
@@ -33,10 +37,6 @@ export function evictIdleSession(store: HotlineStore, now: Date): boolean {
     .sort((a, b) => a.lastSeenAt.localeCompare(b.lastSeenAt))[0];
   return idlest !== undefined && endSession(store, idlest.id, now, "evicted");
 }
-/** A queued instruction no session picked up within this long is dropped. */
-export const INSTRUCTION_TTL_MS = 6 * 60 * 60 * 1000;
-
-const OPEN_STATUSES = ["pending", "in-flight"] as const;
 
 /** Live (not ended) sessions, oldest registration first: the order a status call numbers them in. */
 export function liveSessions(store: HotlineStore): Session[] {

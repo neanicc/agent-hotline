@@ -351,6 +351,8 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
     orchestrator.attachLog(daemon.log);
     daemonLog = daemon.log;
     await orchestrator.start();
+    // Instructions a previous run held for a post-call event were lost with it: tell the owner.
+    await inbound.recover();
     store.appendAudit(
       "daemon.started",
       { version: options.version, apiPort: daemon.apiPort, hooksPort: daemon.hooksPort },

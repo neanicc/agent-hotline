@@ -52,6 +52,8 @@ export const MAX_INSTRUCTION_LENGTH = 1000;
 const CALL_MEMORY_MS = 60 * 60 * 1000;
 /** Calls remembered at once; past it the oldest are forgotten (their instructions are not queued). */
 const MAX_CALLS = 1000;
+/** `daemon_state` key of how many instructions each call holds (counts only). */
+export const HELD_STATE_KEY = "inbound.held";
 /** At most one lockout text per direction in this window. */
 const LOCKOUT_TEXT_MS = 60 * 60 * 1000;
 /** Status lengths: what the voice route allows (1500) and one SMS (1600), with room for the cut marker. */
@@ -133,6 +135,36 @@ export class InboundLine {
   constructor(options: InboundLineOptions) {
     this.#options = options;
     this.#store = options.store;
+  }
+
+  /**
+   * How many instructions each call still holds, saved in the store, so that
+   * after a restart (which loses them, with the PIN state) the owner is told.
+   * Counts only: no words, no numbers.
+   */
+  #saveHeld(): void {
+    const held: Record<string, number> = {};
+    for (const [id, memory] of this.#calls) {
+      const open = memory.held.filter((h) => !h.done).length;
+      if (open > 0) held[id] = open;
+    }
+    this.#store.putState(HELD_STATE_KEY, held);
+  }
+
+  /**
+   * On start: instructions a previous run held when it stopped were never
+   * queued. Audits them and texts the owner once, then forgets them.
+   */
+  async recover(): Promise<void> {
+    const saved = this.#store.getState(HELD_STATE_KEY);
+    const counts =
+      typeof saved === "object" && saved !== null ? Object.values(saved as Record<string, unknown>) : [];
+    const lost = counts.reduce<number>((sum, n) => sum + (typeof n === "number" && n > 0 ? n : 0), 0);
+    this.#store.putState(HELD_STATE_KEY, {});
+    if (lost === 0) return;
+    const now = this.#options.clock();
+    this.#store.appendAudit("voice.instruction-unconfirmed", { reason: "restarted", count: lost }, now);
+    await this.#text(INBOUND_TEXTS.notQueued(lost), "instruction-not-queued", now);
   }
 
   /** The live sessions, ended stale ones first, in the order a status numbers them. */
@@ -266,6 +298,7 @@ export class InboundLine {
       sessionId: session.id,
       receivedAt: now,
     });
+    this.#saveHeld();
     return "queued";
   }
 
@@ -294,6 +327,7 @@ export class InboundLine {
         lost += 1;
       }
     }
+    if (lost > 0) this.#saveHeld();
     if (lost > 0) {
       this.#text(INBOUND_TEXTS.notQueued(lost), "instruction-not-queued", now).catch((error: unknown) =>
         this.#options.log?.().warn({ err: error }, "could not text about instructions not passed on"),
@@ -344,6 +378,7 @@ export class InboundLine {
       held.done = true;
     }
     this.#calls.delete(event.conversationId);
+    this.#saveHeld();
     if (notQueued > 0)
       await this.#text(INBOUND_TEXTS.notQueued(notQueued), "instruction-not-queued", receivedAt);
   }

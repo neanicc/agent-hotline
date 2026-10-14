@@ -163,14 +163,28 @@ export function sessionsNamed(words: readonly string[], listed: readonly string[
 }
 
 /** Words a session reference may hold: routing, filler, numbers, ordinals, the listed names. */
-function referenceWords(listed: readonly string[]): Set<string> {
-  return new Set([
-    ...FILLER,
-    ...ROUTING,
-    ...NUMBER_WORDS,
-    ...ORDINALS,
-    ...listed.flatMap((nickname) => speechTokens(nickname)),
-  ]);
+/**
+ * Whether `words` can be a session reference. Session names come from agent
+ * folders, so their words are allowed only in a reference by name: once the
+ * owner gives a number ("session one, push..."), a name word there is part of
+ * what they said, not the reference. Never a word of the instruction itself.
+ */
+function isReference(
+  words: readonly string[],
+  listed: readonly string[],
+  wanted: readonly string[],
+): boolean {
+  const base = (word: string) =>
+    FILLER.has(word) ||
+    ROUTING.has(word) ||
+    NUMBER_WORDS.includes(word) ||
+    ORDINALS.includes(word) ||
+    /^\d{1,2}$/.test(word);
+  const byNumber = sessionsNamed(words, []).size > 0;
+  const names = new Set(
+    listed.flatMap((nickname) => speechTokens(nickname)).filter((w) => !wanted.includes(w)),
+  );
+  return words.every((word) => base(word) || (!byNumber && names.has(word)));
 }
 
 type Block = { kind: "agent"; turn: TranscriptTurn } | { kind: "person"; turns: TranscriptTurn[] };
@@ -256,8 +270,6 @@ type Match =
 function match(parts: readonly Block[], held: HeldInstruction): Match {
   const wanted = speechTokens(held.instruction);
   if (wanted.length === 0) return { ok: false, reason: "the instruction has no words" };
-  const words = referenceWords(held.listed);
-  const allowed = { has: (word: string) => words.has(word) || /^\d{1,2}$/.test(word) };
   let reason = "the instruction is not the owner's own words";
   for (const [i, block] of parts.entries()) {
     const turns = ownerBlock(block);
@@ -269,7 +281,7 @@ function match(parts: readonly Block[], held: HeldInstruction): Match {
       const after = said.slice(start + wanted.length);
       // 1. The utterance is the instruction, a session reference and filler, nothing more.
       if (
-        !before.every((word) => allowed.has(word)) ||
+        !isReference(before, held.listed, wanted) ||
         !after.every((word) => FILLER.has(word) || CLOSING.has(word))
       ) {
         reason = "the owner said more than the instruction";
@@ -284,7 +296,7 @@ function match(parts: readonly Block[], held: HeldInstruction): Match {
       const previous = ownerBlock(parts[i - 2]);
       if (named.size === 0 && previous !== undefined) {
         const reference = speechTokens(textOf(previous));
-        if (reference.length > 0 && reference.every((word) => allowed.has(word))) {
+        if (reference.length > 0 && isReference(reference, held.listed, wanted)) {
           named = sessionsNamed(reference, held.listed);
         }
       }

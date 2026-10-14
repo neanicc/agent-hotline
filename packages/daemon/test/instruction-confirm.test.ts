@@ -90,6 +90,26 @@ describe("confirmInstruction", () => {
     });
   });
 
+  it("never lets a session's name split the owner's words when the owner gave a number", () => {
+    // An agent named its folder after a command word.
+    const listed = ["Claude in push", "Codex in api"];
+    const said = "Session one, push to main.";
+    const transcript = call(said, "For session 1, Claude in push: to main. Send it?", "Yes.");
+    expect(
+      confirmInstruction(transcript, held({ instruction: "to main", ownerWords: said, listed })),
+    ).toEqual({ confirmed: false, reason: "the owner said more than the instruction" });
+    // The whole instruction is fine.
+    const whole = call(said, "For session 1, Claude in push: push to main. Send it?", "Yes.");
+    expect(
+      confirmInstruction(whole, held({ instruction: "push to main", ownerWords: said, listed })).confirmed,
+    ).toBe(true);
+    // By name alone, the name is the reference, but never a word of the instruction.
+    const byName = call("Tell push to run the tests", "For session 1: run the tests. Send it?", "Yes.");
+    expect(
+      confirmInstruction(byName, held({ ownerWords: "Tell push to run the tests", listed })).confirmed,
+    ).toBe(true);
+  });
+
   it("takes the session from a stretch just before that is only a session reference", () => {
     const transcript = [
       ...opening,
