@@ -4,7 +4,7 @@ import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { postCallSignatureHeader, twilioSignature } from "@hotline/providers";
+import { type HttpFetch, postCallSignatureHeader, twilioSignature } from "@hotline/providers";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   type Daemon,
@@ -53,6 +53,21 @@ function paths(home = "home") {
 
 async function writeConfig(config: unknown = CONFIG, home = "home"): Promise<void> {
   await writePrivateFile(paths(home).config, JSON.stringify(config));
+}
+
+/**
+ * A fake Twilio and ElevenLabs REST API for the real providers' pulls (HL-13a):
+ * a GET for a path in `records` gets that record, any other GET a 404, and
+ * anything else (a send or a call) is refused as a network request.
+ */
+function fakeApi(records: Record<string, unknown>): HttpFetch {
+  return async (url, init) => {
+    if (init.method !== "GET") throw new Error("unexpected network request");
+    const record = records[new URL(url).pathname];
+    return record === undefined
+      ? { status: 404, json: async () => ({ code: 20404 }) }
+      : { status: 200, json: async () => structuredClone(record) };
+  };
 }
 
 /** Starts runDaemon and resolves once it is listening. */
@@ -160,7 +175,24 @@ describe("runDaemon", () => {
     const secrets = new FileSecretStore(paths().secrets);
     await secrets.set("twilio.accountSid", accountSid);
     await secrets.set("twilio.authToken", authToken);
-    const { daemon, exit } = await launch();
+    const ownerSid = `SM${"1".repeat(32)}`;
+    const otherSid = `SM${"2".repeat(32)}`;
+    const forgedSid = `SM${"3".repeat(32)}`;
+    // Twilio holds the owner's message; the forged one was never sent.
+    const { daemon, exit } = await launch({
+      fetch: fakeApi({
+        [`/2010-04-01/Accounts/${accountSid}/Messages/${ownerSid}.json`]: {
+          sid: ownerSid,
+          account_sid: accountSid,
+          direction: "inbound",
+          from: OWNER,
+          to: "+15555550101",
+          body: "Yes",
+          status: "received",
+          date_created: NOW.toUTCString(),
+        },
+      }),
+    });
 
     const sms = (from: string, messageSid: string) => {
       const params: [string, string][] = [
@@ -181,12 +213,14 @@ describe("runDaemon", () => {
         body: new URLSearchParams(params).toString(),
       });
     };
-    const ownerSid = `SM${"1".repeat(32)}`;
-    const otherSid = `SM${"2".repeat(32)}`;
     const owner = await sms(OWNER, ownerSid);
     expect(owner.status).toBe(200);
     // Nothing was texted, so a "yes" answers nothing.
     expect(owner.body).toContain("nothing is waiting for an answer");
+    // A correctly signed webhook for a message Twilio does not have is not used at all.
+    const forged = await sms(OWNER, forgedSid);
+    expect(forged.status).toBe(200);
+    expect(forged.body).toContain("could not be confirmed with Twilio");
     const other = await sms("+15555550199", otherSid);
     expect(other.status).toBe(200);
     expect(other.body).toContain("<Message>");
@@ -202,11 +236,20 @@ describe("runDaemon", () => {
     expect(await exit).toBe(0);
     const db = new DatabaseSync(paths().database, { readOnly: true });
     const audit = db.prepare("SELECT event, detail FROM audit WHERE event LIKE 'sms.%' ORDER BY seq").all();
+    const security = db
+      .prepare("SELECT event, detail FROM audit WHERE event LIKE 'security.%' ORDER BY seq")
+      .all();
     db.close();
     // The audit log records the reply type, never the owner's words.
     expect(audit).toEqual([
       { event: "sms.received", detail: JSON.stringify({ messageSid: ownerSid, reply: "yes" }) },
       { event: "sms.other-sender", detail: JSON.stringify({ messageSid: otherSid }) },
+    ]);
+    expect(security).toEqual([
+      {
+        event: "security.possible-forgery",
+        detail: JSON.stringify({ channel: "sms", what: "text", reason: "the provider has no such record" }),
+      },
     ]);
     const text = lines.join("");
     expect(text).not.toContain(authToken);
@@ -232,6 +275,135 @@ describe("runDaemon", () => {
     expect(off).toMatchObject({ reason: "voice.agentId is not set" });
   });
 
+  it("serves no voice route without the ElevenLabs API key: nothing a call says can be confirmed", async () => {
+    const publicUrl = "https://hotline.example.test";
+    const toolSecret = "fake-elevenlabs-tool-secret-nokey";
+    const webhookSecret = "fake-elevenlabs-webhook-secret-nokey";
+    await writeConfig({
+      ...CONFIG,
+      owner: { phoneNumber: OWNER, pinHash: await hashPin("4821") },
+      voice: { agentId: "agent_fake", agentPhoneNumberId: "phnum_run" },
+      tunnel: { publicUrl },
+    });
+    const secrets = new FileSecretStore(paths().secrets);
+    await secrets.set("elevenlabs.toolSecret", toolSecret);
+    await secrets.set("elevenlabs.webhookSecret", webhookSecret);
+    // No `elevenlabs.apiKey`. Even a lookup that would answer is never asked.
+    let pulls = 0;
+    const { daemon, exit } = await launch({
+      fetch: async () => {
+        pulls += 1;
+        throw new Error("unexpected network request");
+      },
+    });
+    const binding = {
+      conversation_id: "conv_nokey",
+      call_sid: `CA${"0".repeat(32)}`,
+      caller_id: OWNER,
+      called_number: "+15555550101",
+    };
+    const bodies: Record<string, Record<string, unknown>> = {
+      verify_pin: { pin: "4821" },
+      get_status: {},
+      submit_answer: { ask_number: 1, decision: "allow", owner_words: "yes go ahead" },
+      send_instruction: { session_number: 1, instruction: "push to main", owner_words: "push to main" },
+    };
+    for (const [name, extra] of Object.entries(bodies)) {
+      const response = await send({
+        port: daemon.hooksPort,
+        method: "POST",
+        path: `/hooks/el/tools/${name}`,
+        headers: { "content-type": "application/json", "x-hotline-tool-secret": toolSecret },
+        body: JSON.stringify({ ...binding, ...extra }),
+      });
+      expect([name, response.status, response.body]).toEqual([name, 403, ""]);
+    }
+    const events = [
+      {
+        type: "post_call_transcription",
+        event_timestamp: NOW.getTime() / 1000,
+        data: {
+          agent_id: "agent_fake",
+          conversation_id: "conv_nokey",
+          status: "done",
+          transcript: [{ role: "user", message: "session 1, push to main", time_in_call_secs: 5 }],
+          metadata: { phone_call: { direction: "inbound", external_number: OWNER, call_sid: "CA1" } },
+        },
+      },
+      {
+        type: "call_initiation_failure",
+        event_timestamp: NOW.getTime() / 1000,
+        data: { agent_id: "agent_fake", conversation_id: "conv_nokey", failure_reason: "busy" },
+      },
+    ];
+    for (const event of events) {
+      const raw = JSON.stringify(event);
+      const posted = await send({
+        port: daemon.hooksPort,
+        method: "POST",
+        path: "/hooks/el/post-call",
+        headers: {
+          "content-type": "application/json",
+          "elevenlabs-signature": postCallSignatureHeader(webhookSecret, NOW.getTime() / 1000, raw),
+        },
+        body: raw,
+      });
+      expect([posted.status, posted.body]).toEqual([403, ""]);
+    }
+    signals.emit("SIGTERM");
+    expect(await exit).toBe(0);
+    expect(pulls).toBe(0);
+    const db = new DatabaseSync(paths().database, { readOnly: true });
+    const audit = db
+      .prepare(
+        "SELECT event FROM audit WHERE event LIKE 'voice.%' OR event LIKE 'instruction.%' ORDER BY seq",
+      )
+      .all();
+    const stored = db.prepare("SELECT COUNT(*) AS n FROM instructions").get();
+    db.close();
+    expect(audit).toEqual([]);
+    expect(stored).toEqual({ n: 0 });
+    const off = lines
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .find((e) => e.msg === "voice webhooks off");
+    expect(off?.reason).toMatch(/API key .*no call can be confirmed/);
+  });
+
+  it("serves no voice route without voice.agentPhoneNumberId, and says why", async () => {
+    const toolSecret = "fake-elevenlabs-tool-secret-nophone";
+    await writeConfig({
+      ...CONFIG,
+      owner: { phoneNumber: OWNER, pinHash: await hashPin("4821") },
+      voice: { agentId: "agent_fake" },
+      tunnel: { publicUrl: "https://hotline.example.test" },
+    });
+    const secrets = new FileSecretStore(paths().secrets);
+    await secrets.set("elevenlabs.toolSecret", toolSecret);
+    await secrets.set("elevenlabs.webhookSecret", "fake-elevenlabs-webhook-secret-nophone");
+    await secrets.set("elevenlabs.apiKey", "fake-elevenlabs-api-key-nophone");
+    const { daemon, exit } = await launch({ fetch: fakeApi({}) });
+    const response = await send({
+      port: daemon.hooksPort,
+      method: "POST",
+      path: "/hooks/el/tools/verify_pin",
+      headers: { "content-type": "application/json", "x-hotline-tool-secret": toolSecret },
+      body: JSON.stringify({
+        conversation_id: "conv_nophone",
+        call_sid: `CA${"0".repeat(32)}`,
+        caller_id: OWNER,
+        called_number: "+15555550101",
+        pin: "4821",
+      }),
+    });
+    expect([response.status, response.body]).toEqual([403, ""]);
+    signals.emit("SIGTERM");
+    expect(await exit).toBe(0);
+    const off = lines
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .find((e) => e.msg === "voice webhooks off");
+    expect(off?.reason).toMatch(/voice\.agentPhoneNumberId is not set/);
+  });
+
   it("serves the ElevenLabs routes with the PIN check, recording no answer for a call it did not place", async () => {
     const publicUrl = "https://hotline.example.test";
     const toolSecret = "fake-elevenlabs-tool-secret-run";
@@ -240,13 +412,40 @@ describe("runDaemon", () => {
     await writeConfig({
       ...CONFIG,
       owner: { phoneNumber: OWNER, pinHash },
-      voice: { agentId: "agent_fake" },
+      voice: { agentId: "agent_fake", agentPhoneNumberId: "phnum_run" },
       tunnel: { publicUrl },
     });
     const secrets = new FileSecretStore(paths().secrets);
     await secrets.set("elevenlabs.toolSecret", toolSecret);
     await secrets.set("elevenlabs.webhookSecret", webhookSecret);
-    const { daemon, exit } = await launch();
+    await secrets.set("elevenlabs.apiKey", "fake-elevenlabs-api-key-run");
+    // ElevenLabs holds every call below as going on, with the owner on the far end.
+    const live = (conversation: string, direction: "inbound" | "outbound") => ({
+      agent_id: "agent_fake",
+      conversation_id: conversation,
+      status: "in-progress",
+      transcript: [],
+      metadata: {
+        start_time_unix_secs: NOW.getTime() / 1000,
+        call_duration_secs: 0,
+        phone_call: {
+          type: "twilio",
+          direction,
+          external_number: OWNER,
+          agent_number: "+15555550101",
+          phone_number_id: "phnum_run",
+          call_sid: `CA${"0".repeat(32)}`,
+          stream_sid: "MZ0",
+        },
+      },
+    });
+    const conversations = Object.fromEntries(
+      [
+        live("conv_run", "outbound"),
+        ...["conv_in_1", "conv_in_2", "conv_in_3"].map((c) => live(c, "inbound")),
+      ].map((record) => [`/v1/convai/conversations/${record.conversation_id}`, record]),
+    );
+    const { daemon, exit } = await launch({ fetch: fakeApi(conversations) });
 
     const tool = (name: string, body: Record<string, unknown>, secret = toolSecret) =>
       send({
@@ -256,6 +455,7 @@ describe("runDaemon", () => {
         headers: { "content-type": "application/json", "x-hotline-tool-secret": secret },
         body: JSON.stringify({
           conversation_id: "conv_run",
+          call_sid: `CA${"0".repeat(32)}`,
           caller_id: "+15555550101",
           called_number: OWNER,
           ...body,
@@ -290,6 +490,7 @@ describe("runDaemon", () => {
       for (const pin of ["1111", "2222"]) {
         await tool("verify_pin", {
           conversation_id: conversation,
+          call_sid: `CA${"0".repeat(32)}`,
           caller_id: OWNER,
           called_number: "+15555550101",
           pin,
@@ -301,13 +502,24 @@ describe("runDaemon", () => {
     expect(await exit).toBe(0);
     const db = new DatabaseSync(paths().database, { readOnly: true });
     const audit = db.prepare("SELECT event, detail FROM audit WHERE event LIKE 'voice.%' ORDER BY seq").all();
+    const forgeries = db
+      .prepare("SELECT detail FROM audit WHERE event = 'security.possible-forgery' ORDER BY seq")
+      .all();
     db.close();
     expect(audit).toEqual([
-      // A call Hotline did not place answers nothing, and its post-call event changes nothing.
+      // A call Hotline did not place answers nothing. A call initiation failure
+      // ElevenLabs has no record of is never acted on.
       { event: "voice.answer", detail: JSON.stringify({ decision: "allow", result: "not-recorded" }) },
-      { event: "voice.initiation-failure", detail: JSON.stringify({ reason: "busy" }) },
-      { event: "voice.post-call-ignored", detail: JSON.stringify({ kind: "initiation-failure" }) },
       { event: "voice.pin-lockout", detail: JSON.stringify({ direction: "inbound" }) },
+    ]);
+    expect(forgeries).toEqual([
+      {
+        detail: JSON.stringify({
+          channel: "voice",
+          what: "post-call",
+          reason: "the provider has no such record",
+        }),
+      },
     ]);
     const text = lines.join("");
     expect(text).not.toContain(toolSecret);

@@ -15,6 +15,7 @@ import {
   type QueueState,
 } from "@hotline/core";
 import { z } from "zod";
+import { hashCodeAtStart, isCodeHash } from "./code-hash.js";
 import type { HotlineStore } from "./store.js";
 
 /** Key of the orchestrator's saved state in the store. */
@@ -56,7 +57,10 @@ export interface SavedState {
   version: 1;
   queue: QueueState;
   calls: LiveCall[];
-  /** Confirmation codes of texted permission asks, by ask id. Single use. */
+  /**
+   * Salted hashes (`hashCode`, or `hashCodeAtStart` when migrating) of the confirmation codes of texted permission
+   * asks, by ask id. Single use. The plaintext code is never stored (HL-13a).
+   */
   codes: Record<string, string>;
   /**
    * Actions of the last step not carried out yet, saved together with the queue
@@ -165,8 +169,16 @@ export class OrchestratorState {
   restore(log: OrchestratorLog): void {
     const stored = this.#store.getState(ORCHESTRATOR_STATE_KEY);
     const saved = SavedStateSchema.safeParse(stored);
-    if (saved.success) this.data = saved.data as SavedState;
-    else if (stored !== undefined) {
+    if (saved.success) {
+      this.data = saved.data as SavedState;
+      // State saved before HL-13a held plaintext codes: hash them now, and save
+      // at once, so the plaintext does not stay in the store.
+      const plain = Object.entries(this.data.codes).filter(([, value]) => !isCodeHash(value));
+      if (plain.length > 0) {
+        for (const [askId, code] of plain) this.data.codes[askId] = hashCodeAtStart(code);
+        this.save();
+      }
+    } else if (stored !== undefined) {
       log.warn({}, "call orchestration state unreadable; starting a new queue");
       this.#restoreRates();
     }

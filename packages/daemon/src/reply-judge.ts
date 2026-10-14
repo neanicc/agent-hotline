@@ -38,7 +38,9 @@
 // The prompt goes in on stdin, so the owner's words never appear in a process
 // argument list. The CLI's environment is an allowlist (`judgeChildEnv`): the
 // process basics, network setup and that CLI's own login variables. Hotline's
-// own `HOTLINE_*` variables and credentials never reach it.
+// own `HOTLINE_*` variables and credentials never reach it, and neither do API
+// keys, endpoints or provider switches (`JUDGE_WITHHELD_ENV`, HL-09e), so the
+// CLI runs on the owner's plan login, never on API billing.
 //
 // Nothing is sent until the owner chooses: with `judge.backend` unset (no
 // choice recorded yet) the judge is `FailClosedJudge`. `hotline init` asks once.
@@ -129,22 +131,72 @@ export const JUDGE_BASE_ENV = [
   "SSL_CERT_FILE",
   "SSL_CERT_DIR",
 ] as const;
-/** The Claude Code CLI's own login and config variables (its OAuth login itself lives in the Keychain). */
-export const CLAUDE_CODE_LOGIN_ENV = [
-  "CLAUDE_CONFIG_DIR",
-  "CLAUDE_CODE_OAUTH_TOKEN",
+/**
+ * The Claude Code CLI's own login and config variables. Its plan login lives
+ * in the Keychain (keyed to `CLAUDE_CONFIG_DIR` when set), and
+ * `CLAUDE_CODE_OAUTH_TOKEN` is the subscription token `claude setup-token`
+ * prints, so it is the plan login too. API keys and provider switches are
+ * never here: see `CLAUDE_CODE_API_BILLING_ENV`.
+ */
+export const CLAUDE_CODE_LOGIN_ENV = ["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"] as const;
+/** The Codex CLI's own config variable; its ChatGPT login lives under `CODEX_HOME`. */
+export const CODEX_LOGIN_ENV = ["CODEX_HOME"] as const;
+
+/**
+ * Variables that would move `claude -p` off the owner's plan login onto API
+ * billing, another account or another provider (HL-09e). Claude Code ranks
+ * every one of them above the subscription login: the cloud provider
+ * switches, then `ANTHROPIC_AUTH_TOKEN`, then `ANTHROPIC_API_KEY` (always used
+ * under `-p`), and a named profile or federation variables
+ * (https://code.claude.com/docs/en/authentication); `ANTHROPIC_BASE_URL`
+ * sends the run to another endpoint. An entry ending in `*` is a prefix. An
+ * owner who wants API billing chooses `judge.backend: anthropic-api`.
+ */
+export const CLAUDE_CODE_API_BILLING_ENV = [
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
   "ANTHROPIC_BASE_URL",
+  // Every other ANTHROPIC_ variable too: profiles, federation, Bedrock, Vertex and Foundry settings.
+  "ANTHROPIC_*",
+  "CLAUDE_CODE_USE_BEDROCK",
+  "CLAUDE_CODE_USE_VERTEX",
+  "CLAUDE_CODE_USE_FOUNDRY",
+  "CLAUDE_CODE_USE_*",
+  "CLAUDE_CODE_SKIP_*",
+  // apiKeyHelper's refresh settings; the helper itself is a settings-file entry, not a variable.
+  "CLAUDE_CODE_API_KEY_*",
+  "AWS_BEARER_TOKEN_BEDROCK",
 ] as const;
-/** The Codex CLI's own login and config variables. */
-export const CODEX_LOGIN_ENV = ["CODEX_HOME", "OPENAI_API_KEY", "OPENAI_BASE_URL"] as const;
+/**
+ * Variables that could move `codex exec` off the owner's ChatGPT login onto
+ * API billing or another endpoint (HL-09e). Codex documents that an API key
+ * bills the API instead of the plan, but not whether `codex exec` prefers a
+ * key in the environment over a stored ChatGPT login, so all are withheld.
+ */
+export const CODEX_API_BILLING_ENV = [
+  "OPENAI_API_KEY",
+  "OPENAI_BASE_URL",
+  "OPENAI_*",
+  "CODEX_API_KEY",
+  "AZURE_OPENAI_*",
+] as const;
+/** Never passed to any agent CLI run, whatever the run inherits: both CLIs' API-billing variables. */
+export const JUDGE_WITHHELD_ENV = [...CLAUDE_CODE_API_BILLING_ENV, ...CODEX_API_BILLING_ENV] as const;
+
+/** Whether `name` matches `JUDGE_WITHHELD_ENV` (exactly, or by a `*` prefix), so never reaches a CLI. */
+export function judgeWithholds(name: string): boolean {
+  return JUDGE_WITHHELD_ENV.some((entry) =>
+    entry.endsWith("*") ? name.startsWith(entry.slice(0, -1)) : name === entry,
+  );
+}
 
 /**
  * The environment an agent CLI run gets: `JUDGE_BASE_ENV` and the run's own
  * `inherit` names, taken from the daemon's environment, plus the run's `env`.
  * Nothing else, so Hotline's own variables (`HOTLINE_*`, credentials among
- * them) and anything unrelated the daemon was started with stay behind.
+ * them) and anything unrelated the daemon was started with stay behind. A
+ * name in `JUDGE_WITHHELD_ENV` (an API key, endpoint or provider switch) is
+ * left out even when the run lists it, so the CLI runs on the owner's plan login.
  */
 export function judgeChildEnv(
   daemonEnv: Readonly<Record<string, string | undefined>>,
@@ -153,9 +205,33 @@ export function judgeChildEnv(
   const child: Record<string, string> = {};
   for (const name of [...JUDGE_BASE_ENV, ...options.inherit]) {
     const value = daemonEnv[name];
-    if (value !== undefined && !name.startsWith("HOTLINE_")) child[name] = value;
+    if (value !== undefined && !name.startsWith("HOTLINE_") && !judgeWithholds(name)) child[name] = value;
   }
-  return { ...child, ...options.env };
+  // The run's own variables are checked too, so not even a caller can hand a CLI an API key.
+  for (const [name, value] of Object.entries(options.env)) {
+    if (!judgeWithholds(name)) child[name] = value;
+  }
+  return child;
+}
+
+/**
+ * Which credential a selected judge backend runs on, for `hotline doctor`
+ * and logs: a name, never a value. The CLI backends run on the owner's plan
+ * login because `judgeChildEnv` withholds every API-billing variable.
+ */
+export function judgeCredentialSource(backend: JudgeBackend, choice?: JudgeBackendChoice): string {
+  switch (backend) {
+    case "claude-code":
+      return "plan login (Claude Code)";
+    case "codex":
+      return "plan login (Codex)";
+    case "anthropic-api":
+      return choice === "anthropic-api"
+        ? "Anthropic API key (judge.backend: anthropic-api)"
+        : `Anthropic API key (judge.backend: ${choice ?? "auto"}, no Claude Code or Codex CLI found)`;
+    case "none":
+      return "none";
+  }
 }
 
 /** The part of child_process.spawn `runJudgeProcess` uses, so a test can stand in for it. */

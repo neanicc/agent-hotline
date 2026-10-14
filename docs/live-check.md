@@ -318,10 +318,11 @@ Expected, with no `FAIL` line (exit code 0):
 A line saying the deployed agent is an older definition means P8 was skipped:
 run `hotline voice apply` again.
 
-With #64 merged, also `PASS keychain`. This is the only place the real
-`/usr/bin/security` runs: it adds, reads back and deletes a throwaway item
-(service `agent-hotline-doctor-check`), never your credentials
-([install.md](install.md#hotline-doctor)). Record PASS, or the FAIL line's
+With #64 merged, also `PASS keychain` (the secret store is `keychain`, P7).
+This is the only place the real `/usr/bin/security` runs: tests and CI use a
+fake. It adds, reads back and deletes a throwaway item (service
+`agent-hotline-doctor-check`), never your credentials
+([install.md](install.md#keychain-self-test)). Record PASS, or the FAIL line's
 step and exit codes. A timeout usually means the login Keychain was locked.
 
 Save the output: `hotline doctor > "$EV/doctor.txt"`. Record the doctor
@@ -846,16 +847,30 @@ HL-14d (#70) and HL-08.
 HL-13a, with #69 merged. Read from the steps already done:
 
 1. **ElevenLabs conversation GET while a call is live.** In L19, the PIN was
-   accepted (`verify_pin` with `"result":true` in the daemon log). If every
-   PIN is refused on a real inbound call, the live conversation record did not
-   show status `in-progress` with `metadata.phone_call` filled in: FAIL.
+   accepted (`verify_pin` with `"result":true` in the daemon log), and in L4
+   and L20 the answers and the instruction were taken. Every server tool is
+   checked against the live record. If PINs or answers are refused on a real
+   call, the live record lacks what the check needs (status `in-progress`, and
+   `metadata.phone_call` with `direction`, `agent_number`, `external_number`,
+   `phone_number_id`, `call_sid`), or the tool call lacks `call_sid`,
+   `caller_id` or `called_number`: FAIL, and note the audit `reason`.
 2. **Transcript equality.** After every call, the audit has no
    `security.possible-forgery` and no "did not match Twilio's or ElevenLabs'
    records" text arrived. If one did, note its `reason`: "the webhook differs
    from the provider's record" means the post-call webhook and the API
    transcript disagree; "the call is not over at the provider" means the
-   webhook came before the API said `done`.
-3. **Twilio message fetch.** In L3, L9 and L11 the text replies worked, within
+   webhook came before the API said `done`. If that text follows every real
+   call with "the webhook differs from the provider's record", the two
+   transcripts differ in form, not a forgery: answers still come from the
+   API's record, so record it as a FAIL and stop counting the alarm. If it
+   arrives when you made no call or text, treat it as real: stop the daemon
+   and check what runs as your user.
+3. **Call initiation failures.** In L12, the unanswered call ended as no
+   pickup and was retried or texted on schedule. A failure is acted on only
+   when ElevenLabs' record shows that call `failed` with outbound phone
+   metadata. If the call instead waits until the ask times out, with an audit
+   `reason` for its initiation failure: FAIL.
+4. **Twilio message fetch.** In L3, L9 and L11 the text replies worked, within
    seconds (L3 step 4), with no `security.unverified` entry.
 
 Any FAIL here goes on a new issue that names `packages/daemon/src/provider-pull.ts`.

@@ -16,12 +16,12 @@ const SECRET = "hl08-fake-deploy-credential-0123456789";
 
 interface Captured {
   url: string;
-  init: Parameters<HttpFetch>[1];
+  init: Parameters<HttpFetch>[1] & { body: string };
 }
 
 function fakeFetch(status: number, body: unknown, captured: Captured[] = []): HttpFetch {
   return async (url, init) => {
-    captured.push({ url, init });
+    captured.push({ url, init: { ...init, body: init.body ?? "" } });
     return {
       status,
       json: async () => {
@@ -233,5 +233,89 @@ describe("ElevenLabsVoiceProvider", () => {
     ["an owner number that is not E.164", { ownerNumber: "5555550100" }],
   ])("refuses to be created with %s", (_name, overrides) => {
     expect(() => provider(overrides)).toThrow(TypeError);
+  });
+});
+
+describe("ElevenLabsVoiceProvider.fetchConversation", () => {
+  // The documented response shape: https://elevenlabs.io/docs/api-reference/conversations/get
+  const conversation = {
+    agent_id: "agent_fake01",
+    status: "done",
+    metadata: {
+      start_time_unix_secs: 1_791_929_880,
+      call_duration_secs: 42,
+      cost_fiat: 1.1,
+      phone_call: {
+        type: "twilio",
+        direction: "outbound",
+        agent_number: "+15555550101",
+        external_number: OWNER,
+        phone_number_id: "phnum_fake01",
+        call_sid: `CA${"a1".repeat(16)}`,
+        stream_sid: "MZ0",
+      },
+    },
+    conversation_id: "conv_0123abc",
+    has_audio: true,
+    has_user_audio: true,
+    has_response_audio: true,
+    transcript: [
+      { role: "agent", time_in_call_secs: 0, message: "Hey, it's your hotline." },
+      { role: "user", time_in_call_secs: 4, message: "Yes, go ahead." },
+    ],
+  };
+
+  it("GETs the conversation by id with the API key and keeps only the fields Hotline checks", async () => {
+    const captured: Captured[] = [];
+    const record = await provider({ fetch: fakeFetch(200, conversation, captured) }).fetchConversation(
+      "conv_0123abc",
+    );
+    expect(captured.map((c) => [c.url, c.init.method, c.init.headers["xi-api-key"]])).toEqual([
+      ["https://api.elevenlabs.io/v1/convai/conversations/conv_0123abc", "GET", API_KEY],
+    ]);
+    expect(record).toEqual({
+      agent_id: "agent_fake01",
+      conversation_id: "conv_0123abc",
+      status: "done",
+      transcript: conversation.transcript,
+      metadata: {
+        start_time_unix_secs: 1_791_929_880,
+        call_duration_secs: 42,
+        phone_call: {
+          direction: "outbound",
+          agent_number: "+15555550101",
+          external_number: OWNER,
+          phone_number_id: "phnum_fake01",
+          call_sid: `CA${"a1".repeat(16)}`,
+        },
+      },
+    });
+  });
+
+  it.each([
+    ["a 404", fakeFetch(404, { detail: "not found" }), "not-found"],
+    ["a 401", fakeFetch(401, { detail: "invalid key" }), "refused"],
+    ["another conversation", fakeFetch(200, { ...conversation, conversation_id: "conv_other" }), "malformed"],
+    ["a body that is no conversation", fakeFetch(200, { detail: [] }), "malformed"],
+    [
+      "a network failure",
+      (async () => {
+        throw Object.assign(new TypeError(`fetch failed for ${API_KEY}`), { cause: { code: "ETIMEDOUT" } });
+      }) as HttpFetch,
+      "unreachable",
+    ],
+  ])("rejects with a PullError on %s", async (_name, fetch, reason) => {
+    const error = await provider({ fetch })
+      .fetchConversation("conv_0123abc")
+      .catch((e: unknown) => e as Error);
+    expect(error).toMatchObject({ name: "PullError", reason });
+    expect(JSON.stringify(error)).not.toContain(API_KEY);
+  });
+
+  it("never requests a malformed id", async () => {
+    const captured: Captured[] = [];
+    const voice = provider({ fetch: fakeFetch(200, conversation, captured) });
+    await expect(voice.fetchConversation("../agents")).rejects.toMatchObject({ reason: "malformed" });
+    expect(captured).toEqual([]);
   });
 });

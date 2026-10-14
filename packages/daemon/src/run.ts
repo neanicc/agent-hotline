@@ -3,8 +3,11 @@
 // down cleanly on SIGINT or SIGTERM.
 import { type Config, policySettings, type SecretStore } from "@hotline/core";
 import {
+  type ConversationRecord,
   ElevenLabsVoiceProvider,
   type HttpFetch,
+  PullError,
+  type PulledMessage,
   type SmsProvider,
   TwilioSmsProvider,
   type VoiceProvider,
@@ -18,6 +21,7 @@ import type { LogDestination, LogLevel } from "./logger.js";
 import { CallOrchestrator, type OrchestratorLog } from "./orchestrator.js";
 import { silentLog } from "./orchestrator-state.js";
 import { PinGate, verifyPin } from "./pin.js";
+import { ForgeryAlarm } from "./provider-pull.js";
 import { createRedactor, type Redactor } from "./redact.js";
 import { type JudgeHost, nodeJudgeHost, selectReplyJudge } from "./reply-judge.js";
 import { type Exec, openSecretStore } from "./secret-store.js";
@@ -141,10 +145,27 @@ async function twilioSetup(config: Config, secrets: SecretStore): Promise<Twilio
   return { accountSid, authToken, smsNumber };
 }
 
+/** The SMS provider's message lookup, or one that always fails closed. */
+function messageLookup(texter: SmsProvider | undefined): (messageSid: string) => Promise<PulledMessage> {
+  const fetchMessage = texter?.fetchMessage?.bind(texter);
+  return (
+    fetchMessage ??
+    (() => Promise.reject(new PullError("No SMS provider to look messages up with", "unsupported")))
+  );
+}
+
+/** The voice provider's conversation lookup, or undefined when there is none to pull with. */
+function conversationLookup(
+  caller: VoiceProvider | string,
+): ((conversationId: string) => Promise<ConversationRecord>) | undefined {
+  return typeof caller === "string" ? undefined : caller.fetchConversation?.bind(caller);
+}
+
 /**
  * The Twilio SMS webhook, when the config and secret store have everything it
  * needs. Otherwise no route is registered and `/hooks/twilio/sms` stays a 403.
- * The owner's texts go to call orchestration, once per message SID.
+ * The owner's texts go to call orchestration, once per message SID, each only
+ * after Twilio's own record of it confirms it (HL-13a).
  */
 function smsWebhook(
   config: Config,
@@ -153,6 +174,8 @@ function smsWebhook(
   store: HotlineStore,
   orchestrator: CallOrchestrator,
   clock: () => Date,
+  texter: SmsProvider | undefined,
+  alarm: ForgeryAlarm,
 ): WebhookSetup {
   if (typeof twilio === "string") return { routes: [], off: twilio };
   const publicUrl = config.tunnel.publicUrl;
@@ -167,6 +190,8 @@ function smsWebhook(
     redact: (text) => redactor.text(text),
     onOwnerMessage: (message) => orchestrator.ownerText(message),
     onOtherSender: (messageSid) => store.appendAudit("sms.other-sender", { messageSid }, clock()),
+    lookup: messageLookup(texter),
+    onUnverified: (_messageSid, failure) => alarm.report("sms", "text", failure),
   });
   return { routes: [route] };
 }
@@ -228,6 +253,8 @@ async function voiceWebhook(
   orchestrator: CallOrchestrator,
   inbound: InboundLine,
   clock: () => Date,
+  caller: VoiceProvider | string,
+  alarm: ForgeryAlarm,
 ): Promise<WebhookSetup> {
   if (config.voice.provider !== "elevenlabs") return { routes: [], off: "the voice provider is fake" };
   const agentId = config.voice.agentId;
@@ -242,6 +269,16 @@ async function voiceWebhook(
   }
   redactor.addSecret(toolSecret);
   redactor.addSecret(webhookSecret);
+  // Nothing a call says can be confirmed without pulling its record from
+  // ElevenLabs (HL-13a): without the API key (or a provider that can pull) no
+  // route is served, so no PIN, decision, instruction or status goes through.
+  const lookup = conversationLookup(caller);
+  if (lookup === undefined) {
+    const why = typeof caller === "string" ? caller : "the voice provider cannot look up calls";
+    return { routes: [], off: `${why}, so no call can be confirmed with ElevenLabs` };
+  }
+  const agentPhoneNumberId = config.voice.agentPhoneNumberId;
+  if (agentPhoneNumberId === undefined) return { routes: [], off: "voice.agentPhoneNumberId is not set" };
   const pinHash = config.owner.pinHash;
   const pins = new PinGate({
     check: (pin) => verifyPin(pin, pinHash),
@@ -264,6 +301,10 @@ async function voiceWebhook(
     pins,
     clock,
     redact: (text) => redactor.text(text),
+    // Every tool call and post-call event is checked against ElevenLabs' own record.
+    conversation: lookup,
+    agentPhoneNumberId,
+    onUnverified: (what, failure) => alarm.report("voice", what, failure),
     handlers: {
       submitAnswer: (answer) => orchestrator.submitAnswer(answer),
       getStatus: (call) => inbound.getStatus(call),
@@ -351,8 +392,19 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
       judge: judge.judge,
     });
     orchestrator = calls;
-    const sms = smsWebhook(config, twilio, redactor, store, orchestrator, clock);
-    const voice = await voiceWebhook(config, secrets, redactor, store, orchestrator, inbound, clock);
+    const alarm = new ForgeryAlarm({ store, clock, ...(texter === undefined ? {} : { sms: texter }) });
+    const sms = smsWebhook(config, twilio, redactor, store, orchestrator, clock, texter, alarm);
+    const voice = await voiceWebhook(
+      config,
+      secrets,
+      redactor,
+      store,
+      orchestrator,
+      inbound,
+      clock,
+      caller,
+      alarm,
+    );
     daemon = await startDaemon({
       apiToken,
       store,

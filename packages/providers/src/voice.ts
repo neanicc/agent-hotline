@@ -2,6 +2,7 @@
 // number when it is created, and `callOwner` takes no recipient, so no caller can
 // phone anyone else. Only short, redacted summaries of each ask leave the machine.
 import type { AskKind, Risk, VoiceProviderName } from "@hotline/core";
+import type { ConversationRecord } from "./elevenlabs-webhook.js";
 import { MAX_SPOKEN_NICKNAME_LENGTH, speakableName } from "./nickname.js";
 
 /** One call reads out at most this many asks (the queue's `DEFAULT_MAX_ASKS_PER_CALL`). */
@@ -44,6 +45,13 @@ export interface VoiceProvider {
    * and the post-call webhook. Rejects with `VoiceCallError`.
    */
   callOwner(call: OutboundCall): Promise<PlacedCall>;
+  /**
+   * Fetches one conversation by id from the provider (HL-13a): its status,
+   * transcript and phone metadata as the provider holds them. The daemon uses
+   * this record, never a webhook body, before a call decides anything. Rejects
+   * with `PullError`. Without it no call can confirm a decision or a PIN.
+   */
+  fetchConversation?(conversationId: string): Promise<ConversationRecord>;
 }
 
 /** A call the provider refused or could not be asked to place. Never quotes the provider's response. */
