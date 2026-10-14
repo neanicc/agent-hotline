@@ -367,7 +367,7 @@ Template:
   An ask held only by the text limit during quiet hours is not woken when quiet
   hours end; it waits for a text slot or its expiry.
 
-## 2026-10-13 — HL-07 SMS provider (#PR)
+## 2026-10-13 — HL-07 SMS provider (#30)
 
 - Decision / change:
   - `packages/providers`: `SmsProvider` with `sendToOwner(text)` only. A provider
