@@ -263,8 +263,11 @@ no status.
 store, the providers and the webhooks through core's pure queue
 ([contracts](contracts.md#ask-queue-and-call-policy-queuets-policyts)).
 
-It is split into four files (HL-09b). Only `CallOrchestrator`, its options and
-the constants below are exported from the package; the parts are internal.
+It is split into four files (HL-09b). The package exports the same names as
+before, all through `orchestrator.ts`: `CallOrchestrator`,
+`CallOrchestratorOptions`, `OrchestratorLog`, `ORCHESTRATOR_STATE_KEY`,
+`RATE_STATE_KEY`, `STOP_WAIT_MS` and `CALL_CENTS_PER_MINUTE`. The parts
+(`OrchestratorState`, `VoiceCalls`, `OwnerTexts`) are internal.
 
 | File | Holds |
 | --- | --- |
