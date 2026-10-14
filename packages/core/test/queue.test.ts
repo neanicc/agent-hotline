@@ -353,7 +353,12 @@ describe("answers", () => {
     const h = new Harness(settings);
     h.ask({ id: "q1" });
     expect(h.send({ type: "unclear", askId: "q1" })).toEqual([
-      { type: "ignored", event: "unclear", askId: "q1", reason: "the ask was never put to the owner" },
+      {
+        type: "ignored",
+        event: "unclear",
+        askId: "q1",
+        reason: "the ask is not on a call or awaiting a text reply",
+      },
     ]);
   });
 
@@ -525,6 +530,22 @@ describe("review fixes", () => {
     expect(h.send({ type: "answer", answer: late })).toEqual([
       { type: "ignored", event: "answer", askId: "q1", reason: "the ask is not on the call in progress" },
     ]);
+  });
+
+  it("ignores a stray unclear report while the ask waits out a retry", () => {
+    const h = new Harness(settings);
+    h.ask({ id: "q1" });
+    h.advance(20 * SECOND);
+    h.send({ type: "call-ended", callId: h.callId, result: "no-pickup" });
+    expect(h.send({ type: "unclear", askId: "q1" })).toEqual([
+      {
+        type: "ignored",
+        event: "unclear",
+        askId: "q1",
+        reason: "the ask is not on a call or awaiting a text reply",
+      },
+    ]);
+    expect(ofType(h.advance(2 * MINUTE), "place-call")).toHaveLength(1);
   });
 
   it("wakes at once for overdue work, and never earlier than now", () => {

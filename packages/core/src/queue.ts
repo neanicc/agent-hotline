@@ -269,7 +269,8 @@ function applyEvent(ctx: Context, event: QueueEvent): string | undefined {
       const q = findOpen(ctx.s, event.askId);
       if (q === undefined) return "no open ask with this id";
       if (q.duplicateOf !== undefined) return `the ask shares ${q.duplicateOf}'s answer`;
-      if (q.callAttempts === 0 && !q.texted) return "the ask was never put to the owner";
+      if (q.phase !== "calling" && q.phase !== "texted")
+        return "the ask is not on a call or awaiting a text reply";
       // The owner heard this exact question and gave no clear answer; duplicates share that.
       const followers = followersOf(ctx, q.ask.id);
       noAnswer(ctx, q, "unclear");
@@ -428,7 +429,8 @@ function dispatch(ctx: Context): void {
     else if (!mayCall(q, quiet, settings)) reason = "quiet-hours";
     else if (callLimited) reason = "call-limit";
     else continue; // waits for the call in progress or the next one
-    // Out of texts: hold everything else until a slot frees or it expires.
+    // Out of texts: this and every later text-bound ask wait for a slot or expire. (Asks that
+    // can still go by call never reach this point; they were placed or skipped above.)
     if (!rateLimitAllows(s.textTimes, textLimit(settings), t)) break;
     s.textTimes.push(t);
     ctx.actions.push({ type: "send-text", askId: q.ask.id, reason });

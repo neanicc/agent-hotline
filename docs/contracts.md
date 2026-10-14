@@ -240,7 +240,7 @@ does I/O; `packages/core/test/purity.test.ts` scans the sources to keep it so.
 | `ask` | A new ask. It must parse and be `pending`; an id already queued is ignored |
 | `tick` | Time moved on |
 | `answer` | An owner answer from `submit_answer` or a text reply |
-| `unclear` | The owner was asked but the answer stayed unclear |
+| `unclear` | The owner was asked (the ask is on the call in progress or texted) but the answer stayed unclear |
 | `call-ended` | The call in progress ended: `answered`, `no-pickup`, `dropped` or `failed` |
 | `text-sent` | The text for an ask went out; ends a notification as `delivered` |
 | `text-failed` | The text for an ask could not be sent |
