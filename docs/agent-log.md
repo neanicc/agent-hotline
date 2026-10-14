@@ -1208,7 +1208,7 @@ Template:
   - P2 (split the orchestrator before HL-10) and P3 (measure false "no answer"
     in the live check) stay follow-ups.
 
-## 2026-10-14 — HL-09b Split the call orchestrator (#37)
+## 2026-10-14 — HL-09b Split the call orchestrator (#41)
 
 - Decision / change: pure refactor of `packages/daemon/src/orchestrator.ts`
   (950 lines) before HL-10 adds the inbound line, as the HL-09 staff reviews
