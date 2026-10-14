@@ -1456,18 +1456,30 @@ Template:
   another folder"), even next to read-only commands, because Claude Code's Bash
   keeps its working directory between calls. Relative paths are judged against
   the session cwd only; docs/hooks.md says so.
-- An argv `command` is written as the shell line that runs exactly that argv
-  (`'` as `'"'"'`). The old join deleted single quotes, so the owner heard a
-  different file name than the one that ran. A round-trip test checks that
-  `splitShell` reads back the same argv for quotes, `!`, globs, tabs, newlines
-  and non-ASCII.
+- An argv `command` is written as the shell line that runs exactly that argv.
+  The old join deleted single quotes, so the owner heard a different file name
+  than the one that ran. A round-trip test checks that `splitShell` reads back
+  the same argv for quotes, `!`, globs, tabs, newlines and non-ASCII.
 - Hook text (`packages/agents/src/hook-adapter.ts`): the risk line names the
   field ("asks to run outside the sandbox", "asks to run in another folder",
-  "asks to run in the background"). After the preview comes the folder
-  (`(in folder /etc)`), the names of environment variables (never their
-  values) and the names of unknown settings. These notes come after a
-  shortened command so they are never cut off, and they are capped at 120
-  characters (a cut also makes the request "too long to read out").
+  "asks to run in the background"). Right after the tool name come the folder
+  (`Bash (in folder /etc): ls`), the names of environment variables (never
+  their values) and the names of unknown settings. These notes are capped at
+  120 characters, and a cut also makes the request "too long to read out".
+- Greptile on #46, both fixed:
+  - P0: the first argv quoting wrote `'` as `'"'"'`. That split
+    `PASSWORD=maple'cedar` so the daemon's redactor removed `maple` but sent
+    `cedar` on. Each value is now quoted in one piece. After the command word a
+    `name=` prefix stays outside the quotes (`PASSWORD="maple'cedar"`,
+    `API_TOKEN='a b'`). A value with a `'` uses double quotes when nothing in
+    it is special there. Anything else (both quote kinds, `$`, a backtick, `\`,
+    `!`, or a command word with a `'`) is not read out and is high ("has input
+    Hotline cannot read"). Tests run these through `createRedactor`.
+  - P1: the notes first came after the preview, so the call's 300-character
+    cut per ask (`MAX_SPOKEN_ASK_LENGTH` in `callVariables`) could drop the
+    folder after a long command. They now come before the preview. Tests check
+    the text through `callVariables`, which adds `@hotline/providers` as a
+    dev dependency of `@hotline/agents`.
 - Decision (beyond the listed done-when, fail closed): every Codex shell
   request is high ("may run in another folder or outside the sandbox").
   Codex's hook `tool_input` for a shell approval is only the command string and
@@ -1499,7 +1511,8 @@ Template:
   `codex/permission-request.network-access.input.json`, checked against the
   core schemas and, for Codex, its published JSON schema.
 - Evidence (worktree, Node 24.11.0): `scripts/ci/run.sh build` passes, and
-  `test` passes 1315 tests in 46 files. Every listed field and the adapter text
+  `test` passes 1317 tests in 46 files after the Greptile fixes. Hosted CI was
+  green on the first head. Every listed field and the adapter text
   have tests, and earlier expectations only moved toward high (the Codex
   plain-yes case). `python3 scripts/check_agent_files.py` and
   `git diff --check` pass. Not run: the scenario suite (not built yet, HL-12);

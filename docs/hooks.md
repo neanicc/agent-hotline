@@ -42,10 +42,12 @@ In away mode:
      (`command shortened, 312 more characters`), and the request becomes high
      risk ("is too long to read out in full"): the part the owner cannot hear
      could hold anything.
-   - Fields that change where or how it runs come after the preview, so a
-     long command never cuts them off: the folder (`Bash: ls (in folder
-     /etc)`), the names of environment variables it sets (never their values),
-     and the names of settings Hotline does not know (`with setting mode`).
+   - Fields that change where or how it runs come right after the tool name,
+     before the preview, so neither the 200-character preview cut nor the
+     call's 300-character limit on each ask (`MAX_SPOKEN_ASK_LENGTH`) can drop
+     them: the folder (`Bash (in folder /etc): ls`), the names of environment
+     variables it sets (never their values), and the names of settings Hotline
+     does not know (`with setting mode`).
      Sandbox, network and background fields are named by their risk reason
      (`High risk: asks to run outside the sandbox.`). These notes are cut at
      120 characters, which also makes the request "too long to read out".
@@ -192,9 +194,14 @@ high risk:
   only starts with `cd` (`docs/cd.md`) is not affected.
 - **An argv array** (`"command": ["cat", "a b.txt"]`, Codex's `shell` tool) is
   written as the shell line that runs exactly that argv: plain words as they
-  are, anything else in single quotes, a `'` as `'"'"'`. The owner hears that
-  line and the classifier judges it like any other command. An array with a
-  non-string element, or an empty one, is "has input Hotline cannot read".
+  are, anything else in single quotes, or in double quotes when it holds a `'`
+  and nothing special to double quotes. After the command word, a `name=`
+  prefix stays outside the quotes (`env PASSWORD="maple'cedar" npm test`), so
+  the daemon's redactor sees a secret value whole. The owner hears that line
+  and the classifier judges it like any other command. An element that cannot
+  be written that way (one holding both `'` and `"`, `$`, a backtick, `\` or
+  `!`, or a command word with a `'`), an array with a non-string element, or an
+  empty one, is "has input Hotline cannot read" and its argv is not read out.
 - **File tools** may carry only their path and content fields, from the Claude
   Code hooks reference and input schemas: `Write` (`file_path`, `content`),
   `Edit` (`file_path`, `old_string`, `new_string`, `replace_all`), `MultiEdit`

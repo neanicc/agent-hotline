@@ -647,22 +647,37 @@ describe("fields that change what runs (HL-06b)", () => {
   it("writes an argv array as the shell line that runs exactly that argv", () => {
     expect(shellCommand({ command: ["ls", "-la"] })).toBe("ls -la");
     expect(shellCommand({ command: ["cat", "a b.txt"] })).toBe("cat 'a b.txt'");
-    expect(shellCommand({ command: ["cat", "it's.txt"] })).toBe(`cat 'it'"'"'s.txt'`);
+    expect(shellCommand({ command: ["cat", "it's.txt"] })).toBe(`cat "it's.txt"`);
     expect(shellCommand({ command: ["echo", ""] })).toBe("echo ''");
     // Earlier versions dropped the quote, so the owner heard `rm 'ab'` for the file `a'b`.
-    expect(shellCommand({ command: ["rm", "a'b"] })).toBe(`rm 'a'"'"'b'`);
+    expect(shellCommand({ command: ["rm", "a'b"] })).toBe(`rm "a'b"`);
+    // A `name=` prefix stays outside the quotes, so the daemon's redactor sees the value whole
+    // (Greptile on #46: `'PASSWORD=maple'"'"'cedar'` left `cedar` behind).
+    expect(shellCommand({ command: ["env", "PASSWORD=maple'cedar", "npm", "test"] })).toBe(
+      `env PASSWORD="maple'cedar" npm test`,
+    );
+    expect(shellCommand({ command: ["env", "API_KEY=a b", "x"] })).toBe("env API_KEY='a b' x");
+    expect(shellCommand({ command: ["git", "--format=%H %s"] })).toBe("git --format='%H %s'");
+    expect(shellCommand({ command: ["env", "TOKEN=", "x"] })).toBe("env TOKEN= x");
+    // The command word is quoted whole: an unquoted `A=b` there would be an assignment.
+    expect(shellCommand({ command: ["A=b c", "x"] })).toBe("'A=b c' x");
     const parts = [
       "",
       " ",
       "a'b",
       "''",
+      "'",
       '"',
       "!",
-      `a"b'c`,
       "*",
       "~",
       "#x",
       "=x",
+      "a=b",
+      "a=",
+      "-o=a b",
+      "x:y z",
+      "PASSWORD=maple'cedar",
       "a\tb",
       "a\nb",
       "é",
@@ -674,6 +689,16 @@ describe("fields that change what runs (HL-06b)", () => {
       expect(splitShell(shellCommand({ command: argv }) ?? ""), JSON.stringify(part)).toEqual([
         { words: argv, redirects: [] },
       ]);
+    }
+    // An element that cannot be written exactly with its quoted value in one piece is not read out.
+    for (const argv of [
+      ["echo", `a"b'c`],
+      ["echo", "it's $HOME"],
+      ["echo", "PASSWORD=it's!"],
+      ["it's", "x"],
+    ]) {
+      expect(shellCommand({ command: argv }), JSON.stringify(argv)).toBeUndefined();
+      expect(bash(argv).reasons).toEqual(["has input Hotline cannot read"]);
     }
     expect(bash(["cat", "it's.txt"])).toEqual(LOW);
     expect(bash(["echo", "a; rm -rf /"])).toEqual(LOW);

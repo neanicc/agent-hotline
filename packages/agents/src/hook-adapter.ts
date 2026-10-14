@@ -217,10 +217,10 @@ function fieldNotes(toolName: string, toolInput: unknown, cwd: string): string[]
 
 /**
  * The short line the owner hears or reads for a permission request, in this
- * order: why it is high risk, the tool and a one-line preview (a command, the
- * files a patch touches, a path, then any field that changes where or how it
- * runs), then the agent's own description, labelled as the agent's words. Never
- * file contents. A preview too long to read out says how much was cut and makes
+ * order: why it is high risk, the tool with any field that changes where or how
+ * it runs, a one-line preview (a command, the files a patch touches, a path),
+ * then the agent's own description, labelled as the agent's words. Never file
+ * contents. A preview too long to read out says how much was cut and makes
  * the request high risk, since the cut part could hold anything. The
  * description is untrusted and never replaces the preview.
  */
@@ -259,15 +259,18 @@ export function permissionAsk(
     shown = `${head === "" ? "" : `${head} `}(${what} shortened, ${more} more characters)`;
     risk = withRiskReason(risk, "is too long to read out in full");
   }
-  // After the preview, so a long command never cuts off where or how it runs.
+  // Right after the tool name, before the preview: the call reads at most the
+  // first 300 characters of this text (providers' `MAX_SPOKEN_ASK_LENGTH`), so a
+  // long command must never push where or how it runs out of what is spoken.
   const notes = collapse(fieldNotes(toolName, toolInput, cwd).join("; "));
+  let tool = oneLine(toolName, MAX_TOOL_NAME);
   if (notes !== "") {
     if (notes.length > MAX_FIELD_NOTES) risk = withRiskReason(risk, "is too long to read out in full");
-    shown = `${shown} (${oneLine(notes, MAX_FIELD_NOTES)})`;
+    tool = `${tool} (${oneLine(notes, MAX_FIELD_NOTES)})`;
   }
   const parts: string[] = [];
   if (risk.risk === "high") parts.push(`High risk: ${risk.reasons.join(", ")}.`);
-  parts.push(`${oneLine(toolName, MAX_TOOL_NAME)}: ${shown}`);
+  parts.push(`${tool}: ${shown}`);
   const description = oneLine(field(toolInput, "description") ?? "", MAX_DESCRIPTION);
   // Only a description with something readable in it; the daemon redacts it with the rest.
   if (/[\p{L}\p{N}]/u.test(description)) parts.push(`The agent says: "${description.replace(/"/g, "'")}"`);

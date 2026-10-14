@@ -17,6 +17,7 @@ import {
   StopBlockOutput,
 } from "@hotline/core";
 import { createRedactor, type Daemon, generateApiToken, openStore, startDaemon } from "@hotline/daemon";
+import { callVariables, MAX_SPOKEN_ASK_LENGTH, type OutboundCall, type VoiceAsk } from "@hotline/providers";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   type CreateAskRequest,
@@ -739,13 +740,13 @@ describe("text sent to the daemon", () => {
   it.each([
     [
       { command: "ls", workdir: "/etc" },
-      "High risk: asks to run in another folder. Bash: ls (in folder /etc)",
+      "High risk: asks to run in another folder. Bash (in folder /etc): ls",
     ],
     [
       { command: "ls", cwd: `${cwd}/src` },
-      "High risk: asks to run in another folder. Bash: ls (in folder src)",
+      "High risk: asks to run in another folder. Bash (in folder src): ls",
     ],
-    [{ command: "ls", workdir: 7 }, "High risk: asks to run in another folder. Bash: ls (in another folder)"],
+    [{ command: "ls", workdir: 7 }, "High risk: asks to run in another folder. Bash (in another folder): ls"],
     [
       { command: "npm test", dangerouslyDisableSandbox: true },
       "High risk: asks to run outside the sandbox. Bash: npm test",
@@ -765,22 +766,22 @@ describe("text sent to the daemon", () => {
     [{ command: "ls", allowed_domains: ["example.com"] }, "High risk: asks for network access. Bash: ls"],
     [
       { command: "ls", env: { GIT_DIR: "/tmp/x", PAGER: "sh" } },
-      "High risk: asks to set environment variables. Bash: ls (with environment variables GIT_DIR, PAGER)",
+      "High risk: asks to set environment variables. Bash (with environment variables GIT_DIR, PAGER): ls",
     ],
     [
       { command: "ls", frobnicate: true },
-      "High risk: has a setting Hotline does not know. Bash: ls (with setting frobnicate)",
+      "High risk: has a setting Hotline does not know. Bash (with setting frobnicate): ls",
     ],
     [
       { command: "ls", timeout: "soon", "bad name;rm": 1 },
       "High risk: has a setting Hotline does not know, has input Hotline cannot read. " +
-        "Bash: ls (with settings timeout, bad_name_rm)",
+        "Bash (with settings timeout, bad_name_rm): ls",
     ],
     [{ command: "cd /etc && ls" }, "High risk: asks to run in another folder. Bash: cd /etc && ls"],
     [
       { command: "ls", workdir: "/tmp", run_in_background: true, dangerouslyDisableSandbox: true },
       "High risk: asks to run outside the sandbox, asks to run in another folder, asks to run in the background. " +
-        "Bash: ls (in folder /tmp)",
+        "Bash (in folder /tmp): ls",
     ],
   ])("names the fields that change what runs: %j", (toolInput, expected) => {
     expect(text("Bash", toolInput)).toBe(expected);
@@ -788,11 +789,11 @@ describe("text sent to the daemon", () => {
 
   it("names a file tool's unknown fields, never their values", () => {
     const asked = text("Write", { file_path: `${cwd}/src/a.ts`, content: "body", mode: "private value" });
-    expect(asked).toBe("High risk: has a setting Hotline does not know. Write: src/a.ts (with setting mode)");
+    expect(asked).toBe("High risk: has a setting Hotline does not know. Write (with setting mode): src/a.ts");
     expect(asked).not.toContain("private value");
     const many = Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`x${i}`, i]));
     expect(text("Edit", { file_path: "src/a.ts", ...many })).toBe(
-      "High risk: has a setting Hotline does not know. Edit: src/a.ts (with settings x0, x1, x2, x3, x4 and 3 more)",
+      "High risk: has a setting Hotline does not know. Edit (with settings x0, x1, x2, x3, x4 and 3 more): src/a.ts",
     );
   });
 
@@ -803,13 +804,57 @@ describe("text sent to the daemon", () => {
     expect(asked).not.toContain(secret);
   });
 
-  it("keeps the folder after a shortened command, so a long command never hides where it runs", () => {
+  it("names the folder and settings before the command, so a long command never hides them", () => {
     const asked = permissionAsk("Bash", { command: `ls ${"a ".repeat(150)}`, workdir: "/etc" }, cwd);
-    expect(asked.text).toMatch(/\(command shortened, \d+ more characters\) \(in folder \/etc\)$/);
-    expect(asked.risk.reasons).toEqual(["asks to run in another folder", "is too long to read out in full"]);
+    expect(asked.text).toMatch(
+      /^High risk: asks to run in another folder, is too long to read out in full\. Bash \(in folder \/etc\): ls a a /,
+    );
+    expect(asked.text).toMatch(/\(command shortened, \d+ more characters\)$/);
     const deep = permissionAsk("Bash", { command: "ls", workdir: `/${"deep/".repeat(40)}` }, cwd);
     expect(deep.risk.reasons).toContain("is too long to read out in full");
     expect(deep.text.length).toBeLessThan(260);
+  });
+
+  // Greptile on #46: the call reads at most the first 300 characters of an ask
+  // (`MAX_SPOKEN_ASK_LENGTH`), so the notes must survive that cut in what is spoken.
+  it("keeps the folder and setting names in the text a call actually speaks", () => {
+    const redactor = createRedactor();
+    const redact = (input: string) => redactor.text(input);
+    const spoken = (toolInput: unknown, agent?: "codex") => {
+      const { text: asked, risk } = permissionAsk("Bash", toolInput, cwd, agent);
+      const ask: VoiceAsk = {
+        askId: "ask-1",
+        kind: "permission",
+        nickname: "Claude in demo-app",
+        text: asked,
+        options: [],
+        risk: risk.risk,
+        toolName: "Bash",
+      };
+      const call: OutboundCall = { callId: "call-1", asks: [ask] };
+      return callVariables(call, redact).asks;
+    };
+    const long = `ls ${"a ".repeat(150)}`;
+    // The whole ask is longer than the call reads, so this is the case the cut would hit.
+    expect(permissionAsk("Bash", { command: long, workdir: "/etc" }, cwd).text.length).toBeGreaterThan(
+      MAX_SPOKEN_ASK_LENGTH,
+    );
+    expect(spoken({ command: long, workdir: "/etc" })).toContain("(in folder /etc)");
+    expect(spoken({ command: long, frobnicate: 1, other: 2 })).toContain("(with settings frobnicate, other)");
+    expect(
+      spoken({ command: `rm -rf ~/x; ${long}`, workdir: "/etc", env: { A: "1" }, run_in_background: true }),
+    ).toContain("(in folder /etc; with environment variables A)");
+    expect(spoken({ command: long, workdir: "/etc" }, "codex")).toContain("(in folder /etc)");
+  });
+
+  it("writes a secret in an argv element so the daemon's redactor removes all of it", () => {
+    const redactor = createRedactor();
+    const redact = (input: string) => redactor.text(input);
+    const asked = permissionAsk("Bash", { command: ["env", "PASSWORD=maple'cedar", "npm", "test"] }, cwd);
+    expect(asked.text).toContain(`PASSWORD="maple'cedar"`);
+    expect(redact(asked.text)).not.toMatch(/maple|cedar/);
+    const spaced = permissionAsk("Bash", { command: ["env", "API_TOKEN=maple cedar", "x"] }, cwd);
+    expect(redact(spaced.text)).not.toMatch(/maple|cedar/);
   });
 
   it("reads the HL-06b fixtures out with what changes where or how they run", () => {

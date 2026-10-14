@@ -687,20 +687,48 @@ function readOnlyCommand({ words, redirects }: SimpleCommand, cwd: string): bool
   return false;
 }
 
+/** Characters bash and zsh read literally outside quotes (`=` is handled separately). */
+const PLAIN_WORD = /^[A-Za-z0-9_./:@%+,-]+$/;
+
 /**
- * One argv element quoted so that bash and zsh read it back as exactly that
- * element: plain characters as they are, anything else in single quotes, with
- * each `'` written as `'"'"'` (close, a double-quoted quote, reopen).
+ * Text quoted as one contiguous run, so the daemon's redactor sees a quoted
+ * value whole: plain as it is, else in single quotes, else (when it holds a `'`)
+ * in double quotes if nothing in it is special there. Undefined when neither
+ * works: splitting it as `'a'"'"'b'` would let a secret's tail escape the
+ * redactor's `name='value'` pattern.
  */
-function quoteArgument(part: string): string {
-  if (/^[A-Za-z0-9_./:@%+,-]+$/.test(part)) return part;
-  return `'${part.split("'").join(`'"'"'`)}'`;
+function quoteRun(text: string): string | undefined {
+  if (PLAIN_WORD.test(text)) return text;
+  if (!text.includes("'")) return `'${text}'`;
+  if (!/["$`\\!]/.test(text)) return `"${text}"`;
+  return undefined;
+}
+
+/**
+ * One argv element written so that bash and zsh read it back as exactly that
+ * element. After the command word, a `name=` or `name:` prefix stays outside the
+ * quotes (`PASSWORD='a b'`, the shape the redactor removes whole); the command
+ * word is quoted whole, since an unquoted `name=` there would be an assignment.
+ * Undefined when the element cannot be written exactly and redactably.
+ */
+function quoteArgument(part: string, index: number): string | undefined {
+  if (PLAIN_WORD.test(part)) return part;
+  const assignment = index > 0 ? /^([A-Za-z0-9_.-]+[=:])([\s\S]*)$/.exec(part) : null;
+  if (assignment !== null) {
+    const value = assignment[2] ?? "";
+    const quoted = value === "" ? "" : quoteRun(value);
+    return quoted === undefined ? undefined : `${assignment[1]}${quoted}`;
+  }
+  if (index === 0 && part.includes("'")) return undefined;
+  return part === "" ? "''" : quoteRun(part);
 }
 
 /**
  * The command text of a shell tool call: a string, or an argv array (Codex's
  * `shell` tool) written as the shell line that runs exactly that argv, so the
- * owner hears and the classifier judges what runs. Undefined for anything else.
+ * owner hears and the classifier judges what runs. Undefined for anything else,
+ * including an argv element that cannot be written exactly with each quoted
+ * value in one piece (see `quoteArgument`), so the request is high.
  */
 export function shellCommand(input: unknown): string | undefined {
   const value =
@@ -711,7 +739,8 @@ export function shellCommand(input: unknown): string | undefined {
         : undefined;
   if (typeof value === "string") return value;
   if (Array.isArray(value) && value.length > 0 && value.every((part) => typeof part === "string")) {
-    return value.map(quoteArgument).join(" ");
+    const words = value.map((part, index) => quoteArgument(part, index));
+    return words.every((word) => word !== undefined) ? words.join(" ") : undefined;
   }
   return undefined;
 }
