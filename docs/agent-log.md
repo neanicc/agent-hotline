@@ -1207,3 +1207,155 @@ Template:
     texts no longer work.
   - P2 (split the orchestrator before HL-10) and P3 (measure false "no answer"
     in the live check) stay follow-ups.
+
+## 2026-10-14 — HL-06 Hook adapters (#7)
+
+- Decision / change: `hotline hook <claude|codex> <permission|stop>` reads the
+  agent's payload on stdin and prints its documented output or nothing
+  (`packages/agents/src/hook-adapter.ts`, `apps/cli/src/hook.ts`); see
+  `docs/hooks.md`. Outside away mode, or for a payload it cannot parse, it
+  prints nothing, so the agent shows its own prompt or stops. In away mode a
+  permission is allowed only through core's `permissionVerdict`; every no-answer,
+  timeout, unreachable or unset daemon, refused or malformed outcome, approval
+  of another ask, unconfirmed high-risk approval, or kill by the agent denies
+  with the fixture's message. A Stop continues only with the owner's own `text`
+  answer (new core `stopInstruction`). Never `updatedInput`,
+  `updatedPermissions`, `interrupt` or a permission suggestion. Exit code is
+  always 0 (usage errors 1), never 2, since exit 2 from a Stop hook means
+  "keep going".
+- Away mode: `hotline away on|off|status` writes `away.json` in the hotline home
+  under the private-file rules (0600 in 0700, no symlinks, own user). Anything
+  unreadable is off. HL-11 still owns `init`, `install` and `doctor`; it only
+  needs to call these.
+- Loop guards: `stop_hook_active: false` resets the count; `true` without a
+  count of Hotline's own (another hook continued the turn) lets the agent stop;
+  at `policy.maxConsecutiveContinuations` the agent stops and a notification is
+  queued. Counts are `hook-state/<agent>-<sha256>.json` (0600). A count that
+  cannot be read or saved lets the agent stop. `away on|off` clears them.
+- Risk classes (plan question 6, recommended default): `classifyPermission` in
+  `@hotline/core` (pure). High: deleting files, git push or history rewrites,
+  network installs and downloads, writes outside the project, credentials or
+  agent settings (`.env`, `.ssh`, `.hotline`, `.claude`, `.codex`,
+  `.git/config`, ...). Added as fail-closed cases: `sudo`, nested shell code,
+  `WebFetch` (sends data off the machine), every MCP or unknown tool, and input
+  it cannot read. Inside the project only the path below the root counts
+  (worktrees live under `.claude/`). The hook judges outcomes with the stricter
+  of its own class and the stored one.
+- Security review fixes (coordinator review of ce62b97):
+  - The first version used a denylist, which `/bin/rm`, `$(...)`, backticks,
+    `command rm`, `env rm`, `xargs rm`, `git -c alias.x=push x`, `r\m` and
+    variable-built commands slipped past.
+  - Shell commands now fail closed. `splitShell` splits on `;`, `&&`, `||`, `|`
+    and newlines with quotes, and refuses `$`, backticks, backslashes,
+    subshells, background jobs, here-documents, comments and unbalanced quotes.
+  - A command is low risk only if every simple command is on a read-only
+    allowlist (`ls`, `cat`, `grep`, `rg`, `find` without `-delete`/`-exec`/
+    `-fprint`, read-only `git`, package-manager `test`/`build`/`lint`/
+    `typecheck`) with arguments and redirections inside the project. Otherwise
+    the owner hears the denylist reason, or "runs a command Hotline does not
+    recognise as read-only".
+  - `projectRoot` treats an empty, relative, `/`, top-level or home-directory
+    `cwd` as no project, so every path there counts as outside.
+  - The owner's line now reads the risk first. A preview cut at 200 characters
+    says "command shortened, N more characters" and forces high risk.
+  - The agent's description is labelled `The agent says: "..."`, never stands
+    in for the command, and is dropped when it has no letters or digits. The
+    hook cannot see the daemon's redaction, so "empty after redaction" is
+    approximated by that cleaning step.
+- Greptile and staff review fixes on PR #34:
+  - Text is cut only between words, so a secret is never left as a fragment
+    the redactor misses.
+  - Unknown and MCP tools show argument names, never values.
+  - Each outcome poll ends at the hook's deadline, and a late answer denies.
+  - The Stop hook rechecks away mode before continuing.
+  - Every non-continuing Stop exit clears the count.
+  - `hotline away` and `.hotline/` paths are high risk.
+- Second security review (coordinator, of f85b69b):
+  - Expansions were not modelled: `cat {/etc/passwd,x}` and `cat .e*` passed.
+    The tokenizer now allows only `[A-Za-z0-9_./:@%+,-]` and a non-leading `=`
+    outside quotes. Single quotes may hold anything else. Double quotes may not
+    hold `!`. `$`, backticks, backslashes and C0/C1 controls are refused
+    everywhere. zsh numeric globs (`<1-10>`) are refused.
+  - Attached option values (`grep -f/home/u/.ssh/id_rsa`, `head -c1/etc/x`)
+    are checked as paths, and are high when they do not split cleanly.
+  - Writes to `.git/`, `.gitattributes`, `.gitmodules`, `.husky/`,
+    `package.json`, `node_modules/` and package-manager rc files are high even
+    inside the project, because git and the allowlisted package scripts honour
+    them. Reads stay low.
+  - Package scripts stay low. The module comment and `docs/hooks.md` say they
+    run project code, and that the owner's explicit "yes" is the protection.
+  - Parser-differential tests cover each class: brace, glob, tilde, zsh `=cmd`,
+    numeric glob, qualifier, `^` and `#`, ANSI-C `$'..'`, double-quote `$`, `!`
+    and backticks, CR, NUL, other C0 and C1 controls, Unicode lookalike
+    separators and spaces, and `&!`, `>!`, `|&`, `<>`.
+- Third security review (coordinator and push review, of baa90d5/2976ba2):
+  - Sensitive names are matched case-insensitively after NFC normalisation
+    (macOS APFS ignores both), so `.GIT/config`, `.Env` and `Package.json`
+    count.
+  - A `.git` component at any depth is sensitive.
+  - Every git argument is checked as a path. `--git-dir`, `--work-tree`,
+    `--exec-path`, `--no-index` and `--namespace` are refused, as are options
+    before the subcommand (`-C`, `-c`) and any `VAR=` prefix.
+  - Option values are checked in every form: `--opt=VALUE`, a long option
+    with a path character, and every suffix of a short cluster (`-rf/etc/x`,
+    `-fsecrets`). A separate value is covered by checking each following word.
+  - Tests cover each form for grep, rg, head, tail, diff, find and git.
+    Mutations: skipping the suffix check fails 15 tests; case-sensitive matching
+    fails 6.
+  - `grep -f./patterns.txt` moved from low to high (the suffix `/patterns.txt`
+    is outside).
+  - Stopping point: the classifier only decides how much proof an approval
+    needs (PIN or confirming text vs. a spoken "yes"), never whether one is
+    needed. Every request still needs the owner's own approval, and failures
+    deny. Remaining bypass classes go to HL-13's fuzz tests (the coordinator is
+    recording them on HL-13), and HL-06 stops hardening the classifier here.
+- Daemon: `POST /v1/sessions/:id/asks` accepts `permission` (requires
+  `toolName`, identifier characters up to 100, and `risk`) and `stop`; text and
+  tool name are redacted before storage. Caps per session / total: permission
+  3 / 10, stop 1 / 10, and a new stop cancels the session's stale open stop. A
+  session is `waiting-on-human` while it has an open question, permission or
+  stop. `HotlinePaths` gained `away` and `hookState`.
+- Waiting (plan question 2, recommended default: synchronous wait with a long
+  hook timeout): the hook waits up to `--wait-seconds` (default 540, under both
+  agents' 600 s default `timeout`, which discards output), then cancels the ask
+  and denies or lets the agent stop. `docs/hooks.md` snippets set
+  `timeout: 1900` with `--wait-seconds 1830` to cover the 30-minute ask timeout.
+  SIGTERM or SIGINT cancels the ask.
+- Fixture recheck (carried over on #7), offline, no model calls: the Codex
+  0.146.0 binary embeds the four generated hook schemas, identical to
+  `codex/schema/`. The Claude Code 2.1.299 bundle's zod schemas match the
+  fixtures, plus new optional input fields (`prompt_id`, `agent_id`,
+  `agent_type`, `mcp_server`) the loose schemas already allow. Notes in the
+  fixtures README.
+- Evidence (worktree, Node 24.11.0):
+  - `scripts/ci/run.sh setup`, `build` and `test` pass: 682 tests in 34 files
+    at ce62b97, 766 at f85b69b, 824 at baa90d5, 1070 (41 files) after the
+    third review, and 1222 (45 files) after catching up with HL-09.
+  - The security fixes have a bypass test for each case the review listed,
+    plus unknown-project, shortened-preview and reassuring-description tests.
+    Earlier expectations only moved from low to high. Mutations: treating
+    unknown commands as read-only fails 29 risk tests; counting `/` as a
+    project fails 2.
+  - Golden tests: every HL-02 input fixture for both agents through `runHook`
+    against a real daemon on 127.0.0.1 (temporary store, fake clock), with the
+    owner's answer written by `recordAnswer`; outputs equal the allow, deny and
+    stop-block fixtures. Fake-daemon tests cover every failure path. CLI tests
+    run `hotline hook` and `hotline away` against a temporary HOTLINE_HOME.
+  - Mutation checks: allowing on any answered outcome fails 6 tests; dropping
+    the stricter-risk rule fails 2; dropping the "continuation not ours" guard
+    fails 1.
+  - Manual: the built CLI as child processes (daemon, `away on`, then hooks)
+    with a temporary HOTLINE_HOME: allow with PIN printed the allow output, a
+    Codex stop printed the block output, SIGTERM printed a deny and left the ask
+    `cancelled`, `--wait-seconds 2` denied, and the daemon exited 0 without the
+    token in its stderr.
+  - Not run: the scenario suite (HL-12); real Claude Code or Codex sessions
+    (that would call their model APIs); live call.
+- Open issues or follow-ups:
+  - HL-09: read permission asks out with their risk and require the PIN or a
+    confirming text for `high`; send the cap notification.
+  - HL-10: deliver queued owner instructions at the next Stop hook.
+  - HL-11: install the snippets in `docs/hooks.md` and have `doctor` check that
+    `--wait-seconds` stays below the hook `timeout`.
+  - A human should check one real Claude Code and one real Codex session with
+    the hooks installed and fake providers, including Codex's `/hooks` trust step.

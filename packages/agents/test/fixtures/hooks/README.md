@@ -15,6 +15,23 @@ Checked 2026-10-13. Neither agent's docs page carries a version or date, so
 compare these fixtures with the installed CLI before trusting them for a release
 (`claude --version`, `codex --version`).
 
+Rechecked 2026-10-14 for HL-06 against the installed CLIs, offline and without
+starting a session (nothing called a model API):
+
+- **Codex 0.146.0** (`codex-cli 0.146.0`, darwin-arm64): the binary embeds the
+  generated hook schemas. The four Hotline uses, extracted by their `title` and
+  compared as parsed JSON, are identical to the copies in `codex/schema/`.
+- **Claude Code 2.1.299**: the zod schemas in the installed bundle match the
+  fixtures. `Stop` input has `stop_hook_active`, optional `last_assistant_message`,
+  `background_tasks` and `session_crons`. `PermissionRequest` input has
+  `tool_name`, `tool_input` and optional `permission_suggestions`. The
+  `PermissionRequest` output decision is `allow` (optional `updatedInput`,
+  `updatedPermissions`) or `deny` (optional `message`, `interrupt`).
+  Claude Code has added optional input fields since the docs snapshot
+  (`prompt_id`, `agent_id`, `agent_type`, `mcp_server`); the loose input schemas
+  keep them, and Hotline does not use them. The Stop-hook block cap is still 8
+  (`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`).
+
 ### Claude Code
 
 Page: <https://code.claude.com/docs/en/hooks>

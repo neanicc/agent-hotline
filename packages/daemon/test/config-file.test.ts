@@ -30,6 +30,8 @@ describe("hotlinePaths", () => {
       secrets: "/Users/example/.hotline/secrets.json",
       database: "/Users/example/.hotline/hotline.db",
       lock: "/Users/example/.hotline/daemon.lock",
+      away: "/Users/example/.hotline/away.json",
+      hookState: "/Users/example/.hotline/hook-state",
     });
   });
 

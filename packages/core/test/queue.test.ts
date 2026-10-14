@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { AskOutcome, createQueue, nextWakeAt, permissionVerdict, step } from "../src/index.js";
+import {
+  AskOutcome,
+  createQueue,
+  nextWakeAt,
+  permissionVerdict,
+  step,
+  stopInstruction,
+} from "../src/index.js";
 import {
   Harness,
   HOUR,
@@ -739,6 +746,25 @@ describe("permissionVerdict", () => {
     const { confirmation: _dropped, ...answer } = makeAnswer("p1", { type: "allow" }, NOON);
     expect(permissionVerdict(high, { outcome: "answered", answer } as unknown as AskOutcome)).toBe("deny");
     expect(permissionVerdict(low, { outcome: "answered" } as unknown as AskOutcome)).toBe("deny");
+  });
+});
+
+describe("stopInstruction", () => {
+  const stop = makeAsk({ id: "s1", kind: "stop", createdAt: NOON });
+  const answered = (decision: Parameters<typeof makeAnswer>[1], askId = "s1") =>
+    AskOutcome.parse({ outcome: "answered", answer: makeAnswer(askId, decision, NOON) });
+
+  it("continues only with the owner's text for this stop ask", () => {
+    expect(stopInstruction(stop, answered({ type: "text", text: "now add tests" }))).toBe("now add tests");
+    expect(stopInstruction(stop, answered({ type: "done" }))).toBeUndefined();
+    expect(stopInstruction(stop, answered({ type: "text", text: "go" }, "s2"))).toBeUndefined();
+    expect(
+      stopInstruction({ ...stop, kind: "question" }, answered({ type: "text", text: "go" })),
+    ).toBeUndefined();
+    for (const reason of ["timeout", "no-pickup", "unclear", "dropped", "failed", "cancelled"] as const) {
+      expect(stopInstruction(stop, { outcome: "no-answer", askId: "s1", reason })).toBeUndefined();
+    }
+    expect(stopInstruction(stop, { outcome: "answered" } as unknown as AskOutcome)).toBeUndefined();
   });
 });
 

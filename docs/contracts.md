@@ -382,7 +382,27 @@ Outputs are strict and narrower than what the agents accept:
 
 Hotline never sends `updatedInput` or `updatedPermissions`, and never applies a
 `permission_suggestions` entry: it only answers the prompt the agent would show
-in the terminal.
+in the terminal. The adapters that print these are in `packages/agents`; see
+[hooks.md](hooks.md).
+
+## Permission risk (`permission-risk.ts`)
+
+`classifyPermission({toolName, toolInput, cwd})` returns `{risk, reasons}`,
+where `high` needs the PIN or a confirming text to approve. It fails closed:
+
+- A shell command is `low` only when `splitShell` understands all of it and
+  every simple command is on a short read-only allowlist with arguments inside
+  the project.
+- File edits and patches are `low` only inside a known project
+  (`projectRoot`; `/`, top-level directories and home directories are not one).
+- Read tools are `low` unless they point at credentials. `WebFetch`, MCP tools
+  and unknown tools are `high`.
+- The reasons name what the owner hears: deleting files, git push, network
+  installs and so on.
+
+Pure: paths are resolved as POSIX strings (`resolvePosix`, `insideProject`),
+never on the file system. The full rules are in
+[hooks.md](hooks.md#risk-classes-plan-question-6).
 
 ## Ask queue and call policy (`queue.ts`, `policy.ts`)
 
@@ -432,6 +452,9 @@ Rules:
   `timeout`. `permissionVerdict(ask, outcome)` turns an outcome into `allow` only
   for an owner approval of that permission ask, with confirmation when it is high
   risk; every other input, malformed ones included, is `deny`.
+  `stopInstruction(ask, outcome)` returns the owner's next instruction only for
+  a `text` answer to that stop ask; `done`, any no-answer and malformed input
+  return undefined, which lets the agent stop.
 - **Priority.** Urgent asks first, then `permission`, `question`, `stop`,
   `notify`, then oldest, then id.
 - **Batching.** A new ask waits `policy.batchWindowSeconds`. When any callable ask

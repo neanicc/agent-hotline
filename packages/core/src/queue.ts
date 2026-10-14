@@ -215,6 +215,19 @@ export function permissionVerdict(ask: Ask, outcome: AskOutcome): "allow" | "den
 }
 
 /**
+ * The owner's next instruction after a stop, or undefined to let the agent stop:
+ * only an `answered` outcome for this stop ask whose decision is `text`. A `done`
+ * decision, any no-answer and malformed input all let the agent stop.
+ */
+export function stopInstruction(ask: Ask, outcome: AskOutcome): string | undefined {
+  const parsed = AskOutcome.safeParse(outcome);
+  if (!parsed.success || ask.kind !== "stop" || parsed.data.outcome !== "answered") return undefined;
+  const { answer } = parsed.data;
+  if (answer.askId !== ask.id || answer.decision.type !== "text") return undefined;
+  return answer.decision.text;
+}
+
+/**
  * Only questions and notifications are deduped. `text` is a redacted, length-capped
  * summary, so two different permission requests (or stop prompts) can share it; each
  * of those gets its own decision, even when one call reads them out together.
