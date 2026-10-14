@@ -4,8 +4,10 @@
 import { type Config, parseSmsReply, type SecretStore } from "@hotline/core";
 import { ensureApiToken } from "./api-token.js";
 import { hotlinePaths, loadConfig } from "./config-file.js";
+import { elevenLabsRoutes } from "./elevenlabs-webhook.js";
 import { acquireDaemonLock } from "./lock.js";
 import type { LogDestination, LogLevel } from "./logger.js";
+import { PinGate, verifyPin } from "./pin.js";
 import { createRedactor, type Redactor } from "./redact.js";
 import { type Exec, openSecretStore } from "./secret-store.js";
 import { type Daemon, startDaemon, type WebhookRoute } from "./server.js";
@@ -83,7 +85,7 @@ export interface RunDaemonOptions {
 
 export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
 
-interface SmsWebhookSetup {
+interface WebhookSetup {
   routes: WebhookRoute[];
   /** Why the SMS webhook is off, when it is. */
   off?: string;
@@ -101,7 +103,7 @@ async function smsWebhook(
   redactor: Redactor,
   store: HotlineStore,
   clock: () => Date,
-): Promise<SmsWebhookSetup> {
+): Promise<WebhookSetup> {
   if (config.sms.provider !== "twilio") return { routes: [], off: "the SMS provider is fake" };
   const smsNumber = config.sms.fromNumber;
   const publicUrl = config.tunnel.publicUrl;
@@ -138,6 +140,73 @@ async function smsWebhook(
 }
 
 /**
+ * The ElevenLabs server-tool and post-call routes, when the config and secret
+ * store have everything they need. Otherwise none is registered and
+ * `/hooks/el/*` stays a 403. The PIN check and its limits are live; until call
+ * orchestration (HL-09) and the inbound line (HL-10) take over, answers and
+ * instructions are recorded in the audit log by kind only and never resolve
+ * anything, and the status is not read out.
+ */
+async function voiceWebhook(
+  config: Config,
+  secrets: SecretStore,
+  redactor: Redactor,
+  store: HotlineStore,
+  clock: () => Date,
+): Promise<WebhookSetup> {
+  if (config.voice.provider !== "elevenlabs") return { routes: [], off: "the voice provider is fake" };
+  const agentId = config.voice.agentId;
+  if (agentId === undefined) return { routes: [], off: "voice.agentId is not set" };
+  if (config.tunnel.publicUrl === undefined) return { routes: [], off: "tunnel.publicUrl is not set" };
+  const [toolSecret, webhookSecret] = await Promise.all([
+    secrets.get("elevenlabs.toolSecret"),
+    secrets.get("elevenlabs.webhookSecret"),
+  ]);
+  if (toolSecret === undefined || webhookSecret === undefined) {
+    return { routes: [], off: "the ElevenLabs tool or webhook secret is not in the secret store" };
+  }
+  redactor.addSecret(toolSecret);
+  redactor.addSecret(webhookSecret);
+  const pinHash = config.owner.pinHash;
+  const pins = new PinGate({
+    check: (pin) => verifyPin(pin, pinHash),
+    clock,
+    onVerified: (pin) => redactor.addShortSecret(pin),
+    // Recorded now; the inbound line (HL-10) also texts the owner about it.
+    onLockout: (direction) => store.appendAudit("voice.pin-lockout", { direction }, clock()),
+  });
+  const routes = elevenLabsRoutes({
+    toolSecret,
+    webhookSecret,
+    agentId,
+    ownerNumber: config.owner.phoneNumber,
+    // No calls are placed until call orchestration (HL-09), so every call is
+    // treated as inbound and needs the PIN.
+    placedCall: () => false,
+    pins,
+    clock,
+    redact: (text) => redactor.text(text),
+    handlers: {
+      submitAnswer: ({ decision, receivedAt }) => {
+        const kind = decision === "unclear" ? "unclear" : decision.type;
+        store.appendAudit("voice.answer", { decision: kind, recorded: false }, receivedAt);
+        return "not-recorded";
+      },
+      getStatus: () => "Status is not available yet.",
+      sendInstruction: ({ receivedAt }) => {
+        store.appendAudit("voice.instruction", { queued: false }, receivedAt);
+        return "unknown-session";
+      },
+      postCall: (event, receivedAt) => {
+        const detail = event.type === "transcription" ? { status: event.status } : { reason: event.reason };
+        store.appendAudit(`voice.${event.type}`, detail, receivedAt);
+      },
+    },
+  });
+  return { routes };
+}
+
+/**
  * Runs the daemon until SIGINT or SIGTERM. Resolves with the process exit code:
  * 0 after a clean stop, 1 if closing timed out. Startup problems (missing or
  * unsafe config, another daemon on the same home, secret store, database, port
@@ -166,18 +235,20 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
     const log = { level: options.logLevel ?? "info", destination: options.logDestination, redactor };
     store = await openStore(paths.database, { redactor });
     const sms = await smsWebhook(config, secrets, redactor, store, clock);
+    const voice = await voiceWebhook(config, secrets, redactor, store, clock);
     daemon = await startDaemon({
       apiToken,
       store,
       ...ports,
       log,
       version: options.version,
-      webhookRoutes: sms.routes,
+      webhookRoutes: [...sms.routes, ...voice.routes],
       clock,
       askTimeoutMinutes: config.policy.askTimeoutMinutes,
       nicknames: config.nicknames,
     });
     if (sms.off !== undefined) daemon.log.info({ reason: sms.off }, "sms webhook off");
+    if (voice.off !== undefined) daemon.log.info({ reason: voice.off }, "voice webhooks off");
     store.appendAudit(
       "daemon.started",
       { version: options.version, apiPort: daemon.apiPort, hooksPort: daemon.hooksPort },

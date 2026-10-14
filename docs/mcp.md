@@ -52,7 +52,9 @@ decides anything itself.
 Once the client has initialized, the server registers a session with the
 daemon (`POST /v1/sessions`). It sends the agent, its working directory and,
 for Claude Code, `CLAUDE_CODE_SESSION_ID`. The daemon names it "Claude in
-<folder>" or "Codex in <folder>" unless `config.nicknames` has the folder. A
+<folder>" or "Codex in <folder>" unless `config.nicknames` has the folder,
+numbering a second live session with the same name ("Claude 2 in <folder>");
+see [voice.md](voice.md#session-names). A
 registration with the same agent session id reuses the live session. If the
 daemon is not running yet, the next tool call registers. If the daemon has
 forgotten the session, the server registers again once. When the client closes

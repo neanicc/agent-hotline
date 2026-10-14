@@ -14,6 +14,7 @@
     "test": "vitest run --root ../.. --project providers"
   },
   "dependencies": {
-    "@hotline/core": "workspace:*"
+    "@hotline/core": "workspace:*",
+    "zod": "4.6.5"
   }
 }

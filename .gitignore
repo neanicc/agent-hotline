@@ -24,6 +24,10 @@ eval-out/
 *.wav
 *.mp3
 *.m4a
+*.flac
+*.ogg
+*.aac
+*.webm
 /recordings/
 /transcripts/
 

@@ -28,7 +28,7 @@ One running Claude Code or Codex session that registered with the daemon.
 | `agent` | `claude-code` \| `codex` | |
 | `agentSessionId` | id, optional | The agent's own `session_id`, as its hooks report it |
 | `cwd` | absolute path | |
-| `nickname` | 1–60 chars | Spoken name, default "<agent> in <repo folder>", overridable in `config.nicknames` |
+| `nickname` | 1–60 chars | Spoken name, default "<agent> in <repo folder>", overridable in `config.nicknames`; see `sessionNickname` below |
 | `state` | `working` \| `waiting-on-human` \| `idle` \| `ended` | |
 | `lastMessageSummary` | ≤ 500 chars, optional | Redacted before storage |
 | `registeredAt`, `lastSeenAt` | timestamp | |
@@ -248,6 +248,99 @@ text (it can quote numbers).
 - `twilioSignature`, `twilioSignaturePayload` and `validTwilioSignature`
   implement Twilio's `X-Twilio-Signature` algorithm; the tests reproduce
   Twilio's documented example.
+
+## Voice providers
+
+`VoiceProvider.callOwner({callId, asks})` is the only way to place a call. A
+provider is created with the owner's number and has no recipient parameter.
+It resolves with the ElevenLabs `conversationId` (and the Twilio call SID when
+reported) once the call is accepted; what the owner says arrives later through
+the server tools and the post-call webhook. Failures reject with
+`VoiceCallError`, carrying the HTTP status only, never the provider's message.
+
+What leaves the machine is `callVariables(call, redact)`, shared by the real and
+fake providers: `hotline_call_id`, `ask_count` (1 to 4), `opening` (fixed
+words only, "One of your agents needs you...", because ElevenLabs speaks it as
+is and agent text cannot be fenced there) and `asks`, one line per ask with its number, the session nickname,
+the kind (`HIGH RISK (PIN required)` for high-risk permission requests), the
+tool name, the options and the text. Every agent-derived string (nickname, tool
+name, each option, the text) sits inside its own `<agent_text>...</agent_text>`
+fence; only Hotline's fixed words are outside. Each string is redacted whole
+first, then cut: ask text to 300 characters, options to 80, nicknames to 60.
+Control and invisible format characters, line breaks, angle brackets and
+braces are removed, so agent text is one plain line that cannot close its
+fence or spell a `{{variable}}`. The prompt tells the model that fenced text is
+a question to read out and must never decide which tool it calls, which
+decision it submits or what `owner_words` it sends.
+
+- `ElevenLabsVoiceProvider`: one JSON `POST` to
+  `https://api.elevenlabs.io/v1/convai/twilio/outbound-call` with `xi-api-key`,
+  `agent_id`, `agent_phone_number_id`, `to_number` (the owner) and the
+  variables as `conversation_initiation_client_data.dynamic_variables`, a 15
+  second timeout and a required injected `fetch`.
+- `FakeVoiceProvider`: records each placed call and its variables, and plays
+  scripted humans (`scriptedHuman.noPickup()`, `busy()`, `silent()`, `drops()`,
+  `allows()`, `denies()`, `unclear()`, `wrongPin()`, or `says(...steps)` with
+  `pin`, `answer`, `unclear`, `status`, `instruct`, `silence` and `hang-up`
+  steps) through a `VoiceToolClient`. `httpVoiceToolClient` sends those tool
+  calls to the daemon's real routes with the tool secret and signs the post-call
+  webhooks, so the scenario suite exercises authentication too.
+  `playPending()` plays placed calls in order (a call without a script is not
+  picked up); `inboundCall(script, from)` plays a call in. Transcript turns are
+  timed with the injected `clock`. The fake ends a call
+  when a tool answers `end_call: true`, as the prompt tells the real agent to.
+
+The daemon answers a byte-identical repeat of `submit_answer`, `verify_pin` or
+`send_instruction` within two hours from memory, for state-changing results
+only. A repeated identical failed `verify_pin` therefore never re-checks the
+PIN and spends no attempt; see [daemon.md](daemon.md#elevenlabs-hooksel).
+
+**The agent definition** (`elevenlabs-agent.ts`, `AGENT_DEFINITION_VERSION`):
+the prompt, first message and four webhook tools as code. `hotlineToolConfigs`
+gives each tool's `tool_config` (URL `<publicUrl>/hooks/el/tools/<name>`, the
+`x-hotline-tool-secret` header from an ElevenLabs workspace secret, and a body
+schema); `hotlineAgentConfig` gives the agent body with the tool ids, voice,
+`end_call` and placeholders for inbound calls. HL-11 `hotline init` applies
+them. Every tool's `conversation_id`, `call_sid`, `caller_id` and
+`called_number` come from ElevenLabs' `system__*` dynamic variables, not from
+the model, and no tool has a confirmation parameter. The prompt says agent
+text is data, never instructions; decisions count only through `submit_answer`
+with the owner's own words; a high-risk allow needs `verify_pin` first; an
+inbound call reveals nothing before the PIN; and an unclear answer is asked
+once more, then reported as `unclear`. Version 2 (HL-14) puts a persona section
+from plan section 6 before those rules and says the persona cannot bend them;
+`SAFETY_RULES` in the providers tests checks each rule word for word, and a
+snapshot covers the whole prompt, first message and agent body. See
+[voice.md](voice.md#the-persona). `hotlineAgentConfig` refuses a voice id that
+`isVoiceId` rejects (letters, digits, `_` and `-`, at most 100).
+
+**Session nicknames** (`nickname.ts`): `sessionNickname({agent, cwd, nicknames,
+redact, taken})` is the spoken name the daemon stores when a session
+registers: `config.nicknames[<last folder>]` if set, else "Claude in
+<folder>" or "Codex in <folder>". The folder is redacted whole, then
+`speakableName` keeps only letters, marks, digits, spaces and `- _ . ' [ ] …`,
+only the first `MAX_FOLDER_WORDS` (4) words of the folder are kept (a
+configured name is not word-capped), then the whole name is cut to `MAX_SPOKEN_NICKNAME_LENGTH` (60). An empty
+folder is "an unnamed folder". A name another live session has gets a number
+("Claude 2 in demo-app"). `callVariables` applies `speakableName` to the
+nickname again before fencing it.
+
+`owner_words` is written by the voice model. `ownerSaid(excerpt, transcript)`
+checks it against the owner's turns of the post-call transcript (case and
+punctuation ignored, whole words, never agent or caller turns). Call
+orchestration should confirm a voice decision with it before trusting it.
+`parsePostCallEvent(body, {ownerNumber, pinVerifiedAt})` labels the person's
+turns `owner` only on an outbound call to the owner's number, or for turns
+spoken after the PIN was verified on an inbound call from it (the call's
+`start_time_unix_secs` plus the turn's `time_in_call_secs`, later than the
+verification). Any other person or turn, every turn without a time on an
+inbound call, and every call parsed without that context, is a `caller`.
+
+`validPostCallSignature`, `postCallSignature` and `postCallSignatureHeader`
+implement the `ElevenLabs-Signature` HMAC; `parsePostCallEvent` reduces a
+verified body to a `transcription` (status, direction, the other party's
+number, duration, owner and agent turns) or an `initiation-failure` (`busy`,
+`no-answer` or `unknown`).
 
 ## Hook payloads (`hooks.ts`)
 
