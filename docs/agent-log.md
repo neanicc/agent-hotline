@@ -2802,6 +2802,79 @@ Template:
   (doctor's `llmPerMinute` does not follow `voice.llm`) is the follow-up
   already listed above.
 
+## 2026-10-14 — HL-16 Live-call protocol (#74)
+
+- Decision / change: `docs/live-check.md` is now the owner's numbered
+  protocol: prerequisites P1 to P13 (accounts, tunnel, Twilio and ElevenLabs
+  setup, `init`, `voice apply`, `install`, session settings, daemon, `doctor`
+  with expected output), real agents on fake providers R1 to R6, live calls
+  L1 to L27 (each with the exact words to say or type, the expected result and
+  what to record), a coverage map (plan section 11 items, all 22 eval
+  scenarios, the #17 carry-overs), a results template and cleanup, uninstall
+  and credential revocation steps. The live run itself stays `needs-human`;
+  the PR refers to #17 without closing it.
+- Fix: the old doc tunnelled port 7777. The webhook listener is
+  `daemon.port + 1`, 7342 by default; P4 now says so and warns never to tunnel
+  the agent API.
+- Voice model: the HL-14d comment on #17 named Sonnet 5.5 with Haiku as the
+  fallback; the later owner direction on #57 (implemented by #70) makes
+  `claude-haiku-4-5` the default. L25 measures the default and offers Sonnet
+  5.5 as the comparison.
+- Session settings for the run (P10): raised rate limits (20 calls an hour,
+  60 a day, 20 texts an hour, 60 a day), `askTimeoutMinutes` 10 and
+  `maxConsecutiveContinuations` 2, with a copy of the config to restore
+  afterwards, so about 45 calls and the silence and cap steps fit in an
+  afternoon. They are the owner's own config, not a code change.
+- R1 to R6 use a scratch `HOTLINE_HOME` with the file secret store: the
+  Keychain store's service name is fixed (`agent-hotline`), so a scratch home
+  on the Keychain would overwrite the real items.
+- Codex shell requests are always high risk, so the Codex approval for
+  acceptance item 5 (L10) needs the PIN on the call.
+- Reply judge (HL-09d, #65, merged while this was written): P7 has the owner
+  choose it at `init` (it is off until chosen), P14 runs `doctor
+  --check-judge` once per backend so the real `claude -p` and `codex exec`
+  flags are exercised, with the bare commands to find a refused flag, and
+  checks the judge bills the plan login rather than an API key (#72); L8
+  tries natural yeses, a conditional yes and two French replies, a plain one
+  and a conditional one.
+- #70 (HL-14d) was also merged while this was written; its live-check items
+  are in P8, P13 and L25, and its own `docs/live-check.md` hunk was taken
+  over by this version on catch-up.
+- Steps for the open PRs #64 and #69 (and the fix for #72) are written in
+  and marked N/A until each is merged. Each of those PRs also edits
+  `docs/live-check.md`; when one lands after this, keep this version (it
+  already covers their items).
+- `rate-limit-holds-calls` and `replayed-webhook-rejected` stay fakes only: a
+  live run would cost calls for no new evidence, or need a captured signed
+  request.
+- New `test/live-check.test.ts`: step ids are contiguous and each has one
+  results row, every step the doc refers to exists, every scenario in
+  `docs/eval.md` and every plan section 11 item is mapped, every relative link
+  in the doc (and every link into it from README.md and docs/) resolves, and
+  the only phone numbers are the fake 555-01xx ones. Each check was seen to
+  fail on a deliberate break (a bad anchor, a dropped scenario row, a dropped
+  results row, a real-looking number, a renumbered step, a dropped acceptance
+  row, a reference to a missing step), then restored.
+- Evidence: see the PR's Validation section. No call, text, credential or real
+  `claude`/`codex` run against the daemon was used.
+- Open issues or follow-ups: the live run (owner); file one issue per failure
+  it finds.
+- Review fixes (staff review and Greptile on #74):
+  - P10 raises all four rate limits for the run: the "what next?" calls bring
+    it to about 45 calls, past the default daily limit.
+  - Section 3 says to answer every "what next?" call with "that's it" unless
+    the step tests those calls.
+  - P3 creates `main` explicitly (`git init -b main`) for L9's push.
+  - L24 also posts an unsigned post-call webhook and expects 403.
+  - R1 says the scratch PIN is throwaway.
+  - The doc test also catches formatted and bare-digit phone numbers.
+  - Second review round: P10 shows the undo command next to the edit, and
+    cleanup checks the restore with `cmp` and records it in the results.
+  - The doc test now parses every config snippet in the doc with core's
+    `parseConfig`, and checks every `hotline` flag it uses against the CLI
+    source. A misspelled key, a refused value and an unknown flag each failed
+    it.
+
 ## 2026-10-14 — HL-13 Security pass (#14)
 
 - Change: `docs/security.md`, the threat model: assets, actors, trust
