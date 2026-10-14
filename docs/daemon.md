@@ -178,7 +178,9 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
   once it is allowed, such as an approval resent after `verify_pin`. One
   consequence: the owner giving the same session the same instruction twice in
   one call (byte-identical body) queues it once, though the voice agent hears
-  `queued` both times. A
+  `queued` both times. Likewise a byte-identical `verify_pin` in the same call gets
+  its first answer again, even after a lockout has ended; the owner has to say
+  the PIN on a new call. A
   remembered delivery is never evicted before its window ends: with 1000 live
   ones (only possible with the tool secret), a new delivery gets
   `{"result": "busy"}` and does not run. `get_status` only

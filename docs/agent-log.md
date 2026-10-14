@@ -813,3 +813,11 @@ Template:
     memories reset on restart (P3).
   - Map `unclear` to the queue's `unclear` event and `initiation-failure` to
     `no-pickup` (busy, no-answer) or `failed`.
+- Seventh bot staff review on #33 (score 89): no code change. The test
+  "binds every call to ElevenLabs' system variables, never to model output"
+  already pins `conversation_id`, `call_sid`, `caller_id` and `called_number`
+  to `system__*` dynamic variables in every tool config. The live check must
+  confirm the same on the real agent after `hotline init` (HL-11, HL-16).
+  Documented that a repeated identical `verify_pin` in one call gets its first
+  answer. Future listener changes such as `bodyLimit`, `maxInFlight` and
+  `bodyTimeoutMs` should land in their own PRs.
