@@ -31,6 +31,8 @@ export const HOOKS_PREFIX = "/hooks";
 
 const AGENT_API_BODY_LIMIT = 1024 * 1024;
 const WEBHOOK_BODY_LIMIT = 256 * 1024;
+/** How long a route with `maxInFlight` waits for a body before dropping the connection. */
+export const DEFAULT_BODY_TIMEOUT_MS = 10_000;
 
 /** Proves a webhook came from its provider. Only a literal `true` lets the request through. */
 export type WebhookVerifier = (request: FastifyRequest) => boolean | Promise<boolean>;
@@ -45,7 +47,7 @@ declare module "fastify" {
   interface FastifyContextConfig {
     verifyWebhook?: WebhookVerifier;
     precheckWebhook?: WebhookPrecheck;
-    inFlightWebhook?: { count: number; readonly max: number };
+    inFlightWebhook?: { count: number; readonly max: number; readonly bodyTimeoutMs: number };
   }
 }
 
@@ -62,6 +64,12 @@ export interface WebhookRoute {
    * their body is read. For routes that must read a body before they can verify it.
    */
   maxInFlight?: number;
+  /**
+   * With `maxInFlight`: how long a sender may take to deliver the body before
+   * the connection is dropped and its slot freed, so slow senders cannot hold
+   * every slot. Default `DEFAULT_BODY_TIMEOUT_MS`.
+   */
+  bodyTimeoutMs?: number;
   handler: (request: FastifyRequest, reply: FastifyReply) => unknown;
 }
 
@@ -211,6 +219,12 @@ export function buildWebhookServer({ log, routes = [] }: WebhookServerOptions): 
 
   /** Requests holding an in-flight slot of their route. */
   const holding = new WeakSet<FastifyRequest>();
+  /** Body-read deadlines of requests holding a slot, cleared once the body is in. */
+  const deadlines = new WeakMap<FastifyRequest, NodeJS.Timeout>();
+  const clearDeadline = (request: FastifyRequest) => {
+    clearTimeout(deadlines.get(request));
+    deadlines.delete(request);
+  };
   void app.register(
     async (hooks) => {
       // Before the body is read: a route that cannot verify its caller is refused
@@ -231,11 +245,16 @@ export function buildWebhookServer({ log, routes = [] }: WebhookServerOptions): 
         if (limit.count >= limit.max) return rejectWebhook(request, reply, "too many in flight");
         limit.count += 1;
         holding.add(request);
+        // A sender that does not finish its body in time is cut off; the abort frees the slot.
+        const deadline = setTimeout(() => request.raw.destroy(), limit.bodyTimeoutMs);
+        deadline.unref();
+        deadlines.set(request, deadline);
         return undefined;
       });
       // Every request that took an in-flight slot gives it back exactly once,
       // whether it was answered or the sender went away.
       const release = async (request: FastifyRequest) => {
+        clearDeadline(request);
         if (!holding.delete(request)) return;
         const limit = request.routeOptions.config.inFlightWebhook;
         if (limit !== undefined) limit.count -= 1;
@@ -244,6 +263,7 @@ export function buildWebhookServer({ log, routes = [] }: WebhookServerOptions): 
       hooks.addHook("onRequestAbort", release);
       // After parsing, so verifiers can check signatures over the parameters or body.
       hooks.addHook("preHandler", async (request, reply) => {
+        clearDeadline(request);
         const verify = request.routeOptions.config.verifyWebhook;
         let verified = false;
         try {
@@ -263,7 +283,13 @@ export function buildWebhookServer({ log, routes = [] }: WebhookServerOptions): 
             precheckWebhook: route.precheck,
             ...(route.maxInFlight === undefined
               ? {}
-              : { inFlightWebhook: { count: 0, max: route.maxInFlight } }),
+              : {
+                  inFlightWebhook: {
+                    count: 0,
+                    max: route.maxInFlight,
+                    bodyTimeoutMs: route.bodyTimeoutMs ?? DEFAULT_BODY_TIMEOUT_MS,
+                  },
+                }),
           },
           ...(route.bodyLimit === undefined ? {} : { bodyLimit: route.bodyLimit }),
           handler: route.handler,

@@ -16,6 +16,7 @@ import {
   type LogOptions,
   MAX_POST_CALLS_IN_FLIGHT,
   MAX_STATUS_LENGTH,
+  MAX_TOOL_DELIVERIES,
   PinGate,
   POST_CALL_BODY_LIMIT,
   type SubmitAnswerResult,
@@ -328,6 +329,17 @@ describe("repeated tool calls", () => {
     now = new Date(now.getTime() + 2 * 60 * 60 * 1000 + 1);
     await answer();
     expect(answers).toHaveLength(2);
+  });
+
+  it(`never evict a live delivery: past ${MAX_TOOL_DELIVERIES} they refuse new ones instead`, async () => {
+    for (let i = 0; i < MAX_TOOL_DELIVERIES; i += 1) await answer({ owner_words: `yes ${i}` });
+    expect(answers).toHaveLength(MAX_TOOL_DELIVERIES);
+    expect((await answer({ owner_words: "one too many" })).json()).toEqual({ result: "busy" });
+    // The oldest delivery is still remembered, so its replay does not run again.
+    await answer({ owner_words: "yes 0" });
+    expect(answers).toHaveLength(MAX_TOOL_DELIVERIES);
+    now = new Date(now.getTime() + 2 * 60 * 60 * 1000 + 1);
+    expect((await answer({ owner_words: "one too many" })).json()).toEqual({ result: "recorded" });
   });
 
   it("keep reading the status on every request", async () => {
@@ -650,6 +662,45 @@ describe("post-call webhook under load", () => {
     });
     expect(accepted.status).toBe(200);
     expect(postCalls).toHaveLength(1);
+  });
+
+  it("cuts off senders that do not finish their body in time, freeing their slots", async () => {
+    listening = server({ postCallBodyTimeoutMs: 200 });
+    await listening.listen({ host: "127.0.0.1", port: 0 });
+    const port = listening.addresses()[0]?.port ?? 0;
+    const closed: boolean[] = [];
+    const stalled = Array.from({ length: MAX_POST_CALLS_IN_FLIGHT }, () => {
+      const req = request({
+        host: "127.0.0.1",
+        port,
+        path: "/hooks/el/post-call",
+        method: "POST",
+        agent: false,
+        headers: {
+          "content-type": "application/json",
+          "elevenlabs-signature": "t=1,v0=00",
+          "content-length": "1000",
+        },
+      });
+      req.on("error", () => closed.push(true));
+      req.write("{");
+      return req;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    const raw = JSON.stringify(transcription("conv_after_timeout"));
+    const accepted = await send({
+      port,
+      method: "POST",
+      path: "/hooks/el/post-call",
+      headers: {
+        "content-type": "application/json",
+        "elevenlabs-signature": postCallSignatureHeader(WEBHOOK_SECRET, now.getTime() / 1000, raw),
+      },
+      body: raw,
+    });
+    expect(accepted.status).toBe(200);
+    expect(closed).toHaveLength(MAX_POST_CALLS_IN_FLIGHT);
+    for (const req of stalled) req.destroy();
   });
 });
 

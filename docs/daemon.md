@@ -94,7 +94,9 @@ fails closed in three places:
    (`false`, a truthy value, a throw or a rejected promise) gets `403`.
 
 A route may also set `bodyLimit` (a larger body limit) and `maxInFlight`
-(requests read or handled at once; more get the 403 before their body is read).
+(requests read or handled at once; more get the 403 before their body is read),
+with `bodyTimeoutMs` (default 10 s) after which a sender that has not delivered
+its body is cut off.
 Every rejection is the same bare `403` with an empty body, so a scanner cannot
 tell a missing route from a bad signature or a malformed body. A rejected request
 is logged with its method, path and reason (`no verifier`, `precheck failed`,
@@ -173,7 +175,10 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
   deliveries that changed state are remembered (`recorded`, `queued`, or a PIN
   attempt); anything else (`pin-required`, `needs-pin`, `not-recorded`,
   `invalid`, `refused`) or a failure is forgotten, so the same call can succeed
-  once it is allowed, such as an approval resent after `verify_pin`. `get_status` only
+  once it is allowed, such as an approval resent after `verify_pin`. A
+  remembered delivery is never evicted before its window ends: with 1000 live
+  ones (only possible with the tool secret), a new delivery gets
+  `{"result": "busy"}` and does not run. `get_status` only
   reads, after the PIN, and runs every time. The memory does not survive a
   restart (HL-13).
 - **Owner on the call:** the body's `caller_id` or `called_number`, which
@@ -195,9 +200,10 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
 - **Precheck:** an `ElevenLabs-Signature` header and a JSON content type. The
   HMAC covers the body, so it can only be checked after the body is read; at
   most 4 post-call requests are read or handled at once (`maxInFlight` on the
-  route), and the rest get the bare 403 before their body is read. A slot is
-  given back when the response is sent or the sender goes away. Rate limiting
-  at the tunnel is still worthwhile.
+  route), and the rest get the bare 403 before their body is read. A sender
+  that has not delivered its body within 10 seconds is cut off. A slot is given
+  back when the response is sent or the sender goes away. Rate limiting at the
+  tunnel is still worthwhile.
 - **Verify:** `t=<seconds>,v0=<hex HMAC-SHA256(webhookSecret, "<t>.<raw body>")>`,
   the algorithm of ElevenLabs' SDK, compared in constant time over the raw body.
   A timestamp more than 30 minutes old or 5 minutes ahead fails.
@@ -205,8 +211,10 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
   for a conversation is handled once. A replay, or a retry after success, gets
   `200` and is ignored, whatever its signature header looks like. Events are
   remembered for 35 minutes, past the signature's age limit. A failed handler
-  leaves the event unhandled, so ElevenLabs' retry gets through. Durable replay
-  protection is HL-13.
+  leaves the event unhandled, so ElevenLabs' retry gets through. The memory
+  does not survive a restart, so a signed body replayed within its 30 minute
+  window after a restart is handled again: handlers must be idempotent per
+  conversation (HL-09). Durable replay protection is HL-13.
 - **Who spoke:** the person's transcript turns are labelled `owner` only on an
   outbound call whose other end is `owner.phoneNumber`, or, on an inbound call
   from that number, turns spoken after `verify_pin` succeeded (call start plus

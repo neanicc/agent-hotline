@@ -41,6 +41,8 @@ export const MAX_STATUS_LENGTH = 1500;
 const SEEN_EVENTS = 1000;
 /** How long a state-changing tool delivery is remembered; longer than any call. */
 const TOOL_REPLAY_MS = 2 * 60 * 60 * 1000;
+/** State-changing deliveries remembered at once; more are refused, not run. */
+export const MAX_TOOL_DELIVERIES = 1000;
 /** Tools whose repeat must not run the handler again. `get_status` only reads, after the PIN. */
 const ONCE_TOOLS: ReadonlySet<ToolName> = new Set(["submit_answer", "verify_pin", "send_instruction"]);
 /**
@@ -109,6 +111,8 @@ export interface ElevenLabsRoutesOptions {
   toolSecret: string;
   /** The `elevenlabs.webhookSecret` secret, the post-call HMAC key. */
   webhookSecret: string;
+  /** How long a post-call sender may take to deliver its body (default 10 s); tests shorten it. */
+  postCallBodyTimeoutMs?: number;
   /** `config.voice.agentId`: post-call webhooks for any other agent are ignored. */
   agentId: string;
   /** `config.owner.phoneNumber`: a tool call is served only when the owner is on one end of the call. */
@@ -209,13 +213,18 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
     /** Runs the tool once per distinct delivery; see `deliveries`. */
     const once = (raw: string) => {
       const now = options.clock().getTime();
+      // Only expired deliveries are forgotten; one still in its window is never evicted.
       for (const [key, seen] of deliveries) {
-        if (seen.expires > now && deliveries.size <= SEEN_EVENTS) break;
+        if (seen.expires > now) break;
         deliveries.delete(key);
       }
       const key = createHash("sha256").update(`${name}\0${raw}`, "utf8").digest("base64url");
       const seen = deliveries.get(key);
       if (seen !== undefined) return { response: seen.response, repeat: true };
+      // Full of live deliveries (only possible with the tool secret): fail closed
+      // rather than forget one and let it run twice.
+      if (deliveries.size >= MAX_TOOL_DELIVERIES)
+        return { response: Promise.resolve<Record<string, unknown>>({ result: "busy" }), repeat: false };
       // No await between the lookup and this claim, so one delivery runs the handler.
       const response = handleTool(raw);
       deliveries.set(key, { response, expires: now + TOOL_REPLAY_MS });
@@ -308,6 +317,7 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
     url: POST_CALL_PATH,
     bodyLimit: POST_CALL_BODY_LIMIT,
     maxInFlight: MAX_POST_CALLS_IN_FLIGHT,
+    ...(options.postCallBodyTimeoutMs === undefined ? {} : { bodyTimeoutMs: options.postCallBodyTimeoutMs }),
     precheck: (request) => header(request, SIGNATURE_HEADER) !== undefined && jsonRequest(request),
     verify: (request) => {
       const raw = rawBody(request);

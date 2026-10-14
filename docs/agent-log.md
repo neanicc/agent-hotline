@@ -762,3 +762,18 @@ Template:
     consider requiring the PIN within a short window before a high-risk allow.
   - Mutation checks, each reverted: no `maxInFlight` on post-call (1 test
     fails), no release on abort (1), remembering refused deliveries (3).
+- Fourth bot staff review on #33 (approve with nits, two P2s, one P3):
+  - P2, fixed: four slow senders could hold every post-call slot until the
+    connection timed out. A route with `maxInFlight` now has a body deadline
+    (`bodyTimeoutMs`, default 10 s) set when a slot is taken and cleared once
+    the body is in; a sender past it is cut off and its slot freed. Test:
+    stalled senders are dropped after a 200 ms deadline and a valid webhook is
+    then accepted.
+  - P2, fixed: the tool delivery memory evicted live entries past 1000, so a
+    flood of verified calls could make an old delivery run again. Only expired
+    entries are forgotten now; when 1000 live ones are held, a new delivery
+    gets `busy` and does not run. Test included.
+  - P3, documented: post-call and tool memories reset on restart, so HL-09's
+    handlers must be idempotent per conversation (and per ask).
+  - Mutation checks, each reverted: no body deadline (1 test fails), evicting
+    live deliveries (1).
