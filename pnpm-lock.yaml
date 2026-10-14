@@ -58,6 +58,9 @@ importers:
       '@hotline/daemon':
         specifier: workspace:*
         version: link:../daemon
+      '@hotline/providers':
+        specifier: workspace:*
+        version: link:../providers
 
   packages/core:
     dependencies:

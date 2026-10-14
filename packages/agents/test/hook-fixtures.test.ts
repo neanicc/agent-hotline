@@ -32,6 +32,8 @@ function listJson(dir: string): string[] {
 
 const coreSchemas: Record<string, Schema> = {
   "claude-code/permission-request.input.json": ClaudePermissionRequestInput,
+  "claude-code/permission-request.bash-background.input.json": ClaudePermissionRequestInput,
+  "claude-code/permission-request.bash-unsandboxed.input.json": ClaudePermissionRequestInput,
   "claude-code/permission-request.allow.output.json": ClaudePermissionRequestOutput,
   "claude-code/permission-request.deny.output.json": ClaudePermissionRequestOutput,
   "claude-code/stop.input.json": ClaudeStopInput,
@@ -39,6 +41,7 @@ const coreSchemas: Record<string, Schema> = {
   "claude-code/stop.block.output.json": StopBlockOutput,
   "codex/permission-request.input.json": CodexPermissionRequestInput,
   "codex/permission-request.apply-patch.input.json": CodexPermissionRequestInput,
+  "codex/permission-request.network-access.input.json": CodexPermissionRequestInput,
   "codex/permission-request.allow.output.json": CodexPermissionRequestOutput,
   "codex/permission-request.deny.output.json": CodexPermissionRequestOutput,
   "codex/stop.input.json": CodexStopInput,

@@ -1,0 +1,14 @@
+{
+  "session_id": "00000000-0000-4000-8000-000000000002",
+  "transcript_path": null,
+  "cwd": "/Users/example/src/demo-app",
+  "hook_event_name": "PermissionRequest",
+  "model": "example-model",
+  "permission_mode": "default",
+  "turn_id": "turn-0005",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "pnpm test",
+    "description": "network-access registry.example.com"
+  }
+}
