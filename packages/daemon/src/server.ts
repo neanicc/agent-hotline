@@ -45,6 +45,7 @@ declare module "fastify" {
   interface FastifyContextConfig {
     verifyWebhook?: WebhookVerifier;
     precheckWebhook?: WebhookPrecheck;
+    inFlightWebhook?: { count: number; readonly max: number };
   }
 }
 
@@ -56,6 +57,11 @@ export interface WebhookRoute {
   verify: WebhookVerifier;
   /** Largest body this route reads, when it needs more than the listener's 256 KiB. */
   bodyLimit?: number;
+  /**
+   * Requests this route reads or handles at once; more get the bare 403 before
+   * their body is read. For routes that must read a body before they can verify it.
+   */
+  maxInFlight?: number;
   handler: (request: FastifyRequest, reply: FastifyReply) => unknown;
 }
 
@@ -203,6 +209,8 @@ export function buildWebhookServer({ log, routes = [] }: WebhookServerOptions): 
     done(null, body);
   });
 
+  /** Requests holding an in-flight slot of their route. */
+  const holding = new WeakSet<FastifyRequest>();
   void app.register(
     async (hooks) => {
       // Before the body is read: a route that cannot verify its caller is refused
@@ -217,8 +225,23 @@ export function buildWebhookServer({ log, routes = [] }: WebhookServerOptions): 
         } catch {
           passed = false;
         }
-        return passed ? undefined : rejectWebhook(request, reply, "precheck failed");
+        if (!passed) return rejectWebhook(request, reply, "precheck failed");
+        const limit = config.inFlightWebhook;
+        if (limit === undefined) return undefined;
+        if (limit.count >= limit.max) return rejectWebhook(request, reply, "too many in flight");
+        limit.count += 1;
+        holding.add(request);
+        return undefined;
       });
+      // Every request that took an in-flight slot gives it back exactly once,
+      // whether it was answered or the sender went away.
+      const release = async (request: FastifyRequest) => {
+        if (!holding.delete(request)) return;
+        const limit = request.routeOptions.config.inFlightWebhook;
+        if (limit !== undefined) limit.count -= 1;
+      };
+      hooks.addHook("onResponse", release);
+      hooks.addHook("onRequestAbort", release);
       // After parsing, so verifiers can check signatures over the parameters or body.
       hooks.addHook("preHandler", async (request, reply) => {
         const verify = request.routeOptions.config.verifyWebhook;
@@ -235,7 +258,13 @@ export function buildWebhookServer({ log, routes = [] }: WebhookServerOptions): 
         hooks.route({
           method: route.method,
           url: route.url,
-          config: { verifyWebhook: route.verify, precheckWebhook: route.precheck },
+          config: {
+            verifyWebhook: route.verify,
+            precheckWebhook: route.precheck,
+            ...(route.maxInFlight === undefined
+              ? {}
+              : { inFlightWebhook: { count: 0, max: route.maxInFlight } }),
+          },
           ...(route.bodyLimit === undefined ? {} : { bodyLimit: route.bodyLimit }),
           handler: route.handler,
         });

@@ -743,3 +743,22 @@ Template:
     review round.
   - Mutation checks, each reverted: presence-only precheck (1 test fails), no
     delivery memory (2), inbound turns owner regardless of time (3).
+- Third bot staff review on #33 (approve with nits, two P2s, two P3s):
+  - P2, fixed: a `needs-pin` (or `not-recorded`) answer was remembered, so the
+    identical approval resent after `verify_pin` got the stale refusal. Only
+    deliveries that changed state (`recorded`, `queued`, a PIN attempt) are now
+    remembered. Tests: resend after the PIN is recorded with `confirmation:
+    "pin"`; a `not-recorded` answer runs again.
+  - P2, fixed: the unauthenticated post-call route read up to 1 MiB before the
+    HMAC could be checked, with no limit on concurrency. `WebhookRoute` gains
+    `maxInFlight`, enforced by the router in `onRequest` (before the body is
+    read) and released in `onResponse` and `onRequestAbort`; the post-call
+    route allows 4 at once. Test: four stalled senders, a fifth (valid) request
+    gets the bare 403, and once the stalled ones go away a valid one is
+    accepted. Tunnel-level rate limiting stays advisable.
+  - P3, already documented: PIN state is in memory (HL-13).
+  - P3, recorded for HL-09: a PIN verification covers the whole call, not one
+    ask. HL-09 must check `ownerSaid` before recording any `allow`, and should
+    consider requiring the PIN within a short window before a high-risk allow.
+  - Mutation checks, each reverted: no `maxInFlight` on post-call (1 test
+    fails), no release on abort (1), remembering refused deliveries (3).

@@ -1,3 +1,4 @@
+import { request } from "node:http";
 import {
   FakeVoiceProvider,
   type HttpFetch,
@@ -13,6 +14,7 @@ import {
   type ElevenLabsRoutesOptions,
   elevenLabsRoutes,
   type LogOptions,
+  MAX_POST_CALLS_IN_FLIGHT,
   MAX_STATUS_LENGTH,
   PinGate,
   POST_CALL_BODY_LIMIT,
@@ -22,6 +24,7 @@ import {
   type VoiceHandlers,
   type VoiceInstruction,
 } from "../src/index.js";
+import { send } from "./http.js";
 
 const OWNER = "+15555550100";
 const AGENT_NUMBER = "+15555550101";
@@ -294,6 +297,22 @@ describe("repeated tool calls", () => {
     expect(again.json()).toEqual(first.json());
     expect(answers).toHaveLength(1);
     await answer({ owner_words: "yes, really, go ahead" });
+    expect(answers).toHaveLength(2);
+  });
+
+  it("run an identical answer again after the PIN when the first got needs-pin", async () => {
+    answerResult = "needs-pin";
+    expect((await answer()).json()).toEqual({ result: "needs-pin" });
+    await tool("verify_pin", { ...binding(), pin: PIN });
+    answerResult = "recorded";
+    expect((await answer()).json()).toEqual({ result: "recorded" });
+    expect(answers.map((a) => a.confirmation)).toEqual(["none", "pin"]);
+  });
+
+  it("run an answer again when the handler did not record it", async () => {
+    answerResult = "not-recorded";
+    await answer();
+    await answer();
     expect(answers).toHaveLength(2);
   });
 
@@ -577,6 +596,60 @@ describe("post-call webhook", () => {
     const text = lines.join("");
     expect(text).not.toContain("go ahead");
     expect(text).not.toContain("5555550100");
+  });
+});
+
+describe("post-call webhook under load", () => {
+  let listening: FastifyInstance | undefined;
+
+  afterEach(async () => {
+    await listening?.close();
+  });
+
+  it(`reads at most ${MAX_POST_CALLS_IN_FLIGHT} unverified bodies at once`, async () => {
+    listening = server();
+    await listening.listen({ host: "127.0.0.1", port: 0 });
+    const port = listening.addresses()[0]?.port ?? 0;
+    const headers = { "content-type": "application/json", "elevenlabs-signature": "t=1,v0=00" };
+    // Senders that start a body and never finish it.
+    const stalled = Array.from({ length: MAX_POST_CALLS_IN_FLIGHT }, () => {
+      const req = request({
+        host: "127.0.0.1",
+        port,
+        path: "/hooks/el/post-call",
+        method: "POST",
+        agent: false,
+        headers: { ...headers, "content-length": "1000" },
+      });
+      req.on("error", () => {});
+      req.write("{");
+      return req;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const raw = JSON.stringify(transcription("conv_load"));
+    const signed = {
+      "content-type": "application/json",
+      "elevenlabs-signature": postCallSignatureHeader(WEBHOOK_SECRET, now.getTime() / 1000, raw),
+    };
+    const refused = await send({
+      port,
+      method: "POST",
+      path: "/hooks/el/post-call",
+      headers: signed,
+      body: raw,
+    });
+    expect([refused.status, refused.body]).toEqual([403, ""]);
+    for (const req of stalled) req.destroy();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const accepted = await send({
+      port,
+      method: "POST",
+      path: "/hooks/el/post-call",
+      headers: signed,
+      body: raw,
+    });
+    expect(accepted.status).toBe(200);
+    expect(postCalls).toHaveLength(1);
   });
 });
 

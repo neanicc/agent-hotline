@@ -43,8 +43,18 @@ const SEEN_EVENTS = 1000;
 const TOOL_REPLAY_MS = 2 * 60 * 60 * 1000;
 /** Tools whose repeat must not run the handler again. `get_status` only reads, after the PIN. */
 const ONCE_TOOLS: ReadonlySet<ToolName> = new Set(["submit_answer", "verify_pin", "send_instruction"]);
-/** Tool results that mean no handler ran, so a repeat may try again. */
-const UNHANDLED_RESULTS: ReadonlySet<string> = new Set(["pin-required", "invalid", "refused"]);
+/**
+ * Results that changed state, the only ones remembered: anything else (refused
+ * before the PIN, `needs-pin`, `not-recorded`, invalid, not the owner) may be
+ * sent again and run again once it is allowed.
+ */
+const REMEMBERED_RESULTS: ReadonlySet<string> = new Set(["recorded", "queued"]);
+/**
+ * Post-call bodies being read or handled at once. The HMAC covers the body, so
+ * it can only be checked after up to `POST_CALL_BODY_LIMIT` bytes are read; this
+ * caps what unauthenticated senders can make the daemon hold.
+ */
+export const MAX_POST_CALLS_IN_FLIGHT = 4;
 /**
  * A post-call transcription carries the whole transcript plus analysis and
  * metadata, so it may exceed the listener's default. Bigger bodies get the bare
@@ -209,12 +219,14 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
       // No await between the lookup and this claim, so one delivery runs the handler.
       const response = handleTool(raw);
       deliveries.set(key, { response, expires: now + TOOL_REPLAY_MS });
-      // Forget a delivery that failed or changed nothing (refused before the PIN,
-      // invalid, not the owner), so the same call can succeed once allowed.
+      // Keep only a delivery that changed state (a PIN attempt counts); forget the
+      // rest, so the same call can succeed once it is allowed.
       response.then(
         (result) => {
-          if (typeof result.result === "string" && UNHANDLED_RESULTS.has(result.result))
-            deliveries.delete(key);
+          const changed =
+            typeof result.verified === "boolean" ||
+            (typeof result.result === "string" && REMEMBERED_RESULTS.has(result.result));
+          if (!changed) deliveries.delete(key);
         },
         () => deliveries.delete(key),
       );
@@ -295,6 +307,7 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
     method: "POST",
     url: POST_CALL_PATH,
     bodyLimit: POST_CALL_BODY_LIMIT,
+    maxInFlight: MAX_POST_CALLS_IN_FLIGHT,
     precheck: (request) => header(request, SIGNATURE_HEADER) !== undefined && jsonRequest(request),
     verify: (request) => {
       const raw = rawBody(request);
