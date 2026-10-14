@@ -109,6 +109,72 @@ describe("FakeVoiceProvider", () => {
     expect(recorded.tools.map((t) => t.body.owner_words)).toEqual(["no", "yes"]);
   });
 
+  it("keeps ElevenLabs' record of each call: live during it, final with what was played after", async () => {
+    let voice: FakeVoiceProvider | undefined;
+    const during: unknown[] = [];
+    const { client, recorded } = recordingClient();
+    const pulling: VoiceToolClient = {
+      // A server tool pulls the conversation while the call is going on.
+      async tool(name, body) {
+        during.push(await voice?.fetchConversation(body.conversation_id as string));
+        return client.tool(name, body);
+      },
+      postCall: (payload) => client.postCall(payload),
+    };
+    voice = new FakeVoiceProvider({
+      ownerNumber: OWNER,
+      agentNumber: "+15555550101",
+      phoneNumberId: "phnum_hotline",
+      client: pulling,
+      clock: () => new Date("2026-10-13T22:00:00.000Z"),
+    });
+    voice.script(scriptedHuman.says({ kind: "answer", ask: 1, decision: "deny", words: "no, don't" }));
+    await voice.callOwner(call);
+    await voice.playPending();
+    expect(during).toMatchObject([
+      {
+        conversation_id: "conv_fake_1",
+        status: "in-progress",
+        metadata: {
+          phone_call: {
+            direction: "outbound",
+            external_number: OWNER,
+            agent_number: "+15555550101",
+            phone_number_id: "phnum_hotline",
+            call_sid: `CA${"1".padStart(32, "0")}`,
+          },
+        },
+      },
+    ]);
+    const final = await voice.fetchConversation("conv_fake_1");
+    expect(final.status).toBe("done");
+    // The record is what was played, and what the webhook carried.
+    const webhook = (recorded.postCalls[0] as { data: { transcript: unknown } }).data;
+    expect(final.transcript).toEqual(webhook.transcript);
+    expect(final.transcript.map((turn) => turn.message)).toContain("no, don't");
+    // Changing the webhook body afterwards never changes the record.
+    (webhook.transcript as { message: string }[]).push({ message: "yes" });
+    expect((await voice.fetchConversation("conv_fake_1")).transcript).toHaveLength(final.transcript.length);
+  });
+
+  it("has no record of a conversation it never played, and fails a fetch on demand", async () => {
+    const voice = new FakeVoiceProvider({ ownerNumber: OWNER, client: recordingClient().client });
+    await expect(voice.fetchConversation("conv_forged")).rejects.toMatchObject({
+      name: "PullError",
+      reason: "not-found",
+    });
+    voice.script(scriptedHuman.noPickup());
+    await voice.callOwner(call);
+    await voice.playPending();
+    await expect(voice.fetchConversation("conv_fake_1")).resolves.toMatchObject({
+      status: "failed",
+      transcript: [],
+    });
+    voice.failNextFetch();
+    await expect(voice.fetchConversation("conv_fake_1")).rejects.toMatchObject({ reason: "unreachable" });
+    await expect(voice.fetchConversation("conv_fake_1")).resolves.toMatchObject({ status: "failed" });
+  });
+
   it("nobody picks up when no script was given", async () => {
     const { client, recorded } = recordingClient();
     const voice = new FakeVoiceProvider({ ownerNumber: OWNER, client });
@@ -327,7 +393,7 @@ describe("httpVoiceToolClient", () => {
     const requests: { url: string; headers: Record<string, string>; body: string }[] = [];
     let status = 200;
     const fetch: HttpFetch = async (url, init) => {
-      requests.push({ url, headers: init.headers, body: init.body });
+      requests.push({ url, headers: init.headers, body: init.body ?? "" });
       return { status, json: async () => ({ verified: true }) };
     };
     const now = new Date("2026-10-13T22:00:00.000Z");

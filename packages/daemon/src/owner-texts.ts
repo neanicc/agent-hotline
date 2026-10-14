@@ -12,7 +12,9 @@
 // - A code that matches no waiting ask burns every waiting code (the plan says
 //   so); a code that matched is spent whatever happens next.
 // - `smsAnswer` (core) decides what the words mean; free text never approves.
-import { timingSafeEqual } from "node:crypto";
+// - Codes are known here only as salted hashes (`code-hash.ts`, HL-13a). The
+//   caller compares a presented code with each in constant time beforehand
+//   (`matchingHashes`) and passes the hashes it matched.
 import { type Answer, type Ask, parseSmsReply, type SmsReply, smsAnswer } from "@hotline/core";
 
 /** Agent text in an outgoing SMS, cut like the voice read-out. */
@@ -26,10 +28,11 @@ const SMS_OPTION_LENGTH = 80;
  */
 export const MIN_REPLY_DELAY_MS = 10_000;
 
-/** One ask waiting on a text reply, with the confirmation code its text carried, if any. */
+/** One ask waiting on a text reply, with the hash of the confirmation code its text carried, if any. */
 export interface WaitingText {
   ask: Ask;
-  code?: string;
+  /** `hashCode` of the code; the plaintext code is never kept. */
+  codeHash?: string;
   /** When its text went out. */
   sentAt?: Date;
 }
@@ -64,12 +67,18 @@ export interface TextReplyInput {
   optedOut: boolean;
   /** Open asks Hotline texted (not duplicates), with their codes. */
   waiting: readonly WaitingText[];
+  /**
+   * The waiting `codeHash`es that the reply's code (`presentedCode(body)`)
+   * matches. Hashing is slow, so the caller works this out beforehand with
+   * `matchingHashes`, off the event loop; empty when the reply has no code.
+   */
+  matchingCodeHashes: ReadonlySet<string>;
 }
 
-function sameCode(presented: string, expected: string): boolean {
-  const a = Buffer.from(presented);
-  const b = Buffer.from(expected);
-  return a.length === b.length && timingSafeEqual(a, b);
+/** The confirmation code a `YES <code>` reply presents, if any. */
+export function presentedCode(body: string): string | undefined {
+  const reply = parseSmsReply(body);
+  return reply.type === "yes" ? reply.code : undefined;
 }
 
 /** What an owner's text means for the asks waiting on texts. */
@@ -80,6 +89,7 @@ export function planTextReply({
   firstSeenAt,
   optedOut,
   waiting,
+  matchingCodeHashes,
 }: TextReplyInput): TextPlan {
   const reply = parseSmsReply(body);
   if (optedOut || reply.type === "carrier-keyword") return { type: "ignore" };
@@ -90,7 +100,7 @@ export function planTextReply({
   const code = reply.type === "yes" ? reply.code : undefined;
   let target: WaitingText | undefined;
   if (code !== undefined) {
-    target = waiting.find((w) => w.code !== undefined && sameCode(code, w.code));
+    target = waiting.find((w) => w.codeHash !== undefined && matchingCodeHashes.has(w.codeHash));
     if (target === undefined) return { type: "code-mismatch" };
   } else if (waiting.length === 0) {
     return { type: "nothing-waiting" };
@@ -105,12 +115,14 @@ export function planTextReply({
     }
   }
   if (target === undefined) return { type: "nothing-waiting" };
+  // A presented code reached here only by matching the target's hash, so it is
+  // that ask's code; without one, nothing can confirm an approval.
   const result = smsAnswer({
     ask: target.ask,
     body,
     messageSid,
     receivedAt,
-    ...(target.code === undefined ? {} : { confirmationCode: target.code }),
+    ...(code === undefined || target.codeHash === undefined ? {} : { confirmationCode: code }),
   });
   const codeUsed = code !== undefined;
   return result.outcome === "answered"

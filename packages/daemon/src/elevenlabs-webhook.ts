@@ -8,6 +8,30 @@
 //   `ElevenLabs-Signature` HMAC over the raw body, with a timestamp tolerance and
 //   a memory of recent signatures against replays.
 //
+// A valid secret or signature is not enough (HL-13a): a same-user process can
+// read both secrets and forge either. So every webhook is only a trigger, and
+// the conversation is fetched from ElevenLabs by id (`conversation`) first:
+// - Every server tool, before it has any effect (a PIN attempt, a held answer
+//   or instruction, a status read out), needs the conversation to exist at
+//   ElevenLabs, going on, as this agent's phone call on the Hotline line with
+//   the owner's number on the far end, with exactly the caller and called
+//   numbers and call SID the tool call carries. Its direction is the record's:
+//   outbound only for a call Hotline placed. So forged tool calls can neither
+//   guess nor lock the PIN, hold or deny a decision, nor hear the status.
+// - A post-call transcription hands on the pulled transcript, metadata and
+//   status, never the body's, and only for this agent's finished call on the
+//   Hotline line with the owner (outbound only when Hotline placed it). A
+//   finished call that is not with the owner is handed on with no words in
+//   it. A call still going on at ElevenLabs leaves the event unhandled for the
+//   genuine one; a record that contradicts the event confirms nothing.
+// - A call initiation failure is acted on only when the pulled record shows
+//   that call failed: Hotline's outbound call to the owner, `failed`, with
+//   nothing said. Otherwise it is ignored, so a forged one cannot end a live
+//   call or start retries and texts.
+// - A pull that fails for now (ElevenLabs down or refusing) gets a 503 so
+//   ElevenLabs delivers the event again; nothing is handled meanwhile.
+// Records that do not match go to `onUnverified`, mismatches as possible forgeries.
+//
 // Every rejection is the router's bare 403. JSON is parsed only after
 // verification. The routes enforce the safety rules that do not need the queue:
 // a call must have the owner on one end; `get_status` and `send_instruction`
@@ -19,8 +43,11 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { Confirmation, Decision } from "@hotline/core";
 import {
+  type ConversationRecord,
+  conversationEvent,
   freshPostCallHeader,
   type GetStatusBody,
+  type OwnerContext,
   POST_CALL_MAX_AGE_SECONDS,
   POST_CALL_PATH,
   type PostCallEvent,
@@ -36,6 +63,17 @@ import {
 } from "@hotline/providers";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { PinGate } from "./pin.js";
+import {
+  type CallRecordExpectations,
+  failedCallMismatch,
+  finishedCallCheck,
+  liveCallDirection,
+  liveCallMismatch,
+  pullFailure,
+  type ToolCallBinding,
+  transientPullFailure,
+  type Unverified,
+} from "./provider-pull.js";
 import type { WebhookRoute } from "./server.js";
 
 /** Longest status text handed to the voice agent, after redaction. */
@@ -73,9 +111,9 @@ export interface ToolCall {
   conversationId: string;
   callSid?: string;
   /**
-   * `outbound` when the call went to the owner's number (Hotline dialled it);
-   * `inbound` when it came from the owner's number, which caller ID alone
-   * cannot prove.
+   * From ElevenLabs' record of the call: `outbound` when it dialled the owner's
+   * number on a call Hotline placed; `inbound` for any other call with the
+   * owner's number, which caller ID alone cannot prove.
    */
   direction: "outbound" | "inbound";
   receivedAt: Date;
@@ -137,6 +175,25 @@ export interface ElevenLabsRoutesOptions {
   /** Applied to everything the routes send back to ElevenLabs, such as the daemon's redactor. */
   redact: (text: string) => string;
   handlers: VoiceHandlers;
+  /**
+   * Fetches a conversation from ElevenLabs by id: the voice provider's
+   * `fetchConversation`. Rejects with `PullError`. Required: no call confirms
+   * a decision, an instruction or a PIN without it.
+   */
+  conversation: (conversationId: string) => Promise<ConversationRecord>;
+  /** `config.voice.agentPhoneNumberId`: only a call on that ElevenLabs number is served or confirms anything. */
+  agentPhoneNumberId: string;
+  /** A tool call or post-call event that ElevenLabs' record does not confirm. */
+  onUnverified?: (what: ToolName | "post-call", failure: Unverified) => void | Promise<void>;
+}
+
+type TranscriptionEvent = Extract<PostCallEvent, { type: "transcription" }>;
+
+/** Whether two transcription events say the same about the call. */
+function sameCall(a: TranscriptionEvent, b: TranscriptionEvent): boolean {
+  const essence = (event: TranscriptionEvent) =>
+    JSON.stringify([event.direction, event.externalNumber, event.callSid, event.transcript]);
+  return essence(a) === essence(b);
 }
 
 function header(request: FastifyRequest, name: string): string | undefined {
@@ -214,12 +271,19 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
       const parsed = TOOL_BODIES[name].safeParse(parseJson(raw));
       if (!parsed.success) return { result: "invalid" };
       // Someone else's call: nothing about Hotline, the owner or the agents.
-      if (!ownerOnCall(parsed.data)) return { result: "refused", end_call: true };
+      if (!ownerOnCall(parsed.data)) return refused;
+      // Before any effect, ElevenLabs' own record must show this live call with
+      // the owner: a forged tool call can hold, deny or hear nothing.
+      const live = await liveCall(parsed.data);
+      if ("failure" in live) {
+        await report(name, live.failure);
+        return refused;
+      }
       const { conversation_id, call_sid } = parsed.data;
       const call: ToolCall = {
         conversationId: conversation_id,
         ...(call_sid ? { callSid: call_sid } : {}),
-        direction: callDirection(parsed.data),
+        direction: liveCallDirection(live.record, expectations),
         receivedAt: options.clock(),
       };
       return serve(parsed.data as ToolBodies[N], call);
@@ -279,15 +343,119 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
   // Strict E.164 on both sides: no number variant collides with or slips past the owner's.
   const isOwner = (number: string | undefined) => sameE164(number, options.ownerNumber);
   const ownerOnCall = (body: GetStatusBody) => isOwner(body.caller_id) || isOwner(body.called_number);
-  // Outbound only for a conversation Hotline placed, to the owner's number from
-  // elsewhere; anything else that passed `ownerOnCall` is treated as inbound
-  // from (what claims to be) the owner, so it needs the PIN first.
-  const callDirection = (body: GetStatusBody): ToolCall["direction"] =>
-    options.placedCall(body.conversation_id) && isOwner(body.called_number) && !isOwner(body.caller_id)
-      ? "outbound"
-      : "inbound";
 
+  const refused = { result: "refused", end_call: true };
   const pinRequired = { result: "pin-required", say: "Ask for the PIN and call verify_pin first." };
+
+  const expectations: CallRecordExpectations = {
+    agentId: options.agentId,
+    ownerNumber: options.ownerNumber,
+    agentPhoneNumberId: options.agentPhoneNumberId,
+    placedCall: options.placedCall,
+  };
+  const ownerContext: OwnerContext = {
+    ownerNumber: options.ownerNumber,
+    pinVerifiedAt: (conversationId) => pins.verifiedAt(conversationId),
+    placedCall: options.placedCall,
+  };
+  const report = async (what: ToolName | "post-call", failure: Unverified) => {
+    try {
+      await options.onUnverified?.(what, failure);
+    } catch {
+      // Reporting is best effort; the request is refused either way.
+    }
+  };
+
+  /** ElevenLabs' record of a conversation, or why it could not be had (`transient`: try again later). */
+  const pull = async (
+    conversationId: string,
+  ): Promise<{ record: ConversationRecord } | { failure: Unverified; transient: boolean }> => {
+    try {
+      return { record: await options.conversation(conversationId) };
+    } catch (error) {
+      return { failure: pullFailure(error), transient: transientPullFailure(error) };
+    }
+  };
+
+  /** ElevenLabs' record when it shows this tool call's live call with the owner, or why not. */
+  const liveCall = async (
+    binding: ToolCallBinding,
+  ): Promise<{ record: ConversationRecord } | { failure: Unverified }> => {
+    const pulled = await pull(binding.conversation_id);
+    if ("failure" in pulled) return { failure: pulled.failure };
+    const reason = liveCallMismatch(pulled.record, binding, expectations);
+    return reason === undefined ? { record: pulled.record } : { failure: { forgery: true, reason } };
+  };
+
+  type Handled = Exclude<PostCallEvent, { type: "other" }>;
+  /** What to do with a post-call event: hand `event` on, ignore it, or have ElevenLabs send it again. */
+  type Verdict = { type: "handle"; event: Handled } | { type: "ignore" } | { type: "retry" };
+
+  /**
+   * The post-call transcription as ElevenLabs' record has it: the pulled
+   * transcript, metadata and status, never the webhook body's.
+   * - A call with the owner as the record has it is handed on as pulled.
+   * - A finished call that is not with the owner is handed on without its
+   *   words, so it is still recorded but nothing said on it counts.
+   * - A record that contradicts the event, or no record at all, becomes a
+   *   failed call: nothing confirmed, every ask no answer.
+   * - A call still going on is ignored, so the genuine event still counts; a
+   *   pull that failed for now is retried.
+   */
+  const verifiedTranscription = async (event: TranscriptionEvent): Promise<Verdict> => {
+    const failedCall: Verdict = {
+      type: "handle",
+      event: {
+        type: "initiation-failure",
+        agentId: event.agentId,
+        conversationId: event.conversationId,
+        reason: "unknown",
+      },
+    };
+    const pulled = await pull(event.conversationId);
+    if ("failure" in pulled) {
+      await report("post-call", pulled.failure);
+      return pulled.transient ? { type: "retry" } : failedCall;
+    }
+    const { record } = pulled;
+    const check = finishedCallCheck(record, event.conversationId, expectations);
+    if (check.type === "not-final") {
+      await report("post-call", { forgery: true, reason: "the call is not over at the provider" });
+      return { type: "ignore" };
+    }
+    if (check.type === "mismatch") {
+      await report("post-call", { forgery: true, reason: check.reason });
+      return failedCall;
+    }
+    const pulledEvent = conversationEvent(record, ownerContext);
+    if (!sameCall(event, pulledEvent)) {
+      await report("post-call", { forgery: true, reason: "the webhook differs from the provider's record" });
+    }
+    if (check.type === "no-owner") return { type: "handle", event: { ...pulledEvent, transcript: [] } };
+    return { type: "handle", event: pulledEvent };
+  };
+
+  /**
+   * A call initiation failure, acted on only when ElevenLabs' record shows that
+   * call of Hotline's really failed. Otherwise it is ignored (and a pull that
+   * failed for now retried), so a forged one cannot end a live call, nor start
+   * retries and texts.
+   */
+  const verifiedFailure = async (
+    event: Extract<Handled, { type: "initiation-failure" }>,
+  ): Promise<Verdict> => {
+    const pulled = await pull(event.conversationId);
+    if ("failure" in pulled) {
+      await report("post-call", pulled.failure);
+      return pulled.transient ? { type: "retry" } : { type: "ignore" };
+    }
+    const failure = failedCallMismatch(pulled.record, event.conversationId, expectations);
+    if (failure !== undefined) {
+      await report("post-call", failure);
+      return { type: "ignore" };
+    }
+    return { type: "handle", event };
+  };
 
   const routes: WebhookRoute[] = [
     toolRoute("submit_answer", async (body, call) => {
@@ -305,6 +473,9 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
       return { result };
     }),
     toolRoute("verify_pin", async (body, call) => {
+      // The route already checked ElevenLabs has this call, going on now with
+      // the owner: a forged tool call for a made-up conversation never spends
+      // an attempt, so it can neither guess the PIN nor lock it out.
       const attempt = await pins.attempt(call.conversationId, body.pin, call.direction);
       return { verified: attempt.verified, attempts_left: attempt.attemptsLeft, end_call: attempt.endCall };
     }),
@@ -354,12 +525,9 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
     },
     handler: async (request, reply) => {
       const receivedAt = options.clock();
-      // Turns count as the owner's only on a call known to be with the owner.
-      const event = parsePostCallEvent(parseJson(rawBody(request)), {
-        ownerNumber: options.ownerNumber,
-        pinVerifiedAt: (conversationId) => pins.verifiedAt(conversationId),
-        placedCall: options.placedCall,
-      });
+      // The body only names the event: every event is checked against the
+      // pulled record, and a transcription's own content is never used.
+      const event = parsePostCallEvent(parseJson(rawBody(request)), ownerContext);
       if (event === undefined || event.type === "other" || event.agentId !== options.agentId) {
         request.log.info({ kind: event?.type ?? "malformed" }, "post-call webhook ignored");
         return reply.code(200).send({});
@@ -387,16 +555,33 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
         return reply.code(503).send();
       }
       // No await between the check above and this claim, so one attempt runs at a time.
-      const attempt = Promise.resolve().then(() => handlers.postCall(event, receivedAt));
-      inFlight.set(key, attempt);
+      const attempt = Promise.resolve().then(async (): Promise<Verdict["type"]> => {
+        const verdict =
+          event.type === "transcription" ? await verifiedTranscription(event) : await verifiedFailure(event);
+        if (verdict.type !== "handle") return verdict.type;
+        await handlers.postCall(verdict.event, receivedAt);
+        return "handle";
+      });
+      inFlight.set(
+        key,
+        attempt.then(
+          () => undefined,
+          () => undefined,
+        ),
+      );
+      let outcome: Verdict["type"];
       try {
-        await attempt;
+        outcome = await attempt;
         // Kept past the signature's age limit, after which a replay fails verification anyway.
-        handled.set(key, receivedAt.getTime() + (POST_CALL_MAX_AGE_SECONDS + 5 * 60) * 1000);
+        if (outcome === "handle") {
+          handled.set(key, receivedAt.getTime() + (POST_CALL_MAX_AGE_SECONDS + 5 * 60) * 1000);
+        }
       } finally {
         inFlight.delete(key);
       }
-      request.log.info({ kind: event.type }, "post-call webhook");
+      request.log.info({ kind: event.type, handled: outcome === "handle" }, "post-call webhook");
+      // ElevenLabs could not be asked: have it deliver the event again rather than lose it.
+      if (outcome === "retry") return reply.code(503).send();
       return reply.code(200).send({});
     },
   });

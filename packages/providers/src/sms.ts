@@ -11,6 +11,24 @@ export interface SentSms {
   messageId: string;
 }
 
+/**
+ * A message as the provider's REST API holds it (Twilio's Message resource,
+ * https://www.twilio.com/docs/messaging/api/message-resource#fetch-a-message-resource).
+ * Every string is as the provider returned it: untrusted until compared.
+ */
+export interface PulledMessage {
+  sid: string;
+  /** `inbound` for a text someone sent to the account's number; `outbound-api` and the like otherwise. */
+  direction: string;
+  from: string | null;
+  to: string | null;
+  body: string | null;
+  /** Such as `received` for an inbound message. */
+  status: string;
+  /** When the provider created the message, if it said. */
+  dateCreated?: Date;
+}
+
 export interface SmsProvider {
   readonly name: SmsProviderName;
   /**
@@ -18,6 +36,12 @@ export interface SmsProvider {
    * with `SmsSendError` when the provider refuses or cannot be reached.
    */
   sendToOwner(text: string): Promise<SentSms>;
+  /**
+   * Fetches one message by its SID from the provider (HL-13a), so the daemon
+   * can check a webhook against what the provider really received. Rejects with
+   * `PullError`. A provider without it can never have a text count as an answer.
+   */
+  fetchMessage?(messageSid: string): Promise<PulledMessage>;
 }
 
 /** A failed send. The message never quotes the provider's response, which can echo numbers. */

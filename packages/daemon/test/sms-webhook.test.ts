@@ -1,4 +1,10 @@
-import { type FormParams, MAX_SMS_LENGTH, twilioSignature } from "@hotline/providers";
+import {
+  type FormParams,
+  MAX_SMS_LENGTH,
+  PullError,
+  type PulledMessage,
+  twilioSignature,
+} from "@hotline/providers";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -11,6 +17,7 @@ import {
   parseFormBody,
   type TwilioSmsRouteOptions,
   twilioSmsRoute,
+  UNCONFIRMED_SMS_REPLY,
 } from "../src/index.js";
 
 const OWNER = "+15555550100";
@@ -30,6 +37,12 @@ let ownerReply: string | undefined;
 let app: FastifyInstance;
 let redactor: ReturnType<typeof createRedactor>;
 let sidCounter = 0;
+/**
+ * Twilio's message log, as the route's lookup sees it (HL-13a). `post` adds
+ * the message it delivers, as Twilio would have it, unless told it does not exist.
+ */
+let twilioLog: Map<string, PulledMessage>;
+let unverified: { messageSid: string; forgery: boolean; reason: string }[];
 
 function sid(): string {
   sidCounter += 1;
@@ -53,6 +66,15 @@ function server(overrides: Partial<TwilioSmsRouteOptions> = {}): FastifyInstance
           return ownerReply;
         },
         onOtherSender: (messageSid) => others.push(messageSid),
+        lookup: async (messageSid) => {
+          const message = twilioLog.get(messageSid);
+          if (message === undefined)
+            throw new PullError("Twilio has no such record (HTTP 404)", "not-found", 404);
+          return { ...message };
+        },
+        onUnverified: (messageSid, failure) => {
+          unverified.push({ messageSid, ...failure });
+        },
         ...overrides,
       }),
     ],
@@ -66,6 +88,8 @@ beforeEach(() => {
   received = [];
   others = [];
   ownerReply = undefined;
+  twilioLog = new Map();
+  unverified = [];
   redactor = createRedactor([AUTH_TOKEN]);
   app = server();
 });
@@ -105,6 +129,24 @@ interface PostOptions {
   token?: string;
   signature?: string | null;
   contentType?: string;
+  /** The message does not exist at Twilio: a forged webhook. */
+  unknownAtTwilio?: boolean;
+}
+
+/** Adds the message `params` describe to Twilio's log, received now, unless one with its SID is there. */
+function recordAtTwilio(params: FormParams): void {
+  const get = (name: string) => params.find(([key]) => key === name)?.[1];
+  const sid = get("MessageSid");
+  if (sid === undefined || twilioLog.has(sid)) return;
+  twilioLog.set(sid, {
+    sid,
+    direction: "inbound",
+    from: get("From") ?? null,
+    to: get("To") ?? null,
+    body: get("Body") ?? null,
+    status: "received",
+    dateCreated: now,
+  });
 }
 
 function post({
@@ -115,7 +157,9 @@ function post({
   token = AUTH_TOKEN,
   signature,
   contentType = "application/x-www-form-urlencoded",
+  unknownAtTwilio = false,
 }: PostOptions = {}) {
+  if (!unknownAtTwilio) recordAtTwilio(params);
   const headers: Record<string, string> = { "content-type": contentType };
   const sig =
     signature === undefined ? twilioSignature(token, signedUrl ?? `${PUBLIC_URL}${url}`, params) : signature;
@@ -146,7 +190,12 @@ describe("POST /hooks/twilio/sms", () => {
     expect(response.headers["content-type"]).toMatch(/^text\/xml/);
     expect(response.body).toBe('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
     expect(received).toEqual([
-      { messageSid: new Map(params).get("MessageSid"), body: "  Use SQLite & ship <it> ", receivedAt: now },
+      {
+        messageSid: new Map(params).get("MessageSid"),
+        body: "  Use SQLite & ship <it> ",
+        receivedAt: now,
+        writtenAt: now,
+      },
     ]);
     expect(others).toEqual([]);
   });
@@ -454,6 +503,96 @@ describe("POST /hooks/twilio/sms", () => {
       "owner",
       "other",
     ]);
+  });
+});
+
+describe("verify by pull (HL-13a)", () => {
+  it("never hands on a correctly signed owner's text whose SID Twilio does not have", async () => {
+    const params = message({ Body: "yes 482913" });
+    const response = await post({ params, unknownAtTwilio: true });
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain(UNCONFIRMED_SMS_REPLY);
+    expect(received).toEqual([]);
+    const messageSid = params.find(([name]) => name === "MessageSid")?.[1];
+    expect(unverified).toEqual([{ messageSid, forgery: true, reason: "the provider has no such record" }]);
+  });
+
+  const pulled = (overrides: Partial<PulledMessage>): PulledMessage => ({
+    sid: "",
+    direction: "inbound",
+    from: OWNER,
+    to: SMS_NUMBER,
+    body: "yes",
+    status: "received",
+    dateCreated: now,
+    ...overrides,
+  });
+
+  it.each([
+    ["another message", { sid: `SM${"e".repeat(32)}` }, "the provider returned another message"],
+    ["an outbound message", { direction: "outbound-api" }, "the message is not inbound"],
+    ["a message not received", { status: "failed" }, "the message was not received"],
+    ["a message from someone else", { from: STRANGER }, "the message is not from the owner's number"],
+    [
+      "a message from a variant of the owner's number",
+      { from: "15555550100" },
+      "the message is not from the owner's number",
+    ],
+    ["a message to another number", { to: "+15555550102" }, "the message is not to the Hotline number"],
+    ["a message with other words", { body: "no" }, "the message text differs from the provider's"],
+    ["a message without a time", { dateCreated: undefined }, "the message has no time"],
+    [
+      "a message from an hour ago",
+      { dateCreated: new Date(Date.parse("2026-10-13T21:00:00.000Z")) },
+      "the message is not recent",
+    ],
+    [
+      "a message from the future",
+      { dateCreated: new Date(Date.parse("2026-10-13T22:06:00.000Z")) },
+      "the message is not recent",
+    ],
+  ] as const)("refuses an owner's text when Twilio has %s", async (_name, overrides, reason) => {
+    const params = message({ Body: "yes" });
+    const messageSid = params.find(([name]) => name === "MessageSid")?.[1] ?? "";
+    twilioLog.set(messageSid, pulled({ sid: messageSid, ...overrides }));
+    const response = await post({ params });
+    expect(response.body).toContain(UNCONFIRMED_SMS_REPLY);
+    expect(received).toEqual([]);
+    expect(unverified).toEqual([{ messageSid, forgery: true, reason }]);
+  });
+
+  it("refuses a text when Twilio cannot be reached, and handles the retry once it can", async () => {
+    let down = true;
+    await app.close();
+    app = server({
+      lookup: async (messageSid) => {
+        if (down) throw new PullError("Could not reach Twilio (ECONNREFUSED)", "unreachable");
+        return twilioLog.get(messageSid) as PulledMessage;
+      },
+    });
+    const params = message({ Body: "yes" });
+    expect((await post({ params })).body).toContain(UNCONFIRMED_SMS_REPLY);
+    expect(unverified.map((u) => [u.forgery, u.reason])).toEqual([
+      [false, "the provider lookup failed (unreachable)"],
+    ]);
+    // Not remembered as handled: Twilio's retry of the same SID gets through.
+    down = false;
+    ownerReply = "Hotline: got it.";
+    expect((await post({ params })).body).toContain("Hotline: got it.");
+    expect(received).toHaveLength(1);
+  });
+
+  it("never looks up a text from another number, which never reaches the handler anyway", async () => {
+    await app.close();
+    app = server({
+      lookup: async () => {
+        throw new Error("no lookup expected");
+      },
+    });
+    expect((await post({ params: message({ From: STRANGER }), unknownAtTwilio: true })).body).toContain(
+      GENERIC_SMS_REPLY,
+    );
+    expect(unverified).toEqual([]);
   });
 });
 
