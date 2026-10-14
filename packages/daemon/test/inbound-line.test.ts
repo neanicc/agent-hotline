@@ -13,6 +13,7 @@ import {
   HELD_STATE_KEY,
   type HotlineStore,
   InboundLine,
+  MAX_INBOUND_CALLS,
   MAX_INSTRUCTIONS_PER_CALL,
   MAX_INSTRUCTIONS_PER_SESSION,
   openStore,
@@ -21,6 +22,8 @@ import {
 
 const OWNER = "+15555550100";
 const START = new Date("2026-10-13T21:00:00.000Z");
+/** A call-memory cap small enough to pass in a few calls (the daemon's is MAX_INBOUND_CALLS). */
+const SMALL_CAP = 10;
 const SECRET = `sk_${"live"}_${"q7".repeat(14)}`;
 
 let dir: string;
@@ -192,18 +195,48 @@ describe("status", () => {
   });
 
   it("never answers queued for an instruction it then forgets, even past the call memory's cap", async () => {
+    // The same rule as the default cap of MAX_INBOUND_CALLS, with a small one so
+    // the test needs a few calls instead of a thousand (each one writes to SQLite).
+    line = new InboundLine({ store, clock: () => now, redact: (text) => text, sms, maxCalls: SMALL_CAP });
     session("s-1", "Claude in demo-app");
     line.getStatus(call("conv-0"));
-    for (let i = 1; i <= 1000; i++) line.getStatus(call(`conv-${i}`));
+    for (let i = 1; i <= SMALL_CAP; i++) line.getStatus(call(`conv-${i}`));
     const result = instruct(1, "run the tests", "conv-0");
     await line.postCall(transcript("conv-0", "session 1, run the tests"), now, false);
     // Either the call was already let go (the instruction is refused), or it is kept and queued.
     if (result === "queued") expect(store.listInstructions().map((i) => i.text)).toEqual(["run the tests"]);
     else expect(result).toBe("unknown-session");
     // The call being served is never the one evicted for space.
-    expect(instruct(1, "run the tests", "conv-1000")).toBe("queued");
-    await line.postCall(transcript("conv-1000", "session 1, run the tests"), now, false);
-    expect(store.listInstructions().filter((i) => i.sourceId === "conv-1000")).toHaveLength(1);
+    expect(instruct(1, "run the tests", `conv-${SMALL_CAP}`)).toBe("queued");
+    await line.postCall(transcript(`conv-${SMALL_CAP}`, "session 1, run the tests"), now, false);
+    expect(store.listInstructions().filter((i) => i.sourceId === `conv-${SMALL_CAP}`)).toHaveLength(1);
+  });
+
+  it("tells the owner when a call holding an instruction is forgotten for space, and never queues it", async () => {
+    line = new InboundLine({ store, clock: () => now, redact: (text) => text, sms, maxCalls: SMALL_CAP });
+    session("s-1", "Claude in demo-app");
+    line.getStatus(call("conv-0"));
+    expect(instruct(1, "run the tests", "conv-0")).toBe("queued");
+    // Within the hour, more calls than the cap: the oldest, conv-0, is let go.
+    for (let i = 1; i <= SMALL_CAP + 1; i++) line.getStatus(call(`conv-${i}`));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sms.sent.map((s) => s.text)).toEqual([expect.stringContaining("was not passed on")]);
+    expect(store.listAudit().find((e) => e.event === "voice.instruction-unconfirmed")?.detail).toEqual({
+      reason: "no post-call event",
+    });
+    expect(store.listInboundCalls().map((c) => c.conversationId)).not.toContain("conv-0");
+    // A late post-call event for it queues nothing.
+    await line.postCall(transcript("conv-0", "session 1, run the tests"), now, false);
+    expect(store.listInstructions()).toEqual([]);
+  });
+
+  it("takes only a positive whole number as the call memory's cap", () => {
+    for (const maxCalls of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => new InboundLine({ store, clock: () => now, redact: (text) => text, maxCalls })).toThrow(
+        RangeError,
+      );
+    }
+    expect(MAX_INBOUND_CALLS).toBe(1000);
   });
 
   it("keeps session numbers stable for the whole call, even when sessions come and go", () => {

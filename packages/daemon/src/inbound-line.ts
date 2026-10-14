@@ -52,7 +52,7 @@ export const MAX_INSTRUCTION_LENGTH = 1000;
 /** A held instruction (or a call's session numbers) is forgotten after this long without a post-call event. */
 const CALL_MEMORY_MS = 60 * 60 * 1000;
 /** Calls remembered at once; past it the oldest are forgotten (their instructions are not queued). */
-const MAX_CALLS = 1000;
+export const MAX_INBOUND_CALLS = 1000;
 /**
  * `daemon_state` key where runs before HL-13b saved how many instructions each
  * call held (counts only). Read once on start, to tell the owner those were lost.
@@ -166,11 +166,17 @@ export interface InboundLineOptions {
   log?: () => OrchestratorLog;
   /** For tests; defaults to random UUIDs. */
   newId?: () => string;
+  /**
+   * For tests: calls remembered at once, a positive integer; defaults to
+   * `MAX_INBOUND_CALLS`. A small cap lets a test pass it in a few calls.
+   */
+  maxCalls?: number;
 }
 
 export class InboundLine {
   readonly #options: InboundLineOptions;
   readonly #store: HotlineStore;
+  readonly #maxCalls: number;
   /** Per conversation: the session numbers its status read out, and its held instructions. */
   readonly #calls = new Map<string, CallMemory>();
   readonly #lockoutTexted: Partial<Record<PinCallDirection, number>> = {};
@@ -178,8 +184,13 @@ export class InboundLine {
   #unreadable = 0;
 
   constructor(options: InboundLineOptions) {
+    const maxCalls = options.maxCalls ?? MAX_INBOUND_CALLS;
+    if (!Number.isSafeInteger(maxCalls) || maxCalls < 1) {
+      throw new RangeError("maxCalls must be a positive integer");
+    }
     this.#options = options;
     this.#store = options.store;
+    this.#maxCalls = maxCalls;
     this.#restore();
   }
 
@@ -505,7 +516,7 @@ export class InboundLine {
     return "queued";
   }
 
-  /** This call's memory, created if new; forgets expired calls, and the oldest past `MAX_CALLS`. */
+  /** This call's memory, created if new; forgets expired calls, and the oldest past the cap (`maxCalls`). */
   #memory(conversationId: string, now: Date): CallMemory {
     void this.#forget(now, conversationId);
     let memory = this.#calls.get(conversationId);
@@ -518,7 +529,7 @@ export class InboundLine {
 
   /**
    * Forgets calls past `CALL_MEMORY_MS` (their instructions are never queued),
-   * and the oldest past `MAX_CALLS`, in memory and in the store. The returned
+   * and the oldest past the cap (`maxCalls`), in memory and in the store. The returned
    * promise settles once the owner was texted about lost instructions; it
    * never rejects.
    */
@@ -526,7 +537,7 @@ export class InboundLine {
     let lost = 0;
     for (const [id, memory] of this.#calls) {
       // The call being served is never evicted for space, only when it expired.
-      const spare = id === keep || this.#calls.size <= MAX_CALLS;
+      const spare = id === keep || this.#calls.size <= this.#maxCalls;
       if (memory.expires > now.getTime() && spare) continue;
       this.#calls.delete(id);
       // Only a call that held an instruction was saved.

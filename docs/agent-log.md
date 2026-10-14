@@ -3416,3 +3416,28 @@ Template:
   bound: text after the closing quote survives on later lines, and an
   unclosed quote removes the rest, failing closed; `docs/security.md` said
   "the rest of a line", which was wrong, and now says so.
+
+## 2026-10-14 — HL-FIX Slow inbound-line test past the call memory's cap (#86)
+
+- Cause: main's macOS job after #77 failed `inbound-line.test.ts` "never
+  answers queued for an instruction it then forgets, even past the call
+  memory's cap" at 5091 ms (the 5 s test timeout). The test read the status
+  on 1001 calls to pass the 1000-call cap. Each status is several
+  autocommitted SQLite writes (the stale-instruction pass and the
+  `voice.status` audit row); HL-13b adds none here, since a call is saved
+  only once it holds an instruction. Measured on the same run: 1786 ms on
+  the macOS rerun, 1898 ms on Ubuntu; 530 to 772 ms on this Mac.
+- Decision: a test seam, not a product change. `InboundLineOptions.maxCalls`
+  (positive integer, default `MAX_INBOUND_CALLS` = 1000, now exported) sets
+  the cap; the daemon never passes it. The test uses a cap of 10 and keeps
+  every assertion; it now takes 13 to 18 ms here. No timeout was raised.
+- Added, since the cap is now cheap to pass: a call holding an instruction
+  that is forgotten for space is never queued by a late post-call event, the
+  owner is texted once and the saved row is gone (it fails if the seam is
+  ignored); and the seam refuses a cap that is not a positive integer.
+- Scanned `inbound-line`, `persisted-limits`, `restart-limits` and
+  `orchestration` for other tests above about 2.5 s on CI: none. The slowest
+  are `restart-limits` "keep the hourly budget of 6" (1426 ms Ubuntu, 946 ms
+  macOS) and "keep the daily cap of 10" (1152 ms, 1134 ms); each restarts the
+  real daemon several times and checks the real budgets, so they are left
+  as they are.
