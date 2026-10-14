@@ -3468,7 +3468,10 @@ Template:
   TwiML: they are sent only after Twilio's record confirmed that very
   message, and moving them all to outgoing texts would change most of the
   orchestration tests' text counts. Recorded as a follow-up.
-- No in-flight cap was added to the SMS route (HL-13b's finding stands).
+- No route-level in-flight cap was added to the SMS route (HL-13b's finding
+  stands); the later limit on other senders' lookups (see the review of
+  94c2213 below) applies only after the signature check and never to the
+  owner.
 - `docs/security.md` (landed with HL-13, #77, while this branch was open):
   the verify-by-pull row now covers every text path and the normalised
   comparison, a row covers the processing retries, and the #80 follow-up is
@@ -3536,3 +3539,8 @@ Template:
   the in-flight limit and still fails with the arrival time. (P3s: the PR
   body's stale bound was updated; moving the other TwiML replies to texts is
   left to the conductor as a follow-up issue.)
+- Staff review of 9b3592d (no P0 to P2): the "no in-flight cap" line above
+  is reworded to say no route-level cap. The forged-events residual risk is
+  already in `docs/security.md`'s accepted residual risks. Auditing the first
+  dropped stranger lookup in each window is left as a follow-up (only a
+  `warn` log today).
