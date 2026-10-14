@@ -593,7 +593,10 @@ Anyone else's call gets `refused` with `end_call` on its first tool call, and
 anyone else's text the generic SMS reply.
 
 - **Status.** `get_status` numbers every live session, oldest registration
-  first, and remembers on this call which number is which session. Per
+  first, and remembers on this call which number is which session. Numbers
+  are stable for the whole call: on a later status a session keeps its
+  number, a new one gets the next unused number, and an ended one's number
+  is never reused. Per
   session: its spoken name, state, open asks by kind, the latest ask's text
   (already redacted when it was stored, redacted again and cut to 120
   characters), queued instructions, and when it was last heard from. The name

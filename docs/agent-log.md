@@ -2393,6 +2393,18 @@ Template:
   agent offers; the window is documented, and the failure mode is that the
   agent does not act. Unfenced agent text in the `status` SMS (P3) stays: it
   goes only to the owner's number, and no text can approve without a code.
+- Catch-up with main after HL-09c (#54): `voice-confirm.ts` conflicted. HL-09c's
+  read-back confirmation is kept whole; only its local tokeniser now calls
+  the shared `speechTokens`/`normalizeSpeech`. 58 files, 1711 tests pass.
+  The instruction read-back reply still uses the fixed yes lexicon; moving it
+  to HL-09c's reply judge is the follow-up.
+- Review fixes, ninth round (bot staff review of 6ff22c2, one P2 and a P3):
+  session numbers are stable for the whole call (a session keeps the number
+  it was first read out with, new ones get the next unused number, ended
+  ones' numbers are never reused), so a second status cannot shift what
+  "session 2" means; the stale doc comment above `isReference` is gone.
+  P3s left as notes: the SMS status's latest-ask text and the yes words in
+  `FILLER`.
 - Decision: sessions are named by number. `get_status` numbers live sessions
   by registration and remembers, per call, which number is which session;
   `send_instruction` takes only a number that call's status read out

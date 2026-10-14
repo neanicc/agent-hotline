@@ -190,6 +190,29 @@ describe("status", () => {
     expect(instruct(heard + 1)).toBe("unknown-session");
   });
 
+  it("keeps session numbers stable for the whole call, even when sessions come and go", () => {
+    session("s-a", "Claude in alpha");
+    now = new Date(START.getTime() + 1000);
+    session("s-b", "Codex in beta");
+    expect(line.getStatus(call())).toMatch(/Session 1, .*alpha.* Session 2, .*beta/);
+    // Alpha ends and a new session starts before the owner asks again.
+    store.putSession({ ...(store.getSession("s-a") as Session), state: "ended" });
+    now = new Date(START.getTime() + 2000);
+    session("s-c", "Claude in gamma");
+    const second = line.getStatus(call());
+    expect(second).toMatch(/Session 2, .*beta.* Session 3, .*gamma/);
+    expect(second).not.toContain("Session 1,");
+    // "Session 1" still means alpha, which ended; nobody else got its number.
+    expect(instruct(1)).toBe("unknown-session");
+    expect(instruct(3, "run the tests")).toBe("queued");
+    expect(
+      store
+        .listAudit()
+        .filter((e) => e.event === "voice.instruction")
+        .at(-1)?.sessionId,
+    ).toBe("s-c");
+  });
+
   it("counts every open ask, however many newer ones there are", () => {
     session("s-1", "Claude in demo-app");
     ask("s-1", { kind: "question", text: "Old question?" });

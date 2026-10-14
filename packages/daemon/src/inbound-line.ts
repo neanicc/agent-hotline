@@ -206,12 +206,14 @@ export class InboundLine {
     now: Date,
     fence: boolean,
     head: string,
+    /** The number session `index` of `sessions` is read out with; default its position. */
+    numberOf: (index: number) => number = (index) => index + 1,
   ): { text: string; included: Session[] } {
     if (sessions.length === 0) return { text: INBOUND_TEXTS.noSessions, included: [] };
     let text = head;
     const included: Session[] = [];
     for (const [index, session] of sessions.entries()) {
-      const line = this.#describe(session, index + 1, now, fence);
+      const line = this.#describe(session, numberOf(index), now, fence);
       const rest = sessions.length - index;
       if (text.length + line.length + 1 > STATUS_BUDGET) {
         text += ` ${rest} more ${rest === 1 ? "session is" : "sessions are"} not read out.`;
@@ -226,14 +228,32 @@ export class InboundLine {
   /** `get_status`, after the PIN: every live session, numbered as `send_instruction` will name them. */
   getStatus(call: ToolCall): string {
     const now = call.receivedAt;
-    const sessions = this.#sessions(now);
+    const live = this.#sessions(now);
     const memory = this.#memory(call.conversationId, now);
-    this.#store.appendAudit("voice.status", { sessions: sessions.length }, now);
-    const head = `${count(sessions.length, ["live session", "live sessions"])}.`;
-    const { text, included } = this.#status(sessions, now, true, head);
-    // Only the numbers this call heard read out are ones its instructions may use.
-    memory.sessionIds = included.map((session) => session.id);
-    memory.nicknames = included.map((session) => speakableName(this.#options.redact(session.nickname)));
+    this.#store.appendAudit("voice.status", { sessions: live.length }, now);
+    // Numbers stay put for the whole call: a session keeps the number it was
+    // first read out with, a new one gets the next unused number, and an
+    // ended one's number is never given to another. So "session 2" means
+    // the same session however many times the owner asks for the status.
+    const known = (session: Session) => memory.sessionIds.indexOf(session.id);
+    const sessions = [...live].sort((a, b) => {
+      const [x, y] = [known(a), known(b)];
+      return (x < 0 ? Number.POSITIVE_INFINITY : x) - (y < 0 ? Number.POSITIVE_INFINITY : y);
+    });
+    const firstNew = sessions.findIndex((session) => known(session) < 0);
+    const numberOf = (index: number) => {
+      const session = sessions[index] as Session;
+      const at = known(session);
+      return at >= 0 ? at + 1 : memory.sessionIds.length + 1 + (index - firstNew);
+    };
+    const head = `${count(live.length, ["live session", "live sessions"])}.`;
+    const { text, included } = this.#status(sessions, now, true, head, numberOf);
+    // Only sessions this call heard read out get a number its instructions may use.
+    for (const session of included) {
+      if (known(session) >= 0) continue;
+      memory.sessionIds.push(session.id);
+      memory.nicknames.push(speakableName(this.#options.redact(session.nickname)));
+    }
     return text;
   }
 

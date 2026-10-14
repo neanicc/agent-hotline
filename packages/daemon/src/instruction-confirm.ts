@@ -162,7 +162,6 @@ export function sessionsNamed(words: readonly string[], listed: readonly string[
   return named;
 }
 
-/** Words a session reference may hold: routing, filler, numbers, ordinals, the listed names. */
 /**
  * Whether `words` can be a session reference. Session names come from agent
  * folders, so their words are allowed only in a reference by name: once the
