@@ -1359,3 +1359,81 @@ Template:
     `--wait-seconds` stays below the hook `timeout`.
   - A human should check one real Claude Code and one real Codex session with
     the hooks installed and fake providers, including Codex's `/hooks` trust step.
+
+## 2026-10-14 — HL-14b Persona reads each ask on its own turn (#40)
+
+- Decision / change: the voice agent prompt now tells the model how to read
+  asks so the daemon's voice confirmation (`voice-confirm.ts`) can match the
+  owner's answers. `AGENT_DEFINITION_VERSION` is 3. Additions only, in the
+  outbound steps: step 1 reads each ask in its own turn in the ask's own words
+  (key words, session name, tool), never two asks in one turn, waiting for the
+  answer before the next, and says why (a reworded or combined reading may get
+  no answer); step 3 sends a `text` decision as the owner's words verbatim, never
+  summed up, shortened, corrected or added to; step 6 re-reads the same ask, not
+  a paraphrase, to ask again or check what the owner meant. The `submit_answer`
+  tool's `text` description also says "their own words, verbatim". No existing
+  sentence changed: the snapshot diff is the three appended sentences and the
+  `definition-v3` tag, and `SAFETY_RULES` passes unchanged.
+- Decisions (no human available):
+  - The rules sit in the outbound steps, after the untrusted-text rule, not in
+    the persona section, since they serve the decision check rather than tone.
+    Steps keep their numbers, so the diff stays additive.
+  - Reading an ask in its own words may run past the persona's "one or two
+    short sentences"; the prompt says that is fine, and still excludes what is
+    never read out (ids, paths, URLs), so a path-heavy ask may fall below the
+    match threshold and fail closed.
+  - The fake voice provider is unchanged: it already reads each ask's `asks`
+    line as its own agent turn and submits scripted text verbatim. It does not
+    model re-reads.
+- Evidence (automated, worktree, Node 24.11.0 locally): `scripts/ci/run.sh
+  build` passes; `CI=true scripts/ci/run.sh test` passes (1233 tests in 46
+  files after bringing in main with HL-06). New `packages/daemon/test/persona-readings.test.ts` plays the fake
+  voice agent for one, two and four asks (permission, question with options,
+  high-risk permission, finished turn) and checks `readings()` finds each ask
+  exactly once, in order, and that each answer confirms; also an
+  out-of-order answer, a free-text answer confirming only verbatim, and a
+  turn combining two asks reading neither (both answers fail closed). New
+  prompt tests in `elevenlabs-agent.test.ts`. Mutation checks on the fake, each
+  reverted: reading all asks in one turn (4 of 6 new tests fail); reading only
+  "Ask N, from <session>, <kind>" without the ask's text (4 fail; the one-ask
+  case still matches on session and tool words, which is the existing
+  threshold). Scenario suite: not built yet (HL-12). No ElevenLabs request was
+  made and no real call was placed: whether the real model follows these rules
+  is a live-check item (added to `docs/live-check.md`).
+- Open issues or follow-ups:
+  - HL-11: re-apply the agent and tools (version 3) on `hotline init`;
+    `hotline doctor` compares the version.
+  - Live check (HL-16): count `voice.answer-unconfirmed` on real calls with two
+    or more asks before tuning the reading threshold.
+  - Two asks in one call whose key words are one inside the other (such as
+    `git push origin main` and `git push origin main --force` from one session)
+    tie on the longer one's reading and fail closed.
+- Bot staff review (approve with nits, score 92, P3s only) and Greptile on
+  #40: Greptile's P2 is fixed. The prompt and `docs/voice.md` said a reworded
+  reading gets no answer, but `readings()` still recognises a paraphrase that
+  keeps most key words, so both now say it "may" get no answer. The stale test
+  count in this entry was corrected. The new prompt `toContain` tests stay as
+  cheap deletion guards next to the snapshot. The owner direction below stays
+  here as a note for a human, as the review suggested, not as an agreed
+  decision.
+- Owner direction relayed mid-ticket (not applied in this PR): approvals should
+  feel like a natural conversation. (1) Any natural phrasing counts as an
+  answer ("of course", "go for it", "yeah sure"). (2) Before any allow, read
+  the exact request back and ask a closed confirmation question that names it
+  with the reading's key words ("Just to confirm: allow <nickname> to
+  <action>. Yes?"), and submit allow only after the reply. (3) If an answer is
+  unclear or might be a no, ask "Sorry, is that a yes or a no?"; after two
+  unclear replies, say you will text instead and submit nothing. (4) A clear
+  no needs no confirmation. The direction also said to keep every safety
+  sentence word for word, bump the version, make the fake's flows follow the
+  protocol and leave `voice-confirm.ts` alone, since a separate ticket will
+  switch the daemon check to the confirmation exchange. The implementing
+  session's permission system refused the prompt edit twice as a security
+  weakening: once for the full direction, and once for a strengthening-only
+  subset (2, 4 and the clarifying question, keeping the `unclear` outcome).
+  Item 3's "submit nothing" contradicts the kept rule that a still-unclear
+  answer is submitted as `unclear`. That submission ends the ask as no answer
+  at once; submitting nothing leaves it open to be texted. Item 1 loosens what
+  the model treats as a yes. A human must decide on both and apply the change.
+  Today's daemon check would also refuse some of these flows, for example a
+  "hmm" before the confirmed yes, until that separate ticket lands.
