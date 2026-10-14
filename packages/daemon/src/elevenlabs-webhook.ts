@@ -120,12 +120,15 @@ export const POST_CALL_BODY_LIMIT = 1024 * 1024;
 /**
  * How many deliveries of one conversation's transcription that find ElevenLabs'
  * record still `processing` get a `503` so ElevenLabs sends the event again
- * (HL-13c). The next one ends the call as no answer. ElevenLabs retries a
- * failed webhook immediately, then after 30 s, 2, 8 and 30 minutes, and turns
- * a webhook off after 10 failures in a row, so 3 waits cover about 10 minutes
- * of processing and stay well inside both limits.
+ * (HL-13c). The next one ends the call as no answer. ElevenLabs lists its
+ * delivery attempts as immediate, then 30 s, 2, 8 and 30 minutes, and says it
+ * "retries up to 5 times", so there are 5 or 6 deliveries in all; it turns a
+ * webhook off after 10 failures in a row. With 4 waits the deciding delivery
+ * is the fifth, which exists on either reading: about 40 minutes after the
+ * first if the immediate attempt is the original, about 10 if it is the first
+ * retry. Either way it stays well under 10 failures in a row.
  */
-export const MAX_PROCESSING_RETRIES = 3;
+export const MAX_PROCESSING_RETRIES = 4;
 /** How long a conversation's processing count is kept; longer than ElevenLabs' whole retry schedule. */
 const PROCESSING_WAIT_MS = 2 * 60 * 60 * 1000;
 
@@ -590,15 +593,20 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
   };
 
   const waits = options.processingWaits ?? memoryPostCallWaits();
-  /** Counts kept for this run when `waits` (the store) fails, so the bound still holds. */
-  const fallbackWaits = memoryPostCallWaits();
+  /**
+   * This run's own count of every such delivery, whether `waits` (the store)
+   * took it or not, so a store that fails for a while and then recovers can
+   * never hand out more than the bound.
+   */
+  const runWaits = memoryPostCallWaits();
   /** Counts one delivery that found `conversationId` still processing; returns how many so far. */
   const processingWait = (conversationId: string): number => {
     const now = options.clock().getTime();
+    const thisRun = runWaits.add(conversationId, now, now + PROCESSING_WAIT_MS);
     try {
-      return waits.add(conversationId, now, now + PROCESSING_WAIT_MS);
+      return Math.max(thisRun, waits.add(conversationId, now, now + PROCESSING_WAIT_MS));
     } catch {
-      return fallbackWaits.add(conversationId, now, now + PROCESSING_WAIT_MS);
+      return thisRun;
     }
   };
 

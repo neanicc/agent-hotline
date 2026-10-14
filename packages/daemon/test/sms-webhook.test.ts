@@ -632,6 +632,34 @@ describe("every text path is pulled before any effect (HL-13c)", () => {
     },
   );
 
+  it("keeps the generic-reply limit when lookups finish out of order", async () => {
+    await app.close();
+    const pending: (() => void)[] = [];
+    app = server({
+      lookup: async (messageSid) => {
+        await new Promise<void>((resolve) => pending.push(resolve));
+        return twilioLog.get(messageSid) as PulledMessage;
+      },
+    });
+    const count = OTHER_SENDER_REPLIES_PER_HOUR + 1;
+    const responses = [];
+    for (let i = 0; i < count; i++) {
+      responses.push(post({ params: message({ From: STRANGER }) }));
+      while (pending.length <= i) await ticks(1);
+      now = new Date(now.getTime() + 1000);
+    }
+    // The newest lookup finishes first, the oldest last.
+    for (let i = count - 1; i >= 0; i--) {
+      pending[i]?.();
+      await ticks();
+    }
+    const bodies = await Promise.all(responses.map(async (response) => (await response).body));
+    expect(bodies.filter((body) => body.includes(GENERIC_SMS_REPLY))).toHaveLength(
+      OTHER_SENDER_REPLIES_PER_HOUR,
+    );
+    expect(others).toHaveLength(count);
+  });
+
   it("never lets forged texts from other numbers spend the generic replies", async () => {
     for (let i = 0; i < OTHER_SENDER_REPLIES_PER_HOUR * 2; i++) {
       expect((await post({ params: message({ From: STRANGER }), unknownAtTwilio: true })).body).toBe(BARE);

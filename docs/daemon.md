@@ -376,18 +376,23 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
   over can still be `processing` at ElevenLabs when its webhook arrives. The
   route answers `503` so ElevenLabs delivers the event again, and audits each
   such delivery as `security.unverified` ("the call is still being processed
-  at the provider"). At most `MAX_PROCESSING_RETRIES` (3) deliveries per
-  conversation get the `503`; the count is in SQLite (`post_call_waits`,
+  at the provider"). At most `MAX_PROCESSING_RETRIES` (4) deliveries per
+  conversation get the `503`. The count is in SQLite (`post_call_waits`,
   migration 6, kept two hours from the first), so a restart does not reset
-  it, and a store that cannot count falls back to this run's memory. The
-  next delivery that still finds the record processing ends the call as a
-  failed call (no answer for every ask on it, never an approval), audited
-  "the provider did not finish processing the call". ElevenLabs retries a
-  failed webhook immediately, then after 30 seconds, 2, 8 and 30 minutes, and
+  it; the route also counts every delivery in this run's memory and uses the
+  higher of the two, so a store that fails (for good, or for a while) never
+  allows more. The next delivery that still finds the record processing ends
+  the call as a failed call (no answer for every ask on it, never an
+  approval), audited "the provider did not finish processing the call".
+  ElevenLabs lists its attempts as immediate, then 30 seconds, 2, 8 and 30
+  minutes, says it "retries up to 5 times" (so 5 or 6 deliveries in all), and
   turns a webhook off after 10 failures in a row when it has not succeeded in
   7 days
-  ([webhooks](https://elevenlabs.io/docs/eleven-api/resources/webhooks#retries));
-  3 covers about 10 minutes of processing and stays inside both limits.
+  ([webhooks](https://elevenlabs.io/docs/eleven-api/resources/webhooks#retries)).
+  With 4 waits the deciding delivery is the fifth, which exists on either
+  reading: about 40 minutes after the first if the immediate attempt is the
+  original delivery, about 10 if it is the first retry. That stays well under
+  10 failures in a row.
   Retries must be turned on for the post-call webhook in the ElevenLabs
   settings, or the first `503` is final and the call's asks end as no answer
   at their timeout. Only `processing` counts: a forged event during a live

@@ -109,7 +109,7 @@ kept in `hotline.db`.
 | SMS `MessageSid` dedupe in the route (last 1000) | memory | Retries wait for an attempt in flight; only a successful handling counts |
 | Owner texts claimed by SID before any effect (`inbound_messages`, kept 400 days) | SQLite | A replay after a restart is ignored (`orchestration.test.ts` "remembers handled messages across a restart") |
 | Verify by pull (HL-13a): an owner text counts only if Twilio's own record of that SID is inbound, from the owner, with the same body (compared after NFC and whitespace collapsing since HL-13c) and at most 15 minutes old; since HL-13c every text path, other senders' included, is pulled before any effect, a refused one gets empty TwiML, and the `status` reply is texted to the owner instead of returned in the response; every ElevenLabs tool call and post-call event is checked against the pulled conversation | none (pulled per request) | A forged or replayed body confirms nothing; the forgery alarm texts the owner at most once an hour (its last send time in SQLite since HL-13b) |
-| Post-call retries while ElevenLabs' record is still `processing` (HL-13c): `503` at most 3 times per conversation, then the call ends as no answer | SQLite (`post_call_waits`, 2 h) | Only `processing` is retried, so forged events during a live call (`in-progress`) cannot use the retries up; a store that cannot count falls back to this run's memory |
+| Post-call retries while ElevenLabs' record is still `processing` (HL-13c): `503` at most 4 times per conversation, then the call ends as no answer | SQLite (`post_call_waits`, 2 h), plus this run's own count | Only `processing` is retried, so forged events during a live call (`in-progress`) cannot use the retries up; the higher of the stored and this run's count is used, so a failing store never allows more |
 | Text reply binding: a reply must be first seen 10 s or more after the text; a bare reply needs exactly one waiting ask; approvals need that ask's single-use code; one wrong code burns every waiting code | SQLite | A replayed old "YES 123456" cannot approve a newer request |
 | Generic replies to strangers, 5 an hour | memory | Global, not per sender |
 | ElevenLabs tool shared secret (`sameSecret`), checked before the body is read | none | Static: no timestamp or nonce |
@@ -255,7 +255,16 @@ by a probe or the fuzzer and none a current leak:
 - **The Twilio SMS route is not capped.** It has no in-flight cap or body
   deadline, unlike the ElevenLabs routes, because its signature can only be
   checked over the body and a cap would let an unauthenticated sender shut out
-  the owner's texts. The 64 KiB body limit still applies.
+  the owner's texts. The 64 KiB body limit still applies. Since HL-13c every
+  text, a stranger's included, costs one Twilio lookup before anything else.
+- **Forged post-call events can use up a processing call's retries (HL-13c).**
+  A process holding the post-call webhook secret can send signed events for a
+  real conversation after its call ended, while ElevenLabs' record is still
+  `processing`. Those deliveries share the conversation's 4 retries with
+  ElevenLabs' own, so the genuine transcript can arrive too late and the
+  call's asks end as no answer. That fails closed (no approval) and needs the
+  secret; during the call the record is `in-progress`, which is never
+  retried, so a live call is not affected.
 - **A PIN covers the whole call**, not one ask: after the PIN, a high-risk ask
   later on the same call needs only the read-back and a yes.
 - **On an outbound call, whoever answers the owner's phone is the owner**, up to

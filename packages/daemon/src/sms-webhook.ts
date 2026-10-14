@@ -282,7 +282,10 @@ export function twilioSmsRoute(options: TwilioSmsRouteOptions): WebhookRoute {
 
     if (!fromOwner) {
       options.onOtherSender?.(messageSid);
-      const answer = optOutType === undefined && mayReplyToOtherSender(receivedAt.getTime());
+      // The time the reply is spent, not when the text came in: lookups for
+      // different SIDs can finish out of order, and an older time would drop
+      // newer replies from the hourly count.
+      const answer = optOutType === undefined && mayReplyToOtherSender(options.clock().getTime());
       return { text: answer ? GENERIC_SMS_REPLY : undefined, handled: true };
     }
     const response = await options.onOwnerMessage({

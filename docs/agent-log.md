@@ -3422,13 +3422,18 @@ Template:
 - Decision: a post-call transcription whose pulled record is `processing`
   gets `503` so ElevenLabs sends it again, audited as `security.unverified`
   ("the call is still being processed at the provider"). The bound is
-  `MAX_PROCESSING_RETRIES` = 3 per conversation. ElevenLabs' documented
+  `MAX_PROCESSING_RETRIES` = 4 per conversation. ElevenLabs' documented
   schedule (https://elevenlabs.io/docs/eleven-api/resources/webhooks#retries)
-  is immediate, then 30 s, 2, 8 and 30 minutes, and a webhook is turned off
-  after 10 consecutive failures when it has not succeeded in 7 days, so 3
-  covers about 10 minutes of processing and stays inside both limits. The
-  delivery after the bound ends the call as a failed call (no answer, never
-  an approval), audited "the provider did not finish processing the call".
+  lists attempts as immediate, then 30 s, 2, 8 and 30 minutes, but also says
+  it "retries up to 5 times", so it is 5 or 6 deliveries in all; a webhook
+  is turned off after 10 consecutive failures when it has not succeeded in 7
+  days. With 4 waits the deciding fifth delivery exists on either reading
+  (about 40 minutes after the first if the immediate attempt is the
+  original, about 10 if it is a retry) and stays well under 10 failures. The
+  first push used 3, which on the second reading covered only 2.5 minutes
+  (Greptile, see below). The delivery after the bound ends the call as a
+  failed call (no answer, never an approval), audited "the provider did not
+  finish processing the call".
   Only `processing` is retried: `initiated` and `in-progress` keep HL-13a's
   behaviour (possible forgery, `200`, unhandled), so forged events during a
   live call can neither end it nor use up its retries.
@@ -3436,8 +3441,9 @@ Template:
   table (`post_call_waits`, migration 6, appended) with an expiry two hours
   from the first count, pruned on the next count, behind an injected
   `PostCallWaitMemory` (`storedPostCallWaits(store)` in `runDaemon`, memory in
-  tests). A store that cannot count falls back to this run's memory, so the
-  bound still holds.
+  tests). The route also counts every delivery in this run's memory and uses
+  the higher of the two counts, so a store that fails for good, or for a
+  while and then recovers, never allows more than the bound.
 - Decision: `smsMismatch` compares bodies after `comparableSmsText` on both
   sides: NFC, every `\s+` run (Unicode whitespace, no-break space included)
   to one space, trimmed. Case, compatibility characters (a ligature) and any
@@ -3498,3 +3504,22 @@ Template:
 - Follow-ups: move every owner reply out of the TwiML into outgoing texts;
   split `SavedCall` out of `inbound-line.ts` (HL-13b P3, not needed here);
   the earlier ones from HL-13b still stand.
+- Review of 75c13d1, all fixed in the next commit:
+  - Greptile (P2): the generic-reply budget was spent at the time the text
+    came in, so lookups finishing out of order could drop newer replies from
+    the hourly count and send more than 5. It now uses the clock when the
+    reply is spent. Test: six strangers' lookups finishing newest first get
+    exactly 5 replies (fails with the old time).
+  - Greptile (P2): switching between the store and the memory fallback
+    could hand out more than the bound. Now the higher of the store's count
+    and this run's own count of every delivery is used. Test: a store that
+    fails once and then recovers gives exactly 4 `503`s (fails with the old
+    fallback).
+  - Greptile (P2): with 3 waits, the "about 10 minutes" held only if
+    ElevenLabs' immediate attempt is the original delivery. The bound is now 4
+    and the docs give both readings (above).
+  - Staff review (P2): forged signed events after a call can use up a
+    processing conversation's retries. Kept (it fails closed and needs the
+    webhook secret) and written into `docs/security.md`'s accepted residual
+    risks. (P3, one lookup per stranger's text) noted there too; (P3, the
+    bound) addressed by the change to 4.

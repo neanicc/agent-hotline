@@ -216,7 +216,7 @@ texted to the owner's number instead of returned in the webhook response,
 which goes back to whoever posted it. Message bodies are compared after NFC
 normalisation and whitespace collapsing, so only an encoding difference is
 tolerated. A post-call event whose record is still `processing` is asked for
-again (`503`) at most 3 times per conversation, then the call ends as no
+again (`503`) at most 4 times per conversation, then the call ends as no
 answer.
 
 **Residual risk.** A same-user process that also reads the provider API keys

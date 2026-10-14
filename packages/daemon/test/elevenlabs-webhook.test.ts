@@ -29,6 +29,7 @@ import {
   MAX_STATUS_LENGTH,
   MAX_TOOL_CALLS_IN_FLIGHT,
   MAX_TOOL_DELIVERIES,
+  memoryPostCallWaits,
   openStore,
   PinGate,
   POST_CALL_BODY_LIMIT,
@@ -1464,6 +1465,29 @@ describe("a record still processing is asked for again, a bounded number of time
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it("hands out no extra retries when the store fails for a while and then recovers", async () => {
+    await app.close();
+    const stored = memoryPostCallWaits();
+    let failures = 1;
+    app = server({
+      processingWaits: {
+        add: (conversationId, nowMs, expires) => {
+          if (failures > 0) {
+            failures -= 1;
+            throw new Error("database is locked");
+          }
+          return stored.add(conversationId, nowMs, expires);
+        },
+      },
+    });
+    const body = processing("conv_flaky");
+    for (let i = 0; i < MAX_PROCESSING_RETRIES; i++) {
+      expect((await postCall(body, { unknownAtElevenLabs: true })).statusCode).toBe(503);
+    }
+    expect((await postCall(body, { unknownAtElevenLabs: true })).statusCode).toBe(200);
+    expect(postCalls).toEqual([expect.objectContaining({ type: "initiation-failure" })]);
   });
 
   it("keeps the bound for this run when the store cannot count", async () => {
