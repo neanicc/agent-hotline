@@ -248,6 +248,9 @@ export async function openStore(path: string, options: OpenStoreOptions = {}): P
   const db = new DatabaseSync(path, { enableForeignKeyConstraints: true });
   try {
     await chmod(path, 0o600);
+    // Overwritten and deleted rows are zeroed on disk, so state replaced since
+    // (such as a plaintext code from before HL-13a) does not linger in free pages.
+    db.exec("PRAGMA secure_delete = ON");
     migrate(db, options.migrations ?? MIGRATIONS);
   } catch (error) {
     db.close();

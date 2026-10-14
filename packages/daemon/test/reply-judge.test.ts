@@ -283,7 +283,11 @@ describe("AnthropicApiJudge", () => {
   function fakeApi(status: number, body: unknown) {
     const requests: { url: string; headers: Record<string, string>; body: Record<string, unknown> }[] = [];
     const fetch: HttpFetch = async (url, init) => {
-      requests.push({ url, headers: init.headers, body: JSON.parse(init.body) as Record<string, unknown> });
+      requests.push({
+        url,
+        headers: init.headers,
+        body: JSON.parse(init.body ?? "") as Record<string, unknown>,
+      });
       return { status, json: async () => body };
     };
     return { fetch, requests };

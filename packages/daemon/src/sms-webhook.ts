@@ -10,6 +10,12 @@
 // - only a text from the owner's number to the Hotline number reaches
 //   `onOwnerMessage`. Anyone else gets one generic reply that reveals nothing,
 //   and a few per hour at most, so a stranger cannot run up the bill;
+// - a valid signature is not enough (HL-13a): a same-user process can read the
+//   auth token and sign a webhook itself. Before an owner's text reaches
+//   `onOwnerMessage`, the message is fetched from Twilio's REST API by SID
+//   (`lookup`) and must exist, be inbound, from the owner's number to the
+//   Hotline number, with the same body, and recent (`smsMismatch`). Anything
+//   else is not handled at all, and a mismatch is reported as a possible forgery;
 // - a reply to the owner is redacted before it goes back to Twilio, like every
 //   other outgoing text;
 // - a message SID counts as handled only once its handler has succeeded. A
@@ -18,8 +24,15 @@
 //
 // Bodies, numbers and message text are never logged; only the message SID and
 // whether the sender was the owner.
-import { type FormParams, prepareSmsText, sameE164, validTwilioSignature } from "@hotline/providers";
+import {
+  type FormParams,
+  type PulledMessage,
+  prepareSmsText,
+  sameE164,
+  validTwilioSignature,
+} from "@hotline/providers";
 import type { FastifyReply, FastifyRequest } from "fastify";
+import { pullFailure, smsMismatch, type Unverified } from "./provider-pull.js";
 import type { WebhookRoute } from "./server.js";
 
 /** Below `/hooks`. Point the Twilio number's "A message comes in" webhook at `<publicUrl>/hooks/twilio/sms`. */
@@ -27,6 +40,12 @@ export const TWILIO_SMS_PATH = "/twilio/sms";
 /** All anyone but the owner ever hears back. Says nothing about Hotline, agents or the owner. */
 export const GENERIC_SMS_REPLY = "Sorry, this number does not accept messages.";
 export const OTHER_SENDER_REPLIES_PER_HOUR = 5;
+/**
+ * The reply to an owner's text Twilio could not confirm. It goes back only to
+ * whoever posted the webhook: through Twilio to the owner, or to a forger.
+ */
+export const UNCONFIRMED_SMS_REPLY =
+  "Hotline: your text could not be confirmed with Twilio, so it was not used. Please send it again.";
 /** How many message SIDs to remember, to drop Twilio retries and replays of a recent message. */
 const SEEN_MESSAGES = 1000;
 const HOUR_MS = 60 * 60 * 1000;
@@ -37,6 +56,12 @@ export interface OwnerSms {
   /** The text, verbatim. Untrusted until parsed; never log it. */
   body: string;
   receivedAt: Date;
+  /**
+   * When Twilio's own record says the message came in (`date_created`). Only
+   * a reply written after a text went out can answer it, however late its
+   * webhook arrives.
+   */
+  writtenAt?: Date;
   /**
    * `STOP`, `START` or `HELP` when Twilio matched one of its opt-out, opt-in or
    * help keywords. Twilio has already replied, so Hotline does not.
@@ -69,6 +94,13 @@ export interface TwilioSmsRouteOptions {
   onOwnerMessage: (message: OwnerSms) => string | undefined | Promise<string | undefined>;
   /** A verified text from any other number. It never reaches `onOwnerMessage`. */
   onOtherSender?: (messageSid: string) => void;
+  /**
+   * Fetches the message from Twilio by SID: the SMS provider's `fetchMessage`.
+   * Rejects with `PullError`. Required: no text counts without it.
+   */
+  lookup: (messageSid: string) => Promise<PulledMessage>;
+  /** A signed owner's text that Twilio's records do not confirm. It never reaches `onOwnerMessage`. */
+  onUnverified?: (messageSid: string, failure: Unverified) => void | Promise<void>;
 }
 
 function escapeXml(text: string): string {
@@ -165,9 +197,11 @@ export function twilioSmsRoute(options: TwilioSmsRouteOptions): WebhookRoute {
         }),
       );
       try {
-        const response = await handle(request, params, messageSid);
-        markHandled(messageSid);
-        return twiml(reply, response);
+        const outcome = await handle(request, params, messageSid);
+        // A text Twilio did not confirm stays unhandled: a genuine delivery of
+        // that SID, if one ever comes, is pulled and checked afresh.
+        if (outcome.handled) markHandled(messageSid);
+        return twiml(reply, outcome.text);
       } finally {
         inFlight.delete(messageSid);
         settle();
@@ -175,12 +209,37 @@ export function twilioSmsRoute(options: TwilioSmsRouteOptions): WebhookRoute {
     },
   };
 
-  /** Handles one verified message and returns the TwiML reply text, if any. Throws to leave it unhandled. */
+  /** Twilio's record when it confirms this owner's text, or why it does not. */
+  async function confirmed(
+    messageSid: string,
+    body: string,
+    receivedAt: Date,
+  ): Promise<{ pulled: PulledMessage } | { failure: Unverified }> {
+    let pulled: PulledMessage;
+    try {
+      pulled = await options.lookup(messageSid);
+    } catch (error) {
+      return { failure: pullFailure(error) };
+    }
+    const reason = smsMismatch(pulled, {
+      messageSid,
+      body,
+      ownerNumber: options.ownerNumber,
+      smsNumber: options.smsNumber,
+      receivedAt,
+    });
+    return reason === undefined ? { pulled } : { failure: { forgery: true, reason } };
+  }
+
+  /**
+   * Handles one verified message: the TwiML reply text, if any, and whether the
+   * SID now counts as handled. Throws to leave it unhandled.
+   */
   async function handle(
     request: FastifyRequest,
     params: Map<string, string>,
     messageSid: string,
-  ): Promise<string | undefined> {
+  ): Promise<{ text: string | undefined; handled: boolean }> {
     const receivedAt = options.clock();
     const optOutType = params.get("OptOutType") || undefined;
     // Strict E.164 on both sides: a number variant never collides with the owner's.
@@ -190,16 +249,34 @@ export function twilioSmsRoute(options: TwilioSmsRouteOptions): WebhookRoute {
       request.log.info({ messageSid, sender: "other" }, "sms received");
       options.onOtherSender?.(messageSid);
       const answer = optOutType === undefined && mayReplyToOtherSender(receivedAt.getTime());
-      return answer ? GENERIC_SMS_REPLY : undefined;
+      return { text: answer ? GENERIC_SMS_REPLY : undefined, handled: true };
     }
 
     request.log.info({ messageSid, sender: "owner" }, "sms received");
+    const body = params.get("Body") ?? "";
+    const check = await confirmed(messageSid, body, receivedAt);
+    if ("failure" in check) {
+      const { failure } = check;
+      request.log.warn({ messageSid, forgery: failure.forgery }, "sms not confirmed by twilio; ignored");
+      try {
+        await options.onUnverified?.(messageSid, failure);
+      } catch (error) {
+        request.log.error({ err: error, messageSid }, "could not report an unconfirmed sms");
+      }
+      const text =
+        optOutType === undefined ? ownerReply(request, messageSid, UNCONFIRMED_SMS_REPLY) : undefined;
+      return { text, handled: false };
+    }
     const response = await options.onOwnerMessage({
       messageSid,
-      body: params.get("Body") ?? "",
+      body,
       receivedAt,
+      ...(check.pulled.dateCreated === undefined ? {} : { writtenAt: check.pulled.dateCreated }),
       ...(optOutType === undefined ? {} : { optOutType }),
     });
-    return optOutType === undefined ? ownerReply(request, messageSid, response) : undefined;
+    return {
+      text: optOutType === undefined ? ownerReply(request, messageSid, response) : undefined,
+      handled: true,
+    };
   }
 }

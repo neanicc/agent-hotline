@@ -2802,6 +2802,231 @@ Template:
   (doctor's `llmPerMinute` does not follow `voice.llm`) is the follow-up
   already listed above.
 
+## 2026-10-14 — HL-16 Live-call protocol (#74)
+
+- Decision / change: `docs/live-check.md` is now the owner's numbered
+  protocol: prerequisites P1 to P13 (accounts, tunnel, Twilio and ElevenLabs
+  setup, `init`, `voice apply`, `install`, session settings, daemon, `doctor`
+  with expected output), real agents on fake providers R1 to R6, live calls
+  L1 to L27 (each with the exact words to say or type, the expected result and
+  what to record), a coverage map (plan section 11 items, all 22 eval
+  scenarios, the #17 carry-overs), a results template and cleanup, uninstall
+  and credential revocation steps. The live run itself stays `needs-human`;
+  the PR refers to #17 without closing it.
+- Fix: the old doc tunnelled port 7777. The webhook listener is
+  `daemon.port + 1`, 7342 by default; P4 now says so and warns never to tunnel
+  the agent API.
+- Voice model: the HL-14d comment on #17 named Sonnet 5.5 with Haiku as the
+  fallback; the later owner direction on #57 (implemented by #70) makes
+  `claude-haiku-4-5` the default. L25 measures the default and offers Sonnet
+  5.5 as the comparison.
+- Session settings for the run (P10): raised rate limits (20 calls an hour,
+  60 a day, 20 texts an hour, 60 a day), `askTimeoutMinutes` 10 and
+  `maxConsecutiveContinuations` 2, with a copy of the config to restore
+  afterwards, so about 45 calls and the silence and cap steps fit in an
+  afternoon. They are the owner's own config, not a code change.
+- R1 to R6 use a scratch `HOTLINE_HOME` with the file secret store: the
+  Keychain store's service name is fixed (`agent-hotline`), so a scratch home
+  on the Keychain would overwrite the real items.
+- Codex shell requests are always high risk, so the Codex approval for
+  acceptance item 5 (L10) needs the PIN on the call.
+- Reply judge (HL-09d, #65, merged while this was written): P7 has the owner
+  choose it at `init` (it is off until chosen), P14 runs `doctor
+  --check-judge` once per backend so the real `claude -p` and `codex exec`
+  flags are exercised, with the bare commands to find a refused flag, and
+  checks the judge bills the plan login rather than an API key (#72); L8
+  tries natural yeses, a conditional yes and two French replies, a plain one
+  and a conditional one.
+- #70 (HL-14d) was also merged while this was written; its live-check items
+  are in P8, P13 and L25, and its own `docs/live-check.md` hunk was taken
+  over by this version on catch-up.
+- Steps for the open PRs #64 and #69 (and the fix for #72) are written in
+  and marked N/A until each is merged. Each of those PRs also edits
+  `docs/live-check.md`; when one lands after this, keep this version (it
+  already covers their items).
+- `rate-limit-holds-calls` and `replayed-webhook-rejected` stay fakes only: a
+  live run would cost calls for no new evidence, or need a captured signed
+  request.
+- New `test/live-check.test.ts`: step ids are contiguous and each has one
+  results row, every step the doc refers to exists, every scenario in
+  `docs/eval.md` and every plan section 11 item is mapped, every relative link
+  in the doc (and every link into it from README.md and docs/) resolves, and
+  the only phone numbers are the fake 555-01xx ones. Each check was seen to
+  fail on a deliberate break (a bad anchor, a dropped scenario row, a dropped
+  results row, a real-looking number, a renumbered step, a dropped acceptance
+  row, a reference to a missing step), then restored.
+- Evidence: see the PR's Validation section. No call, text, credential or real
+  `claude`/`codex` run against the daemon was used.
+- Open issues or follow-ups: the live run (owner); file one issue per failure
+  it finds.
+- Review fixes (staff review and Greptile on #74):
+  - P10 raises all four rate limits for the run: the "what next?" calls bring
+    it to about 45 calls, past the default daily limit.
+  - Section 3 says to answer every "what next?" call with "that's it" unless
+    the step tests those calls.
+  - P3 creates `main` explicitly (`git init -b main`) for L9's push.
+  - L24 also posts an unsigned post-call webhook and expects 403.
+  - R1 says the scratch PIN is throwaway.
+  - The doc test also catches formatted and bare-digit phone numbers.
+  - Second review round: P10 shows the undo command next to the edit, and
+    cleanup checks the restore with `cmp` and records it in the results.
+  - The doc test now parses every config snippet in the doc with core's
+    `parseConfig`, and checks every `hotline` flag it uses against the CLI
+    source. A misspelled key, a refused value and an unknown flag each failed
+    it.
+
+## 2026-10-14 — HL-13a Verify every approval by pulling from the provider (#58)
+
+- Threat (from the HL-15 Greptile review on #51): any process running as the
+  owner, a coding agent included, can read the Twilio auth token and the
+  ElevenLabs webhook and tool secrets (Keychain via `/usr/bin/security`
+  without a prompt, or the `0600` file) and sign webhooks itself: a
+  `YES <code>` text, a post-call transcript in which the owner says yes, or
+  `verify_pin` guesses. Signature checks alone cannot tell those from the
+  provider's.
+- Decision: a signed webhook is only a trigger. SMS: before an owner's text
+  reaches call orchestration, the route fetches the message from Twilio by
+  `MessageSid` (`SmsProvider.fetchMessage`) and requires the same SID,
+  `inbound`, `received`/`receiving`, from the owner's number to the Hotline
+  number (strict E.164), the same body, and `date_created` at most 15 minutes
+  old (5 minutes of skew ahead). Voice: the post-call transcription is
+  replaced by the conversation pulled from ElevenLabs
+  (`VoiceProvider.fetchConversation`); its transcript, metadata and status are
+  what call orchestration and the inbound line see. `verify_pin` pulls first
+  and counts an attempt only on this agent's live (`initiated`/`in-progress`)
+  phone call with the owner's number on the far end, the numbers and call SID
+  the tool call carries, and `voice.agentPhoneNumberId` when set.
+  `submit_answer` and `send_instruction` already only hold decisions until the
+  post-call event, which is now the pulled record, so they need no pull.
+- Decision: failures fail closed, by kind. A text that cannot be confirmed is
+  not handled at all (not even remembered as handled, so a genuine Twilio
+  retry is pulled again) and gets "your text could not be confirmed with
+  Twilio". A post-call pull that fails, or a record of another conversation or
+  agent, becomes a failed call (initiation failure, reason `unknown`): nothing
+  confirmed, asks follow the queue's retry and text rules. A record not yet
+  finished (`initiated`, `in-progress`, `processing`) leaves the event
+  unhandled, since ElevenLabs only sends it after the call; this keeps a forged
+  early event from ending a real call. A post-call body that differs from the
+  record is used as the record and reported. (Superseded by the review fixes
+  below: initiation failures are pulled too, and an outage is retried.)
+- Decision: a 404 or a mismatch is audited as `security.possible-forgery`
+  (channel, what, a fixed reason; never bodies or numbers) and texts the owner
+  at most once an hour (`ForgeryAlarm`, in memory); an outage is
+  `security.unverified` and texts nothing.
+- Decision: the pull methods are optional on `SmsProvider` and `VoiceProvider`
+  so other implementations (HL-12's scenario suite runs in parallel) keep
+  compiling; the daemon treats a provider without them as one that can never
+  confirm anything. Without `elevenlabs.apiKey` (or a provider that can pull)
+  no voice route is registered at all.
+- Decision: SMS confirmation codes are stored only as `scrypt1$salt$hash`
+  (16-byte salt per code, N = 2^14, r = 8, p = 1) and compared in constant
+  time. State saved before HL-13a with plaintext codes is hashed on start, and
+  the store now runs with `PRAGMA secure_delete = ON` so replaced rows do not
+  linger. Consequence: a text sent again after a crash part way through its
+  send cannot repeat the old code, so it carries a fresh one that replaces it
+  (the old code then mismatches and burns the waiting codes, as any wrong code
+  does). The orchestrator test that expected the old code was replaced by two:
+  the resent text's fresh code approves, and the interrupted text's code does
+  not. A 6-digit code's hash can still be brute-forced offline in hours of
+  CPU; the pull is what stops a forged `YES <code>`.
+- Decision: the fakes play the providers' records. `FakeSmsProvider.receive`
+  records an inbound text (the harness's `text()` calls it before posting, and
+  `forged: true` skips it); its sends are recorded too. `FakeVoiceProvider`
+  keeps each call's record live while it plays and final before its webhook,
+  with the transcript it played; the webhook body is a copy.
+- Fixed the overstatement HL-15 flagged in `docs/contracts.md` (same-user access
+  "does not let an agent approve anything"); README, contracts and daemon docs
+  describe the pull and the residual risk.
+- Residual risk: a same-user process that also reads the provider API keys can
+  call the providers itself (calls, texts, history, agent configuration), and
+  can guess at the PIN on a live call whose conversation id it reads from the
+  store, within the PinGate limits. It cannot fabricate the owner's inbound
+  message or the owner's speech in a real call's transcript, and a forged
+  initiation failure no longer ends a live call.
+- Evidence: `pnpm run lint`, `pnpm run typecheck` and `pnpm run test` pass (59
+  files, 1771 tests). New tests: provider pulls with fake HTTP (Twilio GET by
+  SID, ElevenLabs GET by id, 404/401/network/malformed answers, malformed ids
+  never requested); fake providers' records; route tests for every SMS
+  mismatch, an unknown SID, an outage and its retry, every `verify_pin`
+  refusal (no attempt spent after 12 forged guesses), a forged post-call body
+  differing from the pulled transcript, pulled metadata deciding whose turns
+  count, unknown and other-agent conversations, an early event; end to end
+  through `runDaemon` (`verify-by-pull.test.ts`, `run.test.ts` with the real
+  `TwilioSmsProvider` and `ElevenLabsVoiceProvider` over a fake REST API):
+  a forged signed `YES <code>` never approves and burns nothing, a forged
+  transcript never confirms, a pull failure gives no answer, forged PIN
+  attempts never lock the owner out, codes never appear in the state or the
+  database files. Mutation checks, each reverted: handlers given the webhook
+  body instead of the pulled record (1 test fails), the SMS pull skipped (15),
+  the `verify_pin` pull skipped (10). Scenario suite not built yet (HL-12).
+  No real Twilio or ElevenLabs request was made.
+- Open issues or follow-ups: the live check must confirm that ElevenLabs' GET
+  shows `in-progress` with `metadata.phone_call` during a call (else every PIN
+  is refused) and that the post-call webhook's transcript equals the API's
+  (else every call raises a forgery alarm); both are listed in
+  `docs/live-check.md`. The forgery alarm's hourly limit is in memory. A
+  forger can make the daemon issue provider GETs (bounded by the post-call
+  route's in-flight cap; tool calls need the tool secret and the owner's
+  number in the body first).
+- Review fixes (security review of d8f896d, "verify-by-pull gap"): every path
+  where a webhook or tool body was trusted without the pulled record is
+  closed, each failing closed.
+  - `call_initiation_failure` is pulled: acted on only when ElevenLabs has
+    Hotline's outbound call to the owner on the Hotline number as `failed`
+    with nobody's words in it; otherwise ignored and audited. Before, a forged
+    one could end a live call as no pickup and start retries and texts.
+  - Every server tool (`submit_answer`, `get_status`, `send_instruction`, not
+    only `verify_pin`) pulls before any effect, and the body's caller, called
+    number and call SID must all be present and equal the record's. The
+    direction comes from the record plus `placedCall`, not from the body's
+    numbers. Before, a forged `submit_answer` could hold a deny or a conflict
+    on a live outbound call (a refusal wins unconfirmed), and a forged
+    `get_status` or `send_instruction` for a PIN-verified conversation kept
+    working for two hours after the call ended.
+  - The post-call check also verifies the phone metadata: a direction, the
+    configured `agentPhoneNumberId` (now required to serve the routes), a
+    strict E.164 Hotline number other than the owner's, the owner's number on
+    the far end, outbound only for a call Hotline placed and inbound only for
+    one it did not. A finished call that is not with the owner is handed on
+    with no transcript turns (still recorded for the cost estimate).
+  - No API key: no voice route is registered (the routes used to serve and
+    fail every pull).
+  - Staff review P2: a transient pull failure on a post-call event answers
+    503 so ElevenLabs delivers it again, instead of turning a genuine
+    transcript into a failed call.
+  - Staff review P2 (replay after a restart): the claim that handled SIDs live
+    only in memory is wrong (`inbound_messages` keeps them 400 days, checked by
+    `ownerText`), but a related gap was real: a genuine owner text whose
+    webhook never arrived could be delivered later and bind to a request
+    texted after it was written. The reply-delay check now uses the earlier of
+    the daemon's first sight and Twilio's `date_created`.
+  - Tests that asserted the old, looser behaviour now assert the stricter one
+    (stranger and unplaced calls hand on no words; a call with the owner on
+    both ends is refused; an initiation failure ElevenLabs does not have is
+    ignored). The run and harness configs gained `call_sid` and
+    `agentPhoneNumberId`, which real ElevenLabs tool calls and configs carry.
+  - Greptile on d8f896d: (P2) confirmation codes are hashed and compared with
+    async `scrypt` (`matchingHashes`, side by side on the thread pool), so a
+    reply with ten waiting codes no longer blocks the event loop; the pure
+    planner takes the matched hashes as input. (P2) the forgery text no longer
+    says "Nothing was approved": a post-call body that differs from the record
+    is reported while the record, which may hold the owner's real yes, is
+    still used. (P1, inbound PINs refused without `agentPhoneNumberId`)
+    addressed differently from the suggestion: every pulled record must be on
+    the configured ElevenLabs number, so without it the voice routes are off
+    with that reason logged (doctor already reports it) instead of serving
+    and refusing every PIN.
+  - Staff review of a89dfce (P2, same as Greptile's P1): `voice.agentPhoneNumberId`
+    is now documented as required for calling and the voice routes
+    (contracts' config table), with a run test for the config without it;
+    the code-hash comment and contracts no longer read as a guarantee against
+    offline brute force; live-check says what to do about a repeating alarm.
+  - After catching up with HL-12's scenario suite, its harness got the same
+    backing as the daemon's: the config sets `voice.agentPhoneNumberId`, and
+    `text()` records each owner text in the fake Twilio's log (timed by the
+    fake clock) before posting the webhook. No scenario or pull check changed;
+    the suite prints 22 PASS lines and `THRESHOLDS: PASS` in CI mode.
+
 ## 2026-10-14 — HL-22 Keychain self-test in hotline doctor (#22)
 
 - Decision / change: `hotline doctor` adds a `keychain` check when
@@ -2853,5 +3078,12 @@ Template:
   appears. A per-run account means a leftover is never overwritten by the
   next run, which that hint and the install guide cover. After catching up
   with main: `build` and `test` (1631 tests in 56 files) pass.
+- Second catch-up, after #74 (HL-16) and #69 (HL-13a) landed: this entry
+  moves after theirs. `docs/live-check.md` keeps #74's protocol, as its entry
+  asks; its P13 already had the Keychain step, which now links the
+  `#keychain-self-test` section, names the `keychain` secret store and says
+  tests and CI use a fake. `doctor.ts` merged without conflict. `build` and
+  `test` (1998 tests in 66 files) pass; the scenario suite, which exists
+  since HL-12, runs in hosted CI (see the PR's Validation section).
 - Open issues or follow-ups: the first real `hotline doctor` run on the
   owner's Mac is the actual verification of the three assumptions.

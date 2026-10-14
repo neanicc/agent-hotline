@@ -184,4 +184,4 @@ rm -rf "$DEMO"; unset DEMO HOTLINE_HOME
 
 Check the recording for real phone numbers, tokens or file contents before you
 share it. Record what the phone scenes showed (date, commit, what happened) in
-[live-check.md](live-check.md#record).
+[live-check.md](live-check.md#5-results-template).

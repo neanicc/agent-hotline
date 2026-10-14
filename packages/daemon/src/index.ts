@@ -4,6 +4,7 @@ export const packageName = "@hotline/daemon";
 
 export * from "./agent-routes.js";
 export * from "./api-token.js";
+export * from "./code-hash.js";
 export * from "./config-file.js";
 export * from "./elevenlabs-webhook.js";
 export * from "./hook-state.js";
@@ -15,6 +16,7 @@ export * from "./orchestrator.js";
 export * from "./owner-texts.js";
 export * from "./pin.js";
 export * from "./private-file.js";
+export * from "./provider-pull.js";
 export * from "./redact.js";
 export * from "./reply-judge.js";
 export * from "./run.js";
