@@ -175,7 +175,10 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
   deliveries that changed state are remembered (`recorded`, `queued`, or a PIN
   attempt); anything else (`pin-required`, `needs-pin`, `not-recorded`,
   `invalid`, `refused`) or a failure is forgotten, so the same call can succeed
-  once it is allowed, such as an approval resent after `verify_pin`. A
+  once it is allowed, such as an approval resent after `verify_pin`. One
+  consequence: the owner giving the same session the same instruction twice in
+  one call (byte-identical body) queues it once, though the voice agent hears
+  `queued` both times. A
   remembered delivery is never evicted before its window ends: with 1000 live
   ones (only possible with the tool secret), a new delivery gets
   `{"result": "busy"}` and does not run. `get_status` only
@@ -190,18 +193,22 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
 
 | Tool | What the route does |
 | --- | --- |
-| `verify_pin` | Checks the PIN with the `PinGate`: 2 wrong PINs per call, then `end_call: true` and no further checks on that call; 6 wrong PINs across all calls of one direction in a rolling hour lock every check on that direction, the right PIN included, until the hour has passed. Inbound and outbound calls have separate budgets, so someone guessing on inbound calls (caller ID can be spoofed) cannot block PIN approvals on calls Hotline placed to the owner. The trade-off: such guessing still locks the owner's own inbound line for up to an hour, which fails closed. Answers `{verified, attempts_left, end_call}`. A verified PIN is registered with the redactor (`addShortSecret`). The PIN is checked against `owner.pinHash` with scrypt and never logged or stored |
+| `verify_pin` | Checks the PIN with the `PinGate`: 2 wrong PINs per call, then `end_call: true` and no further checks on that call; 6 wrong PINs across all calls of one direction in a rolling hour, or 10 in a rolling day, lock every check on that direction, the right PIN included, until enough time has passed. A caller spoofing the owner's number therefore gets at most 10 guesses a day (0.1% of a 4-digit PIN space). Each lockout calls the PinGate's `onLockout` so the owner can be told (HL-10 texts them). Inbound and outbound calls have separate budgets, so someone guessing on inbound calls (caller ID can be spoofed) cannot block PIN approvals on calls Hotline placed to the owner. The trade-off: such guessing still locks the owner's own inbound line for up to an hour, which fails closed. Answers `{verified, attempts_left, end_call}`. A verified PIN is registered with the redactor (`addShortSecret`). The PIN is checked against `owner.pinHash` with scrypt and never logged or stored |
 | `submit_answer` | On an inbound call (anything but a call to the owner's number from another number), `pin-required` until this call passed `verify_pin`, because caller ID can be spoofed. Otherwise passes the ask number, decision (`option`, `allow`, `deny`, `text`, `done` or `unclear`), the owner's words, the direction and the call ids to the `submitAnswer` handler. `confirmation` is `pin` only when this call passed `verify_pin`; nothing in the request can set it |
 | `get_status` | `{"result": "pin-required"}` until this call passed `verify_pin`. Then the `getStatus` handler's text, redacted and cut to 1500 characters |
 | `send_instruction` | `pin-required` until this call passed `verify_pin`. Then the `sendInstruction` handler gets the session number, instruction and the owner's words |
 
 **Post-call webhook** (`POST /hooks/el/post-call`):
 
-- **Precheck:** an `ElevenLabs-Signature` header and a JSON content type. The
-  HMAC covers the body, so it can only be checked after the body is read; at
-  most 4 post-call requests are read or handled at once (`maxInFlight` on the
-  route), and the rest get the bare 403 before their body is read. A sender
-  that has not delivered its body within 10 seconds is cut off. A slot is given
+- **Precheck:** a well-formed, fresh `ElevenLabs-Signature` header (exactly
+  one `t=` timestamp within the tolerance below and one `v0=` of 64 hex digits)
+  and a JSON content type. The HMAC covers the body, so it can only be checked
+  after the body is read; at most 4 post-call requests are read or handled at
+  once (`maxInFlight` on the route), and the rest get the bare 403 before their
+  body is read. A sender that has not delivered its body within 5 seconds is
+  cut off. Behind the tunnel every request comes from 127.0.0.1, so a per-IP
+  limit would not help; a determined sender can still keep real webhooks out,
+  which fails closed (HL-09 must treat a missing post-call event as no answer). A slot is given
   back when the response is sent or the sender goes away. Rate limiting at the
   tunnel is still worthwhile.
 - **Verify:** `t=<seconds>,v0=<hex HMAC-SHA256(webhookSecret, "<t>.<raw body>")>`,

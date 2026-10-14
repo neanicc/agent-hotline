@@ -19,6 +19,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { Confirmation, Decision } from "@hotline/core";
 import {
+  freshPostCallHeader,
   type GetStatusBody,
   POST_CALL_MAX_AGE_SECONDS,
   POST_CALL_PATH,
@@ -57,6 +58,8 @@ const REMEMBERED_RESULTS: ReadonlySet<string> = new Set(["recorded", "queued"]);
  * caps what unauthenticated senders can make the daemon hold.
  */
 export const MAX_POST_CALLS_IN_FLIGHT = 4;
+/** How long a post-call sender may take to deliver its body; a real webhook needs far less. */
+export const POST_CALL_BODY_TIMEOUT_MS = 5_000;
 /**
  * A post-call transcription carries the whole transcript plus analysis and
  * metadata, so it may exceed the listener's default. Bigger bodies get the bare
@@ -111,7 +114,7 @@ export interface ElevenLabsRoutesOptions {
   toolSecret: string;
   /** The `elevenlabs.webhookSecret` secret, the post-call HMAC key. */
   webhookSecret: string;
-  /** How long a post-call sender may take to deliver its body (default 10 s); tests shorten it. */
+  /** How long a post-call sender may take to deliver its body (default 5 s); tests shorten it. */
   postCallBodyTimeoutMs?: number;
   /** `config.voice.agentId`: post-call webhooks for any other agent are ignored. */
   agentId: string;
@@ -317,8 +320,12 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
     url: POST_CALL_PATH,
     bodyLimit: POST_CALL_BODY_LIMIT,
     maxInFlight: MAX_POST_CALLS_IN_FLIGHT,
-    ...(options.postCallBodyTimeoutMs === undefined ? {} : { bodyTimeoutMs: options.postCallBodyTimeoutMs }),
-    precheck: (request) => header(request, SIGNATURE_HEADER) !== undefined && jsonRequest(request),
+    bodyTimeoutMs: options.postCallBodyTimeoutMs ?? POST_CALL_BODY_TIMEOUT_MS,
+    // A well-formed, fresh signature header is required before a slot is taken
+    // and the body read; only the HMAC itself needs the body.
+    precheck: (request) =>
+      freshPostCallHeader(header(request, SIGNATURE_HEADER), Math.floor(options.clock().getTime() / 1000)) !==
+        undefined && jsonRequest(request),
     verify: (request) => {
       const raw = rawBody(request);
       return (

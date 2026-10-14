@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { hashPin, PIN_ATTEMPTS_PER_CALL, PIN_FAILURES_PER_HOUR, PinGate, verifyPin } from "../src/index.js";
+import {
+  hashPin,
+  PIN_ATTEMPTS_PER_CALL,
+  PIN_FAILURES_PER_DAY,
+  PIN_FAILURES_PER_HOUR,
+  PinGate,
+  verifyPin,
+} from "../src/index.js";
 
 describe("verifyPin", () => {
   it("accepts the PIN its hash was made from, and nothing else", async () => {
@@ -127,6 +134,60 @@ describe("PinGate", () => {
     expect((await pins.attempt("conv_out", "4821", "outbound")).verified).toBe(true);
     // A call keeps the budget of its first attempt.
     expect((await pins.attempt("conv_in_0", "4821", "outbound")).verified).toBe(false);
+  });
+
+  it(`allows at most ${PIN_FAILURES_PER_DAY} wrong PINs a day, and reports each lockout`, async () => {
+    const lockouts: string[] = [];
+    let now = new Date("2026-10-13T22:00:00.000Z");
+    const pins = new PinGate({
+      check: async (pin) => pin === "4821",
+      clock: () => now,
+      onLockout: (direction) => lockouts.push(direction),
+    });
+    const advance = (ms: number) => {
+      now = new Date(now.getTime() + ms);
+    };
+    let call = 0;
+    const guess = () => {
+      call += 1;
+      return pins.attempt(`conv_${call}`, "0000", "inbound");
+    };
+    for (let i = 0; i < PIN_FAILURES_PER_HOUR; i += 1) await guess();
+    expect(lockouts).toEqual(["inbound"]);
+    advance(61 * 60 * 1000);
+    for (let i = PIN_FAILURES_PER_HOUR; i < PIN_FAILURES_PER_DAY; i += 1) await guess();
+    expect(lockouts).toEqual(["inbound", "inbound"]);
+    advance(2 * 60 * 60 * 1000);
+    expect((await pins.attempt("conv_owner", "4821", "inbound")).verified).toBe(false);
+    advance(22 * 60 * 60 * 1000);
+    expect((await pins.attempt("conv_owner2", "4821", "inbound")).verified).toBe(true);
+  });
+
+  it("does not count a right PIN against the budget when a prune ran during the check", async () => {
+    let now = new Date("2026-10-13T22:00:00.000Z");
+    let release = () => {};
+    const pins = new PinGate({
+      check: (pin) =>
+        pin === "4821"
+          ? new Promise((resolve) => {
+              release = () => resolve(true);
+            })
+          : Promise.resolve(false),
+      clock: () => now,
+    });
+    for (let i = 0; i < PIN_FAILURES_PER_HOUR - 2; i += 1) await pins.attempt(`conv_${i}`, "0000", "inbound");
+    const right = pins.attempt("conv_owner", "4821", "inbound");
+    // Another attempt prunes (replacing the failure list) while the right PIN is being checked.
+    now = new Date(now.getTime() + 1000);
+    await pins.attempt("conv_other", "1111", "outbound");
+    release();
+    expect((await right).verified).toBe(true);
+    // One wrong PIN short of the hourly limit, so the budget is not locked yet.
+    expect(await pins.attempt("conv_last", "0000", "inbound")).toEqual({
+      verified: false,
+      attemptsLeft: 1,
+      endCall: false,
+    });
   });
 
   it("keeps counting failures stamped in the future when the clock moves back", async () => {

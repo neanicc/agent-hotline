@@ -13,7 +13,15 @@ export const PIN_ATTEMPTS_PER_CALL = 2;
  * PIN check on calls of that direction fails, right or wrong.
  */
 export const PIN_FAILURES_PER_HOUR = 6;
+/**
+ * Wrong PINs across all calls of one direction in a rolling 24 hours before
+ * every check on that direction fails until the day has passed. With 2 per call
+ * and 6 per hour, a caller spoofing the owner's number gets at most 10 guesses a
+ * day: 0.1% of a 4-digit PIN space.
+ */
+export const PIN_FAILURES_PER_DAY = 10;
 const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
 /** How long a call's PIN state is kept. Longer than any call. */
 const CALL_STATE_MS = 2 * HOUR_MS;
 const MAX_TRACKED_CALLS = 1000;
@@ -73,6 +81,11 @@ export interface PinGateOptions {
   clock: () => Date;
   /** Called once with the PIN after it verified, so the redactor can learn it (`addShortSecret`). */
   onVerified?: (pin: string) => void;
+  /**
+   * Called when a wrong PIN locks every check on one direction (the hourly or
+   * daily budget is spent), so the owner can be told (HL-10 texts them).
+   */
+  onLockout?: (direction: PinCallDirection) => void;
 }
 
 interface CallPinState {
@@ -95,9 +108,10 @@ export type PinCallDirection = "inbound" | "outbound";
 
 /**
  * Tracks which calls proved the PIN, and limits guessing: `PIN_ATTEMPTS_PER_CALL`
- * wrong PINs per call, then `PIN_FAILURES_PER_HOUR` across all calls of one
- * direction, after which every check on that direction fails until the hour has
- * passed. Only this gate, never the voice model, says a call is verified.
+ * wrong PINs per call, then `PIN_FAILURES_PER_HOUR` in an hour and
+ * `PIN_FAILURES_PER_DAY` in a day across all calls of one direction, after which
+ * every check on that direction fails until enough time has passed. Only this
+ * gate, never the voice model, says a call is verified.
  */
 export class PinGate {
   readonly #options: PinGateOptions;
@@ -131,20 +145,20 @@ export class PinGate {
       state = { failures: 0, verified: false, since: now, direction };
       this.#calls.set(conversationId, state);
     }
-    const failures = this.#failures[state.direction];
+    const budget = state.direction;
     if (state.verified)
       return { verified: true, attemptsLeft: PIN_ATTEMPTS_PER_CALL - state.failures, endCall: false };
     const exhausted = () => ({ verified: false, attemptsLeft: 0, endCall: true });
-    if (state.failures >= PIN_ATTEMPTS_PER_CALL || failures.length >= PIN_FAILURES_PER_HOUR) {
-      return exhausted();
-    }
+    if (state.failures >= PIN_ATTEMPTS_PER_CALL || this.#locked(budget, now)) return exhausted();
     // Count the attempt before the slow check, so concurrent guesses cannot exceed the limit.
     state.failures += 1;
-    failures.push(now);
+    this.#failures[budget].push(now);
     const pin = spoken.replace(/[\s-]/g, "");
     const ok = await this.#options.check(pin).catch(() => false);
     if (ok) {
       state.failures -= 1;
+      // Re-read the list: a prune during the check may have replaced it.
+      const failures = this.#failures[budget];
       const index = failures.indexOf(now);
       if (index >= 0) failures.splice(index, 1);
       state.verified = true;
@@ -153,7 +167,8 @@ export class PinGate {
       return { verified: true, attemptsLeft: PIN_ATTEMPTS_PER_CALL - state.failures, endCall: false };
     }
     const attemptsLeft = Math.max(0, PIN_ATTEMPTS_PER_CALL - state.failures);
-    const locked = failures.length >= PIN_FAILURES_PER_HOUR;
+    const locked = this.#locked(budget, now);
+    if (locked) this.#options.onLockout?.(budget);
     return {
       verified: false,
       attemptsLeft: locked ? 0 : attemptsLeft,
@@ -161,10 +176,17 @@ export class PinGate {
     };
   }
 
+  /** Whether one direction's hourly or daily budget of wrong PINs is spent. */
+  #locked(budget: PinCallDirection, now: number): boolean {
+    const failures = this.#failures[budget];
+    // A failure stamped after `now` (the clock moved back) counts in both windows.
+    const lastHour = failures.filter((at) => now - at < HOUR_MS).length;
+    return lastHour >= PIN_FAILURES_PER_HOUR || failures.length >= PIN_FAILURES_PER_DAY;
+  }
+
   #prune(now: number): void {
-    // A failure stamped after `now` (the clock moved back) keeps counting.
     for (const key of ["inbound", "outbound"] as const) {
-      this.#failures[key] = this.#failures[key].filter((at) => now - at < HOUR_MS);
+      this.#failures[key] = this.#failures[key].filter((at) => now - at < DAY_MS);
     }
     for (const [id, state] of this.#calls) {
       if (now - state.since >= CALL_STATE_MS || this.#calls.size > MAX_TRACKED_CALLS) this.#calls.delete(id);

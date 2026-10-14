@@ -30,6 +30,30 @@ export function postCallSignatureHeader(secret: string, timestamp: number, rawBo
 }
 
 /**
+ * The timestamp and `v0=` hash of a well-formed, fresh signature header, or
+ * undefined. Needs no body, so a route can refuse a stale or malformed header
+ * before reading one: exactly one `t` (digits) and one `v0` (64 lower-case hex
+ * digits), with the timestamp within the tolerance of `nowSeconds`.
+ */
+export function freshPostCallHeader(
+  header: string | undefined,
+  nowSeconds: number,
+): { timestamp: string; hash: string } | undefined {
+  if (header === undefined || header.length > 512) return undefined;
+  const parts = header.split(",");
+  const times = parts.filter((part) => part.startsWith("t="));
+  const sigs = parts.filter((part) => part.startsWith("v0="));
+  const [time] = times;
+  const [hash] = sigs;
+  if (times.length !== 1 || sigs.length !== 1 || time === undefined || hash === undefined) return undefined;
+  const timestamp = time.slice(2);
+  if (!/^\d{1,12}$/.test(timestamp) || !/^v0=[0-9a-f]{64}$/.test(hash)) return undefined;
+  const age = nowSeconds - Number(timestamp);
+  if (age > POST_CALL_MAX_AGE_SECONDS || age < -POST_CALL_MAX_SKEW_SECONDS) return undefined;
+  return { timestamp, hash };
+}
+
+/**
  * True only for a well-formed header whose HMAC matches `rawBody` under `secret`
  * and whose timestamp is within the tolerance of `nowSeconds`. Fails closed on an
  * empty secret, a missing or repeated `t`/`v0`, or a non-numeric timestamp.
@@ -40,19 +64,11 @@ export function validPostCallSignature(
   header: string | undefined,
   nowSeconds: number,
 ): boolean {
-  if (secret.length === 0 || header === undefined || header.length > 512) return false;
-  const parts = header.split(",");
-  const times = parts.filter((part) => part.startsWith("t="));
-  const sigs = parts.filter((part) => part.startsWith("v0="));
-  const [time] = times;
-  const [presented] = sigs;
-  if (times.length !== 1 || sigs.length !== 1 || time === undefined || presented === undefined) return false;
-  const t = time.slice(2);
-  if (!/^\d{1,12}$/.test(t)) return false;
-  const age = nowSeconds - Number(t);
-  if (age > POST_CALL_MAX_AGE_SECONDS || age < -POST_CALL_MAX_SKEW_SECONDS) return false;
-  const expected = postCallSignature(secret, t, rawBody);
-  const a = createHash("sha256").update(presented, "utf8").digest();
+  if (secret.length === 0) return false;
+  const fresh = freshPostCallHeader(header, nowSeconds);
+  if (fresh === undefined) return false;
+  const expected = postCallSignature(secret, fresh.timestamp, rawBody);
+  const a = createHash("sha256").update(fresh.hash, "utf8").digest();
   const b = createHash("sha256").update(expected, "utf8").digest();
   return timingSafeEqual(a, b);
 }

@@ -777,3 +777,23 @@ Template:
     handlers must be idempotent per conversation (and per ask).
   - Mutation checks, each reverted: no body deadline (1 test fails), evicting
     live deliveries (1).
+- Fifth bot staff review on #33 (approve with nits, two P2s, two P3s), the last
+  round in this PR:
+  - P2, mitigated: anyone could hold the post-call slots with junk headers.
+    The precheck now requires a well-formed, fresh signature header (one `t`
+    within the tolerance, one 64-hex `v0`) before a slot is taken, and the body
+    deadline is 5 s. Behind the tunnel all requests come from 127.0.0.1, so no
+    per-IP limit; a determined sender can still crowd out real webhooks, which
+    fails closed. HL-09 must treat a missing post-call event as no answer.
+  - P2, fixed: 6 wrong PINs an hour still allowed about 144 guesses a day. A
+    daily cap of 10 per direction now applies, and `onLockout` reports each
+    lockout so HL-10 can text the owner. HL-11 should still require PINs of at
+    least 6 digits for new installs (core accepts 4 to 8 today; a contract
+    change is out of scope here).
+  - P3, fixed: a right PIN spliced its entry from a list a concurrent prune had
+    already replaced, so it still counted against the budget. The list is
+    re-read after the check. Test included.
+  - P3, documented: a byte-identical repeated instruction in one call is queued
+    once (`docs/daemon.md`).
+  - Mutation checks, each reverted: presence-only post-call precheck (3 tests
+    fail), no daily cap (1), splicing the stale list (1).

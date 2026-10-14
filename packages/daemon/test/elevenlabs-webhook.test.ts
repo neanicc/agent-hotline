@@ -429,6 +429,9 @@ function postCall(
   return app.inject({ method: "POST", url: "/hooks/el/post-call", headers, payload: raw });
 }
 
+/** A fresh, well-formed signature header with a made-up hash: passes the precheck, fails the HMAC. */
+const forgedHeader = () => `t=${Math.floor(now.getTime() / 1000)},v0=${"0".repeat(64)}`;
+
 const transcription = (conversation = "conv_1", agent = AGENT_ID) => ({
   type: "post_call_transcription",
   event_timestamp: now.getTime() / 1000,
@@ -483,18 +486,37 @@ describe("post-call webhook", () => {
     expect(postCalls).toEqual([]);
   });
 
+  it.each([
+    ["a stale timestamp", () => `t=${Math.floor(now.getTime() / 1000) - 31 * 60},v0=${"0".repeat(64)}`],
+    ["a short hash", () => `t=${Math.floor(now.getTime() / 1000)},v0=00`],
+    ["no timestamp", () => `v0=${"0".repeat(64)}`],
+  ])("refuses a header with %s before reading the body", async (_name, make) => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/hooks/el/post-call",
+      headers: { "content-type": "application/json", "elevenlabs-signature": make() },
+      payload: JSON.stringify(transcription()),
+    });
+    expect([response.statusCode, response.body]).toEqual([403, ""]);
+    const reasons = lines.map((line) => (JSON.parse(line) as { reason?: string }).reason).filter(Boolean);
+    expect(reasons).toEqual(["precheck failed"]);
+  });
+
   it("refuses a malformed or non-JSON body before parsing it", async () => {
     const bad = await app.inject({
       method: "POST",
       url: "/hooks/el/post-call",
-      headers: { "content-type": "application/json", "elevenlabs-signature": "t=1,v0=00" },
+      headers: { "content-type": "application/json", "elevenlabs-signature": forgedHeader() },
       payload: "{not json",
     });
     expect([bad.statusCode, bad.body]).toEqual([403, ""]);
     const form = await app.inject({
       method: "POST",
       url: "/hooks/el/post-call",
-      headers: { "content-type": "application/x-www-form-urlencoded", "elevenlabs-signature": "t=1,v0=00" },
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        "elevenlabs-signature": forgedHeader(),
+      },
       payload: "a=b",
     });
     expect([form.statusCode, form.body]).toEqual([403, ""]);
@@ -622,7 +644,7 @@ describe("post-call webhook under load", () => {
     listening = server();
     await listening.listen({ host: "127.0.0.1", port: 0 });
     const port = listening.addresses()[0]?.port ?? 0;
-    const headers = { "content-type": "application/json", "elevenlabs-signature": "t=1,v0=00" };
+    const headers = { "content-type": "application/json", "elevenlabs-signature": forgedHeader() };
     // Senders that start a body and never finish it.
     const stalled = Array.from({ length: MAX_POST_CALLS_IN_FLIGHT }, () => {
       const req = request({
@@ -678,7 +700,7 @@ describe("post-call webhook under load", () => {
         agent: false,
         headers: {
           "content-type": "application/json",
-          "elevenlabs-signature": "t=1,v0=00",
+          "elevenlabs-signature": forgedHeader(),
           "content-length": "1000",
         },
       });
