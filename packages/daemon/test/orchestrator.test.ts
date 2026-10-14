@@ -40,11 +40,13 @@ let dir: string;
 let store: HotlineStore;
 let clock: { now: Date };
 const running: CallOrchestrator[] = [];
+let codeSeq = 0;
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "hotline-orchestrator-"));
   store = await openStore(join(dir, "hotline.db"));
   clock = { now: START };
+  codeSeq = 0;
   store.putSession({
     id: "s1",
     agent: "claude-code",
@@ -70,6 +72,8 @@ async function orchestrator(options: Partial<CallOrchestratorOptions> = {}): Pro
     redact: (text) => text,
     autoTick: false,
     stopWaitMs: 50,
+    // Codes 100001, 100002, ... in the order texts are sent, across orchestrators.
+    newCode: () => String(100000 + ++codeSeq),
     ...options,
   });
   running.push(created);
@@ -157,7 +161,7 @@ describe("crash recovery", () => {
     expect(store.listAudit().map((e) => e.event)).toContain("orchestration.recovered");
     expect(store.getAsk(ask.id)?.status).toBe("in-flight");
     clock.now = new Date(clock.now.getTime() + READ_MS);
-    expect(await second.ownerText({ messageSid: sid(1), body: "yes", receivedAt: clock.now })).toBe(
+    expect(await second.ownerText({ messageSid: sid(1), body: "yes 100001", receivedAt: clock.now })).toBe(
       "Hotline: got it.",
     );
     expect(store.getAnswer(ask.id)?.decision).toEqual({ type: "allow" });
@@ -224,7 +228,7 @@ describe("owner texts", () => {
 
     const crashing = await orchestrator({ sms: hanging });
     clock.now = new Date(clock.now.getTime() + 20_000);
-    void crashing.ownerText({ messageSid: sid(7), body: "yes", receivedAt: clock.now });
+    void crashing.ownerText({ messageSid: sid(7), body: "yes 100001", receivedAt: clock.now });
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(store.getAnswer(a.id)?.decision).toEqual({ type: "allow" });
     await crashing.stop();
@@ -239,7 +243,7 @@ describe("owner texts", () => {
     ]);
     expect(store.unfinishedInboundMessages()).toEqual([]);
     expect(
-      await restarted.ownerText({ messageSid: sid(7), body: "yes", receivedAt: clock.now }),
+      await restarted.ownerText({ messageSid: sid(7), body: "yes 100001", receivedAt: clock.now }),
     ).toBeUndefined();
     expect(store.getAnswer(b.id)).toBeUndefined();
   });
@@ -256,16 +260,16 @@ describe("owner texts that fail", () => {
       if (event === "sms.received") throw new Error("disk full");
       return append(event, ...rest);
     };
-    const reply = await target.ownerText({ messageSid: sid(9), body: "yes", receivedAt: clock.now });
+    const reply = await target.ownerText({ messageSid: sid(9), body: "yes 100001", receivedAt: clock.now });
     store.appendAudit = append;
     expect(reply).toBe("Hotline: something went wrong and your text was not recorded. Please send it again.");
     expect(store.getAnswer(ask.id)).toBeUndefined();
     expect(store.unfinishedInboundMessages()).toEqual([]);
     expect(
-      await target.ownerText({ messageSid: sid(9), body: "yes", receivedAt: clock.now }),
+      await target.ownerText({ messageSid: sid(9), body: "yes 100001", receivedAt: clock.now }),
     ).toBeUndefined();
     // A fresh text works.
-    expect(await target.ownerText({ messageSid: sid(10), body: "yes", receivedAt: clock.now })).toBe(
+    expect(await target.ownerText({ messageSid: sid(10), body: "yes 100001", receivedAt: clock.now })).toBe(
       "Hotline: got it.",
     );
   });
@@ -281,7 +285,7 @@ describe("a store that refuses an answer", () => {
     store.recordAnswer = () => {
       throw new Error("refused");
     };
-    const reply = await target.ownerText({ messageSid: sid(11), body: "yes", receivedAt: clock.now });
+    const reply = await target.ownerText({ messageSid: sid(11), body: "yes 100001", receivedAt: clock.now });
     store.recordAnswer = record;
     expect(reply).toBe("Hotline: that answer could not be recorded.");
     expect(store.getAnswer(ask.id)).toBeUndefined();

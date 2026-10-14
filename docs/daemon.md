@@ -369,13 +369,16 @@ store, the providers and the webhooks through core's pure queue
   given up on after 15 minutes, its held answers discarded: no answer. Each
   ended call is stored as a `CallRecord` with its duration and a rough cost
   estimate (12 US cents a minute).
-- **Texts.** `send-text` sends one ask through the SMS provider. A permission
-  request says "Reply YES or NO."; a high-risk one carries a random 6-digit
-  code ("Reply YES 123456 to allow, or NO to deny"), unique among waiting codes
-  and one the redactor leaves intact. Codes are stored with the state, die with
-  the ask, and are spent on first use; a code that matches no waiting ask
+- **Texts.** `send-text` sends one ask through the SMS provider. Every
+  permission request, low risk included, carries a random 6-digit code ("Reply
+  YES 123456 to allow, or NO to deny", with "HIGH RISK." first for a high-risk
+  one), unique among waiting codes and one the redactor leaves intact. No text
+  approves a request without its code (`smsAnswer`), so an old or replayed
+  "yes" can never approve a newer request. Codes are stored with the state, die
+  with the ask, and are spent on first use; a code that matches no waiting ask
   burns every waiting code, so those requests can then only be approved on a
-  call with the PIN. Codes and held voice answers (with the model's
+  call. Without a usable code the text says the request can only be approved on
+  a call. Codes and held voice answers (with the model's
   `owner_words`) live in `daemon_state`, inside the `0600` database the store
   already requires; same-user processes can read it (see
   [contracts](contracts.md#secrets-secretsts)).
@@ -393,9 +396,12 @@ store, the providers and the webhooks through core's pure queue
   Hotline's own. Any other text answers only an ask Hotline texted that is
   still open, and only one: a `YES <code>` reply names the ask with that code;
   otherwise there must be exactly one such ask, texted at least 10 seconds
-  before the reply arrived. A quicker bare reply (a stray "yes" meant for
-  something earlier) is not used, and the owner is asked to read the text and
-  reply again. With several waiting the reply
+  before the message was first seen (the time its SID was claimed; an ask with
+  no recorded send time never qualifies). A reply that predates the text, or
+  came too quickly to answer it (a stray reply meant for something earlier),
+  is not used, and the owner is asked to read the text and reply again. So a
+  free-text answer or a "no" can never land on a question or request texted
+  after it was written. With several waiting the reply
   answers nothing and the owner is told to text `call me`. `smsAnswer` then
   turns the text into an answer, which goes through the queue and
   `recordAnswer`.
@@ -428,8 +434,9 @@ on write and on read, next to the columns the daemon queries by. Migration 3
 (HL-09) adds `asks.end_reason` (why an ask ended without an answer, set by
 `closeAsk`), `daemon_state` (call orchestration's saved state, as JSON) and
 `inbound_messages` (the owner's texts claimed, by message SID, and whether each
-was finished; finished ones are dropped after a week, long past any Twilio
-redelivery).
+was finished). Twilio signatures carry no timestamp, so a captured reply can be
+replayed at any time: finished SIDs are kept for 400 days and unfinished ones
+until they finish. Rows are tiny.
 `onAskAdded` tells listeners about each new ask, as `onAskChange` does about
 status changes.
 

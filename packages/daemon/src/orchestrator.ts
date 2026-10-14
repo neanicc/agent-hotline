@@ -112,7 +112,7 @@ interface SavedState {
   version: 1;
   queue: QueueState;
   calls: LiveCall[];
-  /** Confirmation codes of texted high-risk permission asks, by ask id. Single use. */
+  /** Confirmation codes of texted permission asks, by ask id. Single use. */
   codes: Record<string, string>;
   /**
    * Actions of the last step not carried out yet, saved together with the queue
@@ -600,6 +600,8 @@ export class CallOrchestrator {
       body,
       messageSid,
       receivedAt,
+      // Recorded by `ownerText` just before; a fresh claim reads `receivedAt`.
+      firstSeenAt: this.#store.inboundMessageFirstSeen(messageSid) ?? receivedAt,
       optedOut: optOutType !== undefined,
       waiting: this.#state.queue.open
         .filter((q) => q.texted && q.duplicateOf === undefined)
@@ -861,11 +863,9 @@ export class CallOrchestrator {
     }
     const ask = this.#store.getAsk(askId) as Ask;
     const sms = this.#options.sms;
+    // Every permission request carries a code: no text approves one without it.
     // A text sent again (say, on recovery) keeps the code the owner may already have.
-    const code =
-      ask.kind === "permission" && ask.risk === "high"
-        ? (this.#state.codes[askId] ?? this.#newCode())
-        : undefined;
+    const code = ask.kind === "permission" ? (this.#state.codes[askId] ?? this.#newCode()) : undefined;
     if (sms === undefined) {
       this.#store.appendAudit("text.failed", { reason: "no SMS provider" }, now, { askId });
       return [{ type: "text-failed", askId }];

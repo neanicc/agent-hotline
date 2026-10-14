@@ -512,19 +512,32 @@ describe("call orchestration support", () => {
     expect(again.inboundMessageHandled(`SM${"2".repeat(32)}`)).toBe(false);
   });
 
-  it("forgets finished inbound messages after a week, never unfinished ones", async () => {
+  it("remembers finished inbound messages for 400 days, and unfinished ones until they finish", async () => {
     const db = await open();
-    const [old, unfinished, fresh] = ["1", "2", "3"].map((d) => `SM${d.repeat(32)}`) as [
+    const [old, unfinished, recent, now] = ["1", "2", "3", "4"].map((d) => `SM${d.repeat(32)}`) as [
+      string,
       string,
       string,
       string,
     ];
-    db.markInboundMessage(old, new Date(T0));
+    const day = 24 * 60 * 60 * 1000;
+    const t0 = Date.parse(T0);
+    db.markInboundMessage(old, new Date(t0));
     db.finishInboundMessage(old);
-    db.markInboundMessage(unfinished, new Date(T0));
-    db.markInboundMessage(fresh, new Date(Date.parse(T0) + 8 * 24 * 60 * 60 * 1000));
-    expect(db.inboundMessageHandled(old)).toBe(false);
-    expect(db.inboundMessageHandled(unfinished)).toBe(true);
-    expect(db.inboundMessageHandled(fresh)).toBe(true);
+    db.markInboundMessage(unfinished, new Date(t0));
+    db.markInboundMessage(recent, new Date(t0 + 300 * day));
+    db.finishInboundMessage(recent);
+    expect(db.inboundMessageFirstSeen(old)).toEqual(new Date(t0));
+    // A year on, everything is still remembered.
+    db.markInboundMessage(now, new Date(t0 + 365 * day));
+    expect([old, unfinished, recent].map((sid) => db.inboundMessageHandled(sid))).toEqual([true, true, true]);
+    // Past 400 days only the finished, old one is dropped.
+    db.markInboundMessage(`SM${"5".repeat(32)}`, new Date(t0 + 401 * day));
+    expect([old, unfinished, recent].map((sid) => db.inboundMessageHandled(sid))).toEqual([
+      false,
+      true,
+      true,
+    ]);
+    expect(db.inboundMessageFirstSeen(`SM${"6".repeat(32)}`)).toBeUndefined();
   });
 });

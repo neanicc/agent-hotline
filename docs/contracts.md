@@ -220,13 +220,16 @@ SID as `sourceId`), or `{outcome: "no-answer", reason}`:
 | Ask kind | Answered by |
 | --- | --- |
 | `question` | an offered option number, or any other non-command text verbatim (a number is text when no options were offered) |
-| `permission` | `no` denies. `yes` allows a low-risk request. A high-risk one needs `yes <code>` with the one-time code the daemon put in the text it sent, which sets `confirmation: "text"`. A wrong code, or a code when none was sent, is no answer |
+| `permission` | `no` denies. Approval needs `yes <code>` with the one-time code the daemon put in the text it sent, for every request, low risk included; it sets `confirmation: "text"`. A bare `yes`, a wrong code, or a code when none was sent, is no answer |
 | `stop` | `done` or `no` lets the agent stop; other text is the next instruction; `yes` is no answer |
 | `notify` | nothing |
 
 Commands, carrier keywords, empty or over-long texts and anything
 `answerProblem` rejects are no answer. Free text never approves: only an exact
-yes word does. Call `smsAnswer` only for a text from the owner's number on a
+yes word with the request's code does. The code is required for every
+approval because Twilio signatures carry no timestamp: a captured, signed
+"yes", or one meant for something else, must never approve a newer request.
+Call `smsAnswer` only for a text from the owner's number on a
 verified webhook, since `confirmation: "text"` rests on that check. The owner's
 PIN is never accepted by text, so it never passes through Twilio.
 

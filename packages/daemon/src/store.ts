@@ -223,8 +223,12 @@ interface Schema<T> {
 /** Told the id of an ask whose status changed, after the change is committed. */
 export type AskChangeListener = (askId: string) => void;
 
-/** How long a finished owner text's SID is remembered against redelivery. */
-export const INBOUND_MESSAGE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * How long a finished owner text's SID is remembered. Twilio signatures carry no
+ * timestamp, so a captured, validly signed reply can be replayed at any time: the
+ * SID memory must outlive any realistic replay. Rows are tiny.
+ */
+export const INBOUND_MESSAGE_RETENTION_MS = 400 * 24 * 60 * 60 * 1000;
 
 /** Told about each ask `addAsk` stored, after the insert. */
 export type AskAddedListener = (ask: Ask) => void;
@@ -524,10 +528,18 @@ export class HotlineStore {
     this.db
       .prepare("INSERT OR IGNORE INTO inbound_messages (message_sid, handled_at) VALUES (?, ?)")
       .run(messageSid, at.toISOString());
-    // Twilio redelivers within minutes; finished messages are kept for a week, then dropped.
+    // Finished messages are kept for 400 days, unfinished ones until they finish.
     this.db
       .prepare("DELETE FROM inbound_messages WHERE finished = 1 AND handled_at < ?")
       .run(new Date(at.getTime() - INBOUND_MESSAGE_RETENTION_MS).toISOString());
+  }
+
+  /** When a text with this SID was first seen (claimed), if it ever was. */
+  inboundMessageFirstSeen(messageSid: string): Date | undefined {
+    const row = this.db
+      .prepare("SELECT handled_at FROM inbound_messages WHERE message_sid = ?")
+      .get(messageSid);
+    return row === undefined ? undefined : new Date(String(row.handled_at));
   }
 
   /** Records that a claimed text was handled to the end, whatever its outcome. */

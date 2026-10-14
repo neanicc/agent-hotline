@@ -579,8 +579,9 @@ describe("texts bind to exactly one texted ask", () => {
     const b = permission(h, session, "low", "npm run migrate");
     await h.advance(BATCH_MS);
     expect(h.sms.sent).toHaveLength(2);
-    expect(h.sms.sent[0]?.text).toContain("Reply YES or NO.");
+    expect(h.sms.sent[0]?.text).toMatch(/Reply YES \d{6} to allow, or NO to deny\.$/);
     expect(await h.text("yes")).toContain("2 requests are waiting");
+    expect(await h.text("no")).toContain("2 requests are waiting");
     expect(h.daemon.store.getAnswer(a.id)).toBeUndefined();
     expect(h.daemon.store.getAnswer(b.id)).toBeUndefined();
   });
@@ -597,17 +598,48 @@ describe("texts bind to exactly one texted ask", () => {
     expect((await h.outcome(question.id)).state).toBe("waiting");
   });
 
-  it("does not bind a bare reply that arrives right after the text, such as a stray yes", async () => {
+  it("does not bind a bare reply that arrives right after the text, such as a stray one", async () => {
+    const h = await start({ config: QUIET });
+    const session = await h.registerSession();
+    const question = await h.ask(session, { kind: "question", text: "Which database?" });
+    await h.advance(BATCH_MS);
+    expect(h.sms.sent).toHaveLength(1);
+    expect(await h.text("postgres", { instantly: true })).toContain("before you could have read");
+    expect(h.daemon.store.getAnswer(question.id)).toBeUndefined();
+    // Once the owner has had time to read it, the same reply counts.
+    expect(await h.text("postgres")).toBe("Hotline: got it.");
+    expect(answerOf(await h.outcome(question.id)).decision).toEqual({ type: "text", text: "postgres" });
+  });
+
+  it("never approves a low-risk request with a bare yes: every approval by text needs its code", async () => {
     const h = await start({ config: QUIET });
     const session = await h.registerSession();
     const request = permission(h, session, "low");
     await h.advance(BATCH_MS);
-    expect(h.sms.sent).toHaveLength(1);
-    expect(await h.text("yes", { instantly: true })).toContain("a request was just texted to you");
-    expect(h.daemon.store.getAnswer(request.id)).toBeUndefined();
-    // Once the owner has had time to read it, the same reply counts.
-    expect(await h.text("yes")).toBe("Hotline: got it.");
+    const code = codeIn(h.sms.sent[0]?.text);
+    expect(code).toMatch(/^\d{6}$/);
+    expect(await h.text("yes")).toBe("Hotline: not recorded. Reply YES with the code from the text, or NO.");
+    expect(await verdict(h, request)).toBe("waiting");
+    expect(await h.text(`yes ${code}`)).toBe("Hotline: got it.");
     expect(await verdict(h, request)).toBe("allow");
+  });
+
+  it("ignores a replayed reply long after the old retention window, so it never answers a new ask", async () => {
+    const h = await start({ config: QUIET });
+    const session = await h.registerSession();
+    const first = await h.ask(session, { kind: "question", text: "Which database?" });
+    await h.advance(BATCH_MS);
+    const sid = `SM${"c".repeat(32)}`;
+    expect(await h.text("postgres", { messageSid: sid })).toBe("Hotline: got it.");
+    expect(answerOf(await h.outcome(first.id)).ownerExcerpt).toBe("postgres");
+    // Eight days on (past the one-week window the first version used), a new question goes out.
+    await h.advance(8 * 24 * 60 * MINUTE);
+    const second = await h.ask(session, { kind: "question", text: "Which cache?" });
+    await h.advance(BATCH_MS);
+    expect(h.sms.sent.at(-1)?.text).toContain("Which cache?");
+    // A captured, validly signed copy of the old reply is replayed.
+    expect(await h.text("postgres", { messageSid: sid })).toBeUndefined();
+    expect(h.daemon.store.getAnswer(second.id)).toBeUndefined();
   });
 
   it("answers nothing when no ask was texted", async () => {

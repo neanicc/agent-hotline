@@ -1152,4 +1152,41 @@ Template:
   - P3, fixed: a text sent again on recovery keeps its confirmation code, so
     the owner's `YES <code>` still matches. Test; the mutant fails 1.
   - P3, fixed: finished inbound message SIDs are dropped after a week. Test;
-    the mutant fails 1.
+    the mutant fails 1. (Superseded by the next entry: a week was too short.)
+- Coordinator security review of b762cf7 (replay regression), fixed here:
+  - The one-week SID retention reopened replays: Twilio signatures carry no
+    timestamp, so a captured, signed owner reply replayed after the prune
+    would be handled again and bind to whatever texted ask was open. Fixed
+    both ways.
+  - SID memory: finished SIDs are now kept for 400 days, unfinished ones until
+    they finish (`INBOUND_MESSAGE_RETENTION_MS`).
+  - Replays made useless even if a SID were forgotten:
+    - Core contract change (`smsAnswer`, `docs/contracts.md`): approving any
+      permission request by text, low risk included, needs `yes <code>` with
+      that ask's single-use random code. A bare `yes` is no answer. The daemon
+      now puts a code in every permission text ("Reply YES 123456 to allow, or
+      NO to deny").
+    - A reply without a code binds only to an ask whose text went out at least
+      10 seconds before the message's SID was first seen (its claim time). An
+      ask with no recorded send time never qualifies, so a stale free-text
+      answer or "no" cannot land on a newer question.
+  - Tests:
+    - a replay of a signed reply eight days later is ignored and does not
+      answer a new question;
+    - a bare "yes" does not approve a low-risk request, and `yes <code>` does;
+    - a free-text reply first seen before (or right after) the question was
+      texted is not bound (`owner-texts.test.ts`);
+    - core: a low-risk "yes" without its code is no answer, and the generated
+      reply test now requires the code for every approval;
+    - store: SIDs survive a year and only finished ones older than 400 days go.
+    - Existing tests that approved low-risk requests with a bare "yes" now
+      reply with the code.
+  - Mutation checks, each reverted:
+
+    | Mutant | Tests that fail |
+    | --- | --- |
+    | Bare yes approves low risk again | 5 |
+    | One-week retention | 1 |
+    | Reply timed by arrival instead of first sighting | 1 |
+    | Unknown send time binds | 1 |
+    | Codes only for high-risk texts | 6 |

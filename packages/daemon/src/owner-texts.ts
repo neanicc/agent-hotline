@@ -6,7 +6,9 @@
 // - A reply answers only an ask Hotline texted that is still open, and only
 //   one: a `YES <code>` names the ask with that code; without a code there
 //   must be exactly one waiting ask, texted at least `MIN_REPLY_DELAY_MS`
-//   before the reply arrived. Several waiting fail closed.
+//   before the message was first seen. Several waiting fail closed. So a reply
+//   (or a replay) can never answer a request texted after it was written.
+// - Approving a permission request always needs its code (core `smsAnswer`).
 // - A code that matches no waiting ask burns every waiting code (the plan says
 //   so); a code that matched is spent whatever happens next.
 // - `smsAnswer` (core) decides what the words mean; free text never approves.
@@ -39,7 +41,10 @@ export type TextPlan =
   | { type: "nothing-waiting" }
   /** Several asks wait on texts and the reply names none of them: nothing is recorded. */
   | { type: "ambiguous"; waiting: number }
-  /** A reply without a code that came too soon after the one waiting text to be an answer to it. */
+  /**
+   * A reply without a code first seen before, or too soon after, the one waiting
+   * text: it cannot be an answer to it.
+   */
   | { type: "too-soon" }
   /** A code that matches no waiting ask: burn every waiting code. */
   | { type: "code-mismatch" }
@@ -51,6 +56,8 @@ export interface TextReplyInput {
   body: string;
   messageSid: string;
   receivedAt: Date;
+  /** When a message with this SID was first seen (the daemon's claim); `receivedAt` on a first delivery. */
+  firstSeenAt: Date;
   /** Twilio sent `OptOutType`: it has already answered the message itself. */
   optedOut: boolean;
   /** Open asks Hotline texted (not duplicates), with their codes. */
@@ -64,7 +71,14 @@ function sameCode(presented: string, expected: string): boolean {
 }
 
 /** What an owner's text means for the asks waiting on texts. */
-export function planTextReply({ body, messageSid, receivedAt, optedOut, waiting }: TextReplyInput): TextPlan {
+export function planTextReply({
+  body,
+  messageSid,
+  receivedAt,
+  firstSeenAt,
+  optedOut,
+  waiting,
+}: TextReplyInput): TextPlan {
   const reply = parseSmsReply(body);
   if (optedOut || reply.type === "carrier-keyword") return { type: "ignore" };
   if (reply.type === "command") return reply.command === "call-me" ? { type: "call-me" } : { type: "ignore" };
@@ -79,9 +93,11 @@ export function planTextReply({ body, messageSid, receivedAt, optedOut, waiting 
     return { type: "ambiguous", waiting: waiting.length };
   } else {
     target = waiting[0];
+    // Unknown send time fails closed too.
     const sentAt = target?.sentAt?.getTime();
-    if (sentAt !== undefined && receivedAt.getTime() - sentAt < MIN_REPLY_DELAY_MS)
+    if (sentAt === undefined || firstSeenAt.getTime() - sentAt < MIN_REPLY_DELAY_MS) {
       return { type: "too-soon" };
+    }
   }
   if (target === undefined) return { type: "nothing-waiting" };
   const result = smsAnswer({
@@ -118,7 +134,7 @@ export const TEXT_REPLIES = {
     `Hotline: ${waiting} requests are waiting, so a reply cannot say which one it answers. Nothing was recorded. Text CALL ME to go through them by phone.`,
   notCalling: (reason: string) => `Hotline: not calling, ${reason}.`,
   tooSoon:
-    "Hotline: a request was just texted to you, so that reply was not used for it. Read it, then reply again.",
+    "Hotline: that reply came before you could have read the latest request, so it was not used. Read it, then reply again.",
 } as const;
 
 /** One plain line of agent text, cut to `max`. */
@@ -144,13 +160,12 @@ export function textFor(ask: Ask, nickname: string, code: string | undefined): s
     }
     case "permission": {
       const tool = flat(ask.toolName ?? "a tool", 80);
+      const risk = ask.risk === "high" ? "HIGH RISK. " : "";
       const how =
-        ask.risk !== "high"
-          ? "Reply YES or NO."
-          : code === undefined
-            ? "HIGH RISK: it can only be approved on a call with your PIN. Reply NO to deny, or CALL ME."
-            : `HIGH RISK. Reply YES ${code} to allow, or NO to deny.`;
-      return `Hotline: ${who} wants to use ${tool}: ${text}\n${how}`;
+        code === undefined
+          ? `It can only be approved on a call${ask.risk === "high" ? " with your PIN" : ""}. Reply NO to deny, or CALL ME.`
+          : `Reply YES ${code} to allow, or NO to deny.`;
+      return `Hotline: ${who} wants to use ${tool}: ${text}\n${risk}${how}`;
     }
     case "stop":
       return `Hotline: ${who} finished its turn: ${text}\nReply with what to do next, or DONE.`;
@@ -163,9 +178,7 @@ export function textFor(ask: Ask, nickname: string, code: string | undefined): s
 export function replyHint(ask: Ask): string {
   switch (ask.kind) {
     case "permission":
-      return ask.risk === "high"
-        ? "Hotline: not recorded. Reply YES with the code from the text, or NO."
-        : "Hotline: not recorded. Reply YES or NO.";
+      return "Hotline: not recorded. Reply YES with the code from the text, or NO.";
     case "question":
       return "Hotline: not recorded. Reply with an option number or your answer.";
     case "stop":
