@@ -219,6 +219,7 @@ question, which is one model call on your login or key.
 | --- | --- | --- |
 | config | missing, unsafe or invalid | |
 | secrets (set or not, never values) | a credential the configured providers need is missing | the daemon has not created its API token yet |
+| Keychain self-test (only with the Keychain store on macOS) | `security` cannot add, read back or delete a throwaway item, or a missing item does not read as not set | |
 | daemon | it refuses the token, or something else answers on its port | it is not running |
 | reply judge | with `--check-judge`, its answer to the fixed reply "yes, go ahead" is not `agreed` (not logged in, no network, a bad key) | no judge was chosen yet (`judge.backend` unset; nothing is sent), or no backend is available (the `PATH` searched is named), so unclear replies are texted (`judge.backend: "off"` passes) |
 | away mode | | the state file is unusable (it then reads as off) |
@@ -226,6 +227,35 @@ question, which is one model call on your login or key.
 | Claude Code idle timeout | `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` is not above the ask timeout | it is not set in this shell |
 | ElevenLabs agent | no phone number id or agent; the deployed agent's `definition-v<n>` tag is not `AGENT_DEFINITION_VERSION`; it lacks one of the four tools, or their ids are not recorded; a tool calls another URL than `<tunnel.publicUrl>/hooks/el/tools/<name>` or uses another secret id than `voice.toolSecretId` | its voice differs from the config; its LLM is not `voice.llm` (default `claude-haiku-4-5`), which the pass line names |
 | webhooks | `tunnel.publicUrl` is unset while a real provider needs it | |
+
+### Keychain self-test
+
+When `secrets.store` resolves to the Keychain (`keychain`, or `auto` on macOS),
+doctor checks that `/usr/bin/security` behaves the way Hotline's Keychain store
+expects, through the same code that stores your credentials. It uses a
+throwaway item, service `agent-hotline-doctor-check` and account
+`doctor.selfTest.<random>` (a new one each run, so two doctors running at once
+do not disturb each other), with a fresh random dummy value; it never reads or
+touches the real `agent-hotline` items. It:
+
+1. adds the item with `security -i` (the value goes in on stdin, hex-encoded
+   with `-X`, never as an argument) and reads it back with
+   `find-generic-password -w`;
+2. reads it back once more, then deletes it;
+3. looks it up again, which must exit 44 (item not found) and read as not set.
+
+`PASS  keychain` means all of that worked. `FAIL  keychain` names the step and
+`security`'s exit codes, never its output or the value, for example
+`self-test failed at add (security exit 0 then 44)`. Each `security` call is
+stopped after 1.5 s and the test stops at the first failure, so it takes a few
+seconds at most; a timeout usually means the login Keychain is locked. Whatever
+fails, the throwaway item is deleted again; if even that fails, the line says
+so and you can remove the `agent-hotline-doctor-check` item in Keychain Access.
+An add that timed out may still land after that cleanup, so that failure line
+also tells you to delete such an item if one shows up.
+With the file store, or off macOS, this check does not run. Under the test
+runner or `HOTLINE_TEST_MODE=1` it never runs the real `security`: it needs an
+injected fake and fails without one.
 
 ### Monthly cost estimate
 

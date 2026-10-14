@@ -318,10 +318,11 @@ Expected, with no `FAIL` line (exit code 0):
 A line saying the deployed agent is an older definition means P8 was skipped:
 run `hotline voice apply` again.
 
-With #64 merged, also `PASS keychain`. This is the only place the real
-`/usr/bin/security` runs: it adds, reads back and deletes a throwaway item
-(service `agent-hotline-doctor-check`), never your credentials
-([install.md](install.md#hotline-doctor)). Record PASS, or the FAIL line's
+With #64 merged, also `PASS keychain` (the secret store is `keychain`, P7).
+This is the only place the real `/usr/bin/security` runs: tests and CI use a
+fake. It adds, reads back and deletes a throwaway item (service
+`agent-hotline-doctor-check`), never your credentials
+([install.md](install.md#keychain-self-test)). Record PASS, or the FAIL line's
 step and exit codes. A timeout usually means the login Keychain was locked.
 
 Save the output: `hotline doctor > "$EV/doctor.txt"`. Record the doctor

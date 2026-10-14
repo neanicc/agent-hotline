@@ -3026,3 +3026,64 @@ Template:
     `text()` records each owner text in the fake Twilio's log (timed by the
     fake clock) before posting the webhook. No scenario or pull check changed;
     the suite prints 22 PASS lines and `THRESHOLDS: PASS` in CI mode.
+
+## 2026-10-14 — HL-22 Keychain self-test in hotline doctor (#22)
+
+- Decision / change: `hotline doctor` adds a `keychain` check when
+  `secrets.store` resolves to the Keychain on darwin (`keychain`, or `auto`).
+  It closes the HL-02 follow-up: the real `security` binary's behaviour was
+  only assumed. The check (`apps/cli/src/keychain-check.ts`) builds a
+  `KeychainSecretStore` with the throwaway service
+  `agent-hotline-doctor-check` (the constructor's existing `service`
+  parameter; `packages/daemon` is unchanged) and runs `set` (add through
+  `security -i` with `-X <hex>`, then the store's own read-back), `get`,
+  `delete`, and `get` again, which must exit 44 and read as undefined. PASS,
+  or FAIL naming the step and the exit codes of that step's calls, never
+  `security`'s output or the value. Unless the run ended with the item
+  confirmed gone, it deletes the item again, and says so if that fails too.
+- Decisions (no human available):
+  - Account prefix `doctor.selfTest`, deliberately not a real `SecretName` (a cast),
+    so even a wrong service could never overwrite or delete a real secret.
+    The value is 18 random bytes, base64url, fresh each run.
+  - Time bound: each `security` call is killed after 1.5 s (`nodeExec`'s
+    spawn timeout, plus a timer around any injected exec that never settles),
+    and the test stops at the first failure, so the worst case is one timed-out
+    step plus one timed-out cleanup, about 3 s plus the calls that finished.
+    A timeout is reported with a hint that the login Keychain may be locked.
+  - Under the test runner or `HOTLINE_TEST_MODE=1` the check refuses to build
+    the real runner and fails with "test mode: the Keychain self-test needs an
+    injected exec", like `secretStoreFor`.
+  - The real-binary check stays the owner's job: `docs/live-check.md` now
+    tells them to run `hotline doctor` on their Mac and record the line.
+- Evidence (worktree, Node 24.11.0):
+  - `scripts/ci/run.sh build`, `test` (1449 tests in 56 files) and `package`
+    pass. New `apps/cli/test/keychain-check.test.ts` (17 tests): a fake
+    `security` keyed by service and account models success, exit 44, a
+    refused add whose output echoes the hex, an add that exits 0 but stores
+    nothing, `-w` printing something else, failing deletes, a deleted item
+    that still reads, a hanging call, a call killed by SIGTERM, a spawn
+    failure, and everything hanging; each asserts the cleanup delete and that
+    only the throwaway service and account are touched. `node:child_process`
+    `spawn` is mocked to throw and asserted never called, and one test proves
+    the mock reaches the daemon's `nodeExec`.
+  - The real `/usr/bin/security` was not run, by me or by any test.
+  - Scenario suite: not built yet (HL-12). Real agent integration: not
+    affected. Live call: not done (owner only).
+- Review fixes on #64 (Greptile P2, staff review P3s, head 8500a11): each
+  run's account is now `doctor.selfTest.<12 random hex digits>`, so
+  overlapping doctor runs cannot overwrite or delete each other's item (new
+  test: three concurrent runs all pass; it fails with a fixed account). An add
+  that timed out may still land after the cleanup, so that FAIL line now tells
+  the owner to delete a leftover `agent-hotline-doctor-check` item if one
+  appears. A per-run account means a leftover is never overwritten by the
+  next run, which that hint and the install guide cover. After catching up
+  with main: `build` and `test` (1631 tests in 56 files) pass.
+- Second catch-up, after #74 (HL-16) and #69 (HL-13a) landed: this entry
+  moves after theirs. `docs/live-check.md` keeps #74's protocol, as its entry
+  asks; its P13 already had the Keychain step, which now links the
+  `#keychain-self-test` section, names the `keychain` secret store and says
+  tests and CI use a fake. `doctor.ts` merged without conflict. `build` and
+  `test` (1998 tests in 66 files) pass; the scenario suite, which exists
+  since HL-12, runs in hosted CI (see the PR's Validation section).
+- Open issues or follow-ups: the first real `hotline doctor` run on the
+  owner's Mac is the actual verification of the three assumptions.
