@@ -19,6 +19,7 @@
     "zod": "4.6.5"
   },
   "devDependencies": {
-    "@hotline/daemon": "workspace:*"
+    "@hotline/daemon": "workspace:*",
+    "@hotline/providers": "workspace:*"
   }
 }

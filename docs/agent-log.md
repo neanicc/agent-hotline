@@ -1696,6 +1696,93 @@ Template:
   It is not fixed here (out of lane); the rerun passed. Tracked in #50
   (`lane:core`), after the staff review on ff58e6a (P2) asked for an issue.
 
+## 2026-10-14 — HL-06b Classify the action the agent will actually run (#46)
+
+- Decision / change: `classifyPermission` now judges what runs, not only the
+  command text (`packages/core/src/permission-risk.ts`, docs/hooks.md "What is
+  judged is what runs"). New `actionFields` lists every tool input field the
+  classifier does not judge, and each one makes the request high. Shell tools
+  may carry only `command`, a string or null `description` and a non-negative
+  numeric `timeout`. Folder fields (`workdir`, `working_directory`, `cwd`),
+  `env`, sandbox and escalation fields (`dangerouslyDisableSandbox`,
+  `with_escalated_permissions`, `sandbox_permissions`,
+  `additional_permissions`, `justification`), `allowed_domains`,
+  `run_in_background` and any unknown key are high, each with its own reason.
+  File tools (Write, Edit, MultiEdit, NotebookEdit, apply_patch, Read,
+  NotebookRead, Glob, Grep, LS) may carry only their documented fields.
+- `cd`, `pushd` and `popd` anywhere in a command are high ("asks to run in
+  another folder"), even next to read-only commands, because Claude Code's Bash
+  keeps its working directory between calls. Relative paths are judged against
+  the session cwd only; docs/hooks.md says so.
+- An argv `command` is written as the shell line that runs exactly that argv.
+  The old join deleted single quotes, so the owner heard a different file name
+  than the one that ran. A round-trip test checks that `splitShell` reads back
+  the same argv for quotes, `!`, globs, tabs, newlines and non-ASCII.
+- Hook text (`packages/agents/src/hook-adapter.ts`): the risk line names the
+  field ("asks to run outside the sandbox", "asks to run in another folder",
+  "asks to run in the background"). Right after the tool name come the folder
+  (`Bash (in folder /etc): ls`), the names of environment variables (never
+  their values) and the names of unknown settings. These notes are capped at
+  120 characters, and a cut also makes the request "too long to read out".
+- Greptile on #46, both fixed:
+  - P0: the first argv quoting wrote `'` as `'"'"'`. That split
+    `PASSWORD=maple'cedar` so the daemon's redactor removed `maple` but sent
+    `cedar` on. Each value is now quoted in one piece. After the command word a
+    `name=` prefix stays outside the quotes (`PASSWORD="maple'cedar"`,
+    `API_TOKEN='a b'`). A value with a `'` uses double quotes when nothing in
+    it is special there. Anything else (both quote kinds, `$`, a backtick, `\`,
+    `!`, or a command word with a `'`) is not read out and is high ("has input
+    Hotline cannot read"). Tests run these through `createRedactor`.
+  - P1: the notes first came after the preview, so the call's 300-character
+    cut per ask (`MAX_SPOKEN_ASK_LENGTH` in `callVariables`) could drop the
+    folder after a long command. They now come before the preview. Tests check
+    the text through `callVariables`, which adds `@hotline/providers` as a
+    dev dependency of `@hotline/agents`.
+- Decision (beyond the listed done-when, fail closed): every Codex shell
+  request is high ("may run in another folder or outside the sandbox").
+  Codex's hook `tool_input` for a shell approval is only the command string and
+  its justification (`PermissionRequestPayload::bash` in
+  `codex-rs/core/src/tools/sandboxing.rs` and `approvals.rs` at `7eed30ad`).
+  The command's `workdir` and `sandbox_permissions` are never sent, and the
+  payload's `cwd` is the turn's folder. Codex documents `PermissionRequest` as
+  running for "a shell escalation or managed-network approval". So Hotline
+  cannot see where a Codex command runs or whether it leaves the sandbox, and a
+  Codex shell approval now needs the PIN or a confirming text.
+  `permissionAsk` and `classifyPermission` take an optional `agent`; the hook
+  passes it. Codex patches are judged as before. The Codex golden test "allows
+  a low-risk request on a plain yes" now allows with the PIN and checks the ask
+  is high; Claude Code keeps the plain-yes test.
+- Decision: `run_in_background`, `dangerouslyDisableSandbox` and
+  `with_escalated_permissions` set to `false` count as absent. The Claude Code
+  docs example sends `run_in_background: false`, and `false` is each flag's
+  default. Every other value, including the string `"false"`, is high.
+- Sources (checked 2026-10-14; also in the hook fixtures README): the Claude
+  Code hooks reference ("PreToolUse input", "PermissionRequest input"); the
+  Claude Code 2.1.299 bundle's input schemas, read offline (Bash
+  `dangerouslyDisableSandbox`, `allowed_domains`, internal `_simulatedSedEdit`;
+  NotebookEdit fields); the Codex hooks docs; and openai/codex at
+  `7eed30ad1beaebc20b7d848ce9ee887525a379b0` (`approvals.rs`,
+  `sandboxing.rs`, `hook_runtime.rs`, `handlers/unified_exec.rs`,
+  `protocol/src/models.rs`).
+- Fixtures: `claude-code/permission-request.bash-background.input.json`,
+  `claude-code/permission-request.bash-unsandboxed.input.json` and
+  `codex/permission-request.network-access.input.json`, checked against the
+  core schemas and, for Codex, its published JSON schema.
+- Evidence (worktree, Node 24.11.0): `scripts/ci/run.sh build` passes, and
+  `test` passes 1317 tests in 46 files after the Greptile fixes. Hosted CI was
+  green on the first head. Every listed field and the adapter text
+  have tests, and earlier expectations only moved toward high (the Codex
+  plain-yes case). `python3 scripts/check_agent_files.py` and
+  `git diff --check` pass. Not run: the scenario suite (not built yet, HL-12);
+  real Claude Code or Codex sessions (they would call model APIs); live call.
+  A mutation check (drop the field reasons, run the tests) was refused by the
+  local permission system as a security weakening, so it was not run.
+- Open issues or follow-ups:
+  - Codex could send `workdir` and `sandbox_permissions` in the
+    PermissionRequest `tool_input`. Then the blanket Codex rule could narrow to
+    the field rules. Worth raising upstream.
+  - Parser-differential and allowlist-escape classes stay with HL-13 (#14).
+
 ## 2026-10-14 — HL-50 Queue property failure, seed -763136370 (#50)
 
 - Root cause: a test bug, not a queue bug. In the shrunk counterexample a question
