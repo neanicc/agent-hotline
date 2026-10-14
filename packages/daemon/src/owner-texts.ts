@@ -41,7 +41,7 @@ export type TextPlan =
   /** Not for Hotline to act on: an opt-out or carrier keyword, `stop`. */
   | { type: "ignore" }
   | { type: "call-me" }
-  /** `status`: reply with what every live session is doing (HL-10). Never an answer. */
+  /** `status`: text the owner what every live session is doing (HL-10), never in the webhook response (HL-13c). Never an answer. */
   | { type: "status" }
   | { type: "nothing-waiting" }
   /** Several asks wait on texts and the reply names none of them: nothing is recorded. */

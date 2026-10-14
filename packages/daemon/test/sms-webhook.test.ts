@@ -17,7 +17,6 @@ import {
   parseFormBody,
   type TwilioSmsRouteOptions,
   twilioSmsRoute,
-  UNCONFIRMED_SMS_REPLY,
 } from "../src/index.js";
 
 const OWNER = "+15555550100";
@@ -27,6 +26,8 @@ const ACCOUNT_SID = `AC${"0123456789abcdef".repeat(2)}`;
 const AUTH_TOKEN = "fake-twilio-auth-token-for-tests";
 const PUBLIC_URL = "https://hotline.example.test";
 const PATH = "/hooks/twilio/sms";
+/** Empty TwiML: what a text Twilio does not confirm gets, whatever it says and whoever it claims to be from. */
+const BARE = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>';
 
 let lines: string[];
 let log: LogOptions;
@@ -43,6 +44,10 @@ let sidCounter = 0;
  */
 let twilioLog: Map<string, PulledMessage>;
 let unverified: { messageSid: string; forgery: boolean; reason: string }[];
+/** Who each unconfirmed text claimed to be from, in order. */
+let unverifiedSenders: string[];
+/** Every SID the route looked up at Twilio, in order. */
+let lookups: string[];
 
 function sid(): string {
   sidCounter += 1;
@@ -67,13 +72,15 @@ function server(overrides: Partial<TwilioSmsRouteOptions> = {}): FastifyInstance
         },
         onOtherSender: (messageSid) => others.push(messageSid),
         lookup: async (messageSid) => {
+          lookups.push(messageSid);
           const message = twilioLog.get(messageSid);
           if (message === undefined)
             throw new PullError("Twilio has no such record (HTTP 404)", "not-found", 404);
           return { ...message };
         },
-        onUnverified: (messageSid, failure) => {
+        onUnverified: (messageSid, failure, sender) => {
           unverified.push({ messageSid, ...failure });
+          unverifiedSenders.push(sender);
         },
         ...overrides,
       }),
@@ -90,6 +97,8 @@ beforeEach(() => {
   ownerReply = undefined;
   twilioLog = new Map();
   unverified = [];
+  unverifiedSenders = [];
+  lookups = [];
   redactor = createRedactor([AUTH_TOKEN]);
   app = server();
 });
@@ -511,7 +520,7 @@ describe("verify by pull (HL-13a)", () => {
     const params = message({ Body: "yes 482913" });
     const response = await post({ params, unknownAtTwilio: true });
     expect(response.statusCode).toBe(200);
-    expect(response.body).toContain(UNCONFIRMED_SMS_REPLY);
+    expect(response.body).toBe(BARE);
     expect(received).toEqual([]);
     const messageSid = params.find(([name]) => name === "MessageSid")?.[1];
     expect(unverified).toEqual([{ messageSid, forgery: true, reason: "the provider has no such record" }]);
@@ -556,7 +565,7 @@ describe("verify by pull (HL-13a)", () => {
     const messageSid = params.find(([name]) => name === "MessageSid")?.[1] ?? "";
     twilioLog.set(messageSid, pulled({ sid: messageSid, ...overrides }));
     const response = await post({ params });
-    expect(response.body).toContain(UNCONFIRMED_SMS_REPLY);
+    expect(response.body).toBe(BARE);
     expect(received).toEqual([]);
     expect(unverified).toEqual([{ messageSid, forgery: true, reason }]);
   });
@@ -571,7 +580,7 @@ describe("verify by pull (HL-13a)", () => {
       },
     });
     const params = message({ Body: "yes" });
-    expect((await post({ params })).body).toContain(UNCONFIRMED_SMS_REPLY);
+    expect((await post({ params })).body).toBe(BARE);
     expect(unverified.map((u) => [u.forgery, u.reason])).toEqual([
       [false, "the provider lookup failed (unreachable)"],
     ]);
@@ -582,17 +591,161 @@ describe("verify by pull (HL-13a)", () => {
     expect(received).toHaveLength(1);
   });
 
-  it("never looks up a text from another number, which never reaches the handler anyway", async () => {
-    await app.close();
-    app = server({
-      lookup: async () => {
-        throw new Error("no lookup expected");
-      },
+  it("looks up a text from another number too, before any reply or record (HL-13c)", async () => {
+    const params = message({ From: STRANGER });
+    const messageSid = new Map(params).get("MessageSid");
+    expect((await post({ params })).body).toContain(GENERIC_SMS_REPLY);
+    expect(lookups).toEqual([messageSid]);
+    expect(others).toEqual([messageSid]);
+  });
+});
+
+describe("every text path is pulled before any effect (HL-13c)", () => {
+  const sidOf = (params: FormParams) => new Map(params).get("MessageSid") ?? "";
+
+  it.each([
+    ["status", OWNER, {}],
+    ["call me", OWNER, {}],
+    ["STOP", OWNER, { OptOutType: "STOP" }],
+    ["stop", OWNER, {}],
+    ["START", OWNER, { OptOutType: "START" }],
+    ["HELP", OWNER, { OptOutType: "HELP" }],
+    ["yes 482913", OWNER, {}],
+    ["use postgres", OWNER, {}],
+    ["status", STRANGER, {}],
+    ["STOP", STRANGER, { OptOutType: "STOP" }],
+  ] as const)(
+    "a forged %j from %s with an unknown SID has no effect and gets bare TwiML",
+    async (body, from, extra) => {
+      ownerReply = "Hotline: 2 live sessions. Claude in secret-project: deploying.";
+      const params = message({ Body: body, From: from, ...extra });
+      const response = await post({ params, unknownAtTwilio: true });
+      expect([response.statusCode, response.body]).toEqual([200, BARE]);
+      // No handler ran: nothing reached call orchestration, nothing was recorded or counted.
+      expect(received).toEqual([]);
+      expect(others).toEqual([]);
+      expect(unverified).toEqual([
+        { messageSid: sidOf(params), forgery: true, reason: "the provider has no such record" },
+      ]);
+      expect(unverifiedSenders).toEqual([from === OWNER ? "owner" : "other"]);
+      expect(response.body).not.toContain("secret-project");
+    },
+  );
+
+  it("never lets forged texts from other numbers spend the generic replies", async () => {
+    for (let i = 0; i < OTHER_SENDER_REPLIES_PER_HOUR * 2; i++) {
+      expect((await post({ params: message({ From: STRANGER }), unknownAtTwilio: true })).body).toBe(BARE);
+    }
+    expect((await post({ params: message({ From: STRANGER }) })).body).toContain(GENERIC_SMS_REPLY);
+    expect(others).toHaveLength(1);
+  });
+
+  it.each([
+    [
+      "the owner's message",
+      { From: STRANGER },
+      { from: OWNER },
+      "the message is not from the sender's number",
+    ],
+    [
+      "another sender's message",
+      { From: STRANGER },
+      { from: "+15555550198" },
+      "the message is not from the sender's number",
+    ],
+    [
+      "a message to another number",
+      { From: STRANGER },
+      { to: "+15555550102" },
+      "the message is not to the number it was sent to",
+    ],
+    [
+      "other words",
+      { From: STRANGER, Body: "hi" },
+      { body: "bye" },
+      "the message text differs from the provider's",
+    ],
+  ] as const)(
+    "refuses another sender's text when Twilio has %s",
+    async (_name, overrides, record, reason) => {
+      const params = message(overrides);
+      const messageSid = sidOf(params);
+      const get = (name: string) => params.find(([key]) => key === name)?.[1] ?? null;
+      twilioLog.set(messageSid, {
+        sid: messageSid,
+        direction: "inbound",
+        from: get("From"),
+        to: get("To"),
+        body: get("Body"),
+        status: "received",
+        dateCreated: now,
+        ...record,
+      });
+      expect((await post({ params })).body).toBe(BARE);
+      expect(others).toEqual([]);
+      expect(unverified).toEqual([{ messageSid, forgery: true, reason }]);
+      expect(unverifiedSenders).toEqual(["other"]);
+    },
+  );
+
+  it("puts nothing in the response for a reply the handler does not give", async () => {
+    // The status is texted by call orchestration; the route just has no reply.
+    ownerReply = undefined;
+    expect((await post({ params: message({ Body: "status" }) })).body).toBe(BARE);
+    expect(received).toHaveLength(1);
+  });
+});
+
+describe("the body comparison tolerates whitespace and Unicode normalisation only (HL-13c)", () => {
+  /** Posts `webhookBody` while Twilio's record has `recordBody`. */
+  async function compare(webhookBody: string, recordBody: string | null) {
+    const params = message({ Body: webhookBody });
+    const messageSid = new Map(params).get("MessageSid") ?? "";
+    twilioLog.set(messageSid, {
+      sid: messageSid,
+      direction: "inbound",
+      from: OWNER,
+      to: SMS_NUMBER,
+      body: recordBody,
+      status: "received",
+      dateCreated: now,
     });
-    expect((await post({ params: message({ From: STRANGER }), unknownAtTwilio: true })).body).toContain(
-      GENERIC_SMS_REPLY,
-    );
-    expect(unverified).toEqual([]);
+    return post({ params });
+  }
+
+  it.each([
+    ["trailing whitespace", "yes 482913 ", "yes 482913"],
+    ["leading whitespace and a line break", "\n yes 482913", "yes 482913"],
+    ["a run of spaces", "yes   482913", "yes 482913"],
+    ["a tab and a CRLF", "yes\t482913\r\n", "yes 482913"],
+    ["a no-break space", "yes 482913", "yes 482913"],
+    ["a decomposed accent", "café first", "café first"],
+    ["a composed accent against a decomposed record", "café first", "café first"],
+  ])(
+    "accepts a genuine reply that differs by %s, with Twilio's text",
+    async (_name, webhookBody, recordBody) => {
+      const response = await compare(webhookBody, recordBody);
+      expect(response.body).toBe(BARE);
+      expect(unverified).toEqual([]);
+      expect(received).toHaveLength(1);
+      // The handler gets the text as Twilio's own record has it.
+      expect(received[0]?.body).toBe(recordBody);
+    },
+  );
+
+  it.each([
+    ["a changed word", "yes deploy now", "yes deploy later"],
+    ["a changed digit", "yes 482913", "yes 482914"],
+    ["a word run together", "no thanks", "nothanks"],
+    ["a compatibility character", "yes ﬁle", "yes file"],
+    ["a different case", "Yes", "yes"],
+    ["a missing body", "yes", null],
+  ])("still refuses %s", async (_name, webhookBody, recordBody) => {
+    expect((await compare(webhookBody, recordBody)).body).toBe(BARE);
+    expect(received).toEqual([]);
+    expect(unverified).toEqual([
+      expect.objectContaining({ forgery: true, reason: "the message text differs from the provider's" }),
+    ]);
   });
 });
 

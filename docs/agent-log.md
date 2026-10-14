@@ -3317,3 +3317,81 @@ Template:
   for genuine Twilio requests; security.md update after #77; count out-of-queue
   texts against the text rate limits; HL-13c (#80) retries processing records
   and normalises the SMS body comparison in the same files.
+
+## 2026-10-14 — HL-13c Don't lose genuine answers in verify-by-pull (#80)
+
+- Decision: a post-call transcription whose pulled record is `processing`
+  gets `503` so ElevenLabs sends it again, audited as `security.unverified`
+  ("the call is still being processed at the provider"). The bound is
+  `MAX_PROCESSING_RETRIES` = 3 per conversation. ElevenLabs' documented
+  schedule (https://elevenlabs.io/docs/eleven-api/resources/webhooks#retries)
+  is immediate, then 30 s, 2, 8 and 30 minutes, and a webhook is turned off
+  after 10 consecutive failures when it has not succeeded in 7 days, so 3
+  covers about 10 minutes of processing and stays inside both limits. The
+  delivery after the bound ends the call as a failed call (no answer, never
+  an approval), audited "the provider did not finish processing the call".
+  Only `processing` is retried: `initiated` and `in-progress` keep HL-13a's
+  behaviour (possible forgery, `200`, unhandled), so forged events during a
+  live call can neither end it nor use up its retries.
+- Decision: the count is persisted the way HL-13b persisted its limits: a
+  table (`post_call_waits`, migration 6, appended) with an expiry two hours
+  from the first count, pruned on the next count, behind an injected
+  `PostCallWaitMemory` (`storedPostCallWaits(store)` in `runDaemon`, memory in
+  tests). A store that cannot count falls back to this run's memory, so the
+  bound still holds.
+- Decision: `smsMismatch` compares bodies after `comparableSmsText` on both
+  sides: NFC, every `\s+` run (Unicode whitespace, no-break space included)
+  to one space, trimmed. Case, compatibility characters (a ligature) and any
+  changed word or digit still refuse. The owner handler gets Twilio's record
+  of the body rather than the webhook's.
+- Decision (gate parity, from the issue's second comment): every text path
+  is pulled before any effect. The owner's paths were already pulled; the
+  other-sender path now is too (record `from`/`to` must equal the webhook's
+  `From`/`To` exactly, as another sender's number need not be E.164), so a
+  forged signed webhook can no longer record `sms.other-sender` or spend the
+  5-an-hour generic replies. A refused text of any kind gets the bare empty
+  TwiML; `UNCONFIRMED_SMS_REPLY` is removed, because the response goes back
+  to whoever posted the webhook. `onUnverified` gains the claimed sender and
+  the alarm audits `what: other-sender-text` for another number. An outage
+  now gets no reply at all (it used to get "could not be confirmed"); Twilio's
+  own retry, if any, is pulled again.
+- Decision: the `status` reply is texted to the owner's number
+  (`sendToOwner`, redacted, audited `text.sent` reason `status` or
+  `text.failed` about `status`) and never put in the TwiML. The other owner
+  replies (got it, calling you now, a reply hint, the count of waiting
+  requests when a reply is ambiguous, why no call was placed) stay in the
+  TwiML: they are sent only after Twilio's record confirmed that very
+  message, and moving them all to outgoing texts would change most of the
+  orchestration tests' text counts. Recorded as a follow-up.
+- No in-flight cap was added to the SMS route (HL-13b's finding stands).
+- Existing expectations changed, each because the ticket requires it:
+  `sms-webhook.test.ts`, the HL-13a unconfirmed cases (unknown SID, ten
+  mismatching records, Twilio unreachable) now expect the bare TwiML instead
+  of `UNCONFIRMED_SMS_REPLY`; "never looks up a text from another number"
+  became "looks up a text from another number too" (it asserted the old
+  gap). `verify-by-pull.test.ts`, three forged or unreachable `h.text` calls
+  expect no reply instead of `UNCONFIRMED_SMS_REPLY`. `run.test.ts`, the
+  forged owner's text expects the bare TwiML, and the fake Twilio API now
+  holds the stranger's message, since it is pulled.
+  `apps/cli/test/inbound-line.test.ts` ("answers the owner's status text"),
+  the same exact status is now read from the outgoing text, and the webhook
+  reply is asserted empty. The HL-13a not-final test for an in-progress call
+  is unchanged.
+- Evidence: route tests for each text path (status, call me, STOP and stop,
+  START, HELP, a code, free text, a stranger's status and STOP) with a forged
+  signed request and an unknown SID: bare TwiML, no handler, no record, the
+  sender reported; forged texts cannot spend the generic replies; four
+  other-sender mismatches. Seven whitespace and Unicode variants accepted,
+  six other differences refused. Daemon-level tests (`verify-by-pull.test.ts`)
+  per path: no call placed, no answer, no `sms.*` audit, only the forgery text
+  sent, the possible-forgery audit; and a real `status` text answered by an
+  outgoing text with empty TwiML. Post-call: 503 three times then the done
+  record handled; never finishing ends as a failed call and stays ended; per
+  conversation; an in-progress call is never retried; the count survives a
+  store reopen; a broken store still bounds it; the store's own count and
+  expiry across a reopen. Mutation checks, each reverted: other senders not
+  pulled (8 tests fail), no normalisation (7 fail), no `processing` verdict
+  (5 fail).
+- Follow-ups: move every owner reply out of the TwiML into outgoing texts;
+  split `SavedCall` out of `inbound-line.ts` (HL-13b P3, not needed here);
+  the earlier ones from HL-13b still stand.

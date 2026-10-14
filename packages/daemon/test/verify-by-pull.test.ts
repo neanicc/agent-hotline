@@ -7,9 +7,17 @@
 import { type Ask, permissionVerdict } from "@hotline/core";
 import { scriptedHuman, type VoiceToolClient } from "@hotline/providers";
 import { afterEach, describe, expect, it } from "vitest";
-import { FORGERY_TEXT, UNCONFIRMED_SMS_REPLY } from "../src/index.js";
+import { FORGERY_TEXT, GENERIC_SMS_REPLY } from "../src/index.js";
 import { TEXT_REPLIES } from "../src/owner-texts.js";
-import { answerOf, HOTLINE_NUMBER, type Hotline, OWNER, PIN, startHotline } from "./hotline-harness.js";
+import {
+  answerOf,
+  HOTLINE_NUMBER,
+  type Hotline,
+  OWNER,
+  PIN,
+  STRANGER,
+  startHotline,
+} from "./hotline-harness.js";
 
 const BATCH_MS = 20_000;
 /** Quiet hours around the harness's start time (17:58 in Toronto): every ask is texted. */
@@ -69,7 +77,7 @@ describe("texts are checked against Twilio's own record", () => {
     expect(code).toMatch(/^\d{6}$/);
 
     // The forger read the code and the auth token and signed the webhook itself.
-    expect(await h.text(`yes ${code}`, { forged: true })).toBe(UNCONFIRMED_SMS_REPLY);
+    expect(await h.text(`yes ${code}`, { forged: true })).toBeUndefined();
     expect(await verdict(h, push)).toBe("waiting");
     expect(h.daemon.store.getAnswer(push.id)).toBeUndefined();
     expect(audits(h, "sms.received")).toEqual([]);
@@ -78,7 +86,7 @@ describe("texts are checked against Twilio's own record", () => {
     ]);
     // The owner hears about it, once an hour at most.
     expect(h.sms.sent.filter((s) => s.text === FORGERY_TEXT)).toHaveLength(1);
-    expect(await h.text(`yes ${code}`, { forged: true })).toBe(UNCONFIRMED_SMS_REPLY);
+    expect(await h.text(`yes ${code}`, { forged: true })).toBeUndefined();
     expect(h.sms.sent.filter((s) => s.text === FORGERY_TEXT)).toHaveLength(1);
 
     // The forgery burnt nothing: the owner's own reply still counts.
@@ -95,7 +103,7 @@ describe("texts are checked against Twilio's own record", () => {
     const code = codeIn(h.sms.sent[0]?.text);
     const sid = `SM${"a".repeat(32)}`;
     h.sms.failNextFetch();
-    expect(await h.text(`yes ${code}`, { messageSid: sid })).toBe(UNCONFIRMED_SMS_REPLY);
+    expect(await h.text(`yes ${code}`, { messageSid: sid })).toBeUndefined();
     expect(await verdict(h, ask)).toBe("waiting");
     expect(audits(h, "security.unverified").map((e) => e.detail)).toEqual([
       { channel: "sms", what: "text", reason: "the provider lookup failed (unreachable)" },
@@ -105,6 +113,63 @@ describe("texts are checked against Twilio's own record", () => {
     // Twilio's retry of the same message is pulled afresh and counts.
     expect(await h.text(`yes ${code}`, { messageSid: sid, instantly: true })).toBe("Hotline: got it.");
     expect(await verdict(h, ask)).toBe("allow");
+  });
+});
+
+describe("every text path is pulled before any effect (HL-13c)", () => {
+  const BARE = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>';
+
+  /** A daemon with one open question texted to the owner, so every command has something to act on. */
+  async function waiting() {
+    const h = await start({ config: QUIET });
+    const session = await h.registerSession("claude-code", "/work/secret-project");
+    const ask = await h.ask(session, { kind: "question", text: "Ship the payments migration?" });
+    await h.advance(BATCH_MS);
+    expect(h.sms.sent).toHaveLength(1);
+    return { h, ask };
+  }
+
+  it.each([
+    ["status", OWNER, "text"],
+    ["call me", OWNER, "text"],
+    ["stop", OWNER, "text"],
+    ["start", OWNER, "text"],
+    ["help", OWNER, "text"],
+    ["yes, ship it", OWNER, "text"],
+    ["status", STRANGER, "other-sender-text"],
+  ])("a forged %j from %s has no effect and the response leaks nothing", async (body, from, what) => {
+    const { h, ask } = await waiting();
+    const before = h.daemon.store.listAudit().length;
+    const response = await h.textResponse(body, { from, forged: true });
+    // The bare empty TwiML, the same for every path: no status, no reply.
+    expect([response.status, response.body]).toEqual([200, BARE]);
+    // No call placed, nothing answered, no status or reply texted: only the alarm.
+    expect(h.voice.placed).toHaveLength(0);
+    expect(h.daemon.store.getAnswer(ask.id)).toBeUndefined();
+    expect(await h.outcome(ask.id)).toMatchObject({ state: "waiting" });
+    expect(h.sms.sent.slice(1).map((s) => s.text)).toEqual([FORGERY_TEXT]);
+    // Audited as a possible forgery, and nothing else happened.
+    const after = h.daemon.store.listAudit().slice(before);
+    expect(after.filter((e) => e.event.startsWith("sms."))).toEqual([]);
+    expect(after.filter((e) => e.event === "security.possible-forgery").map((e) => e.detail)).toEqual([
+      { channel: "sms", what, reason: "the provider has no such record" },
+    ]);
+    // The same text, really sent, still works.
+    if (from === STRANGER) expect(await h.text(body, { from })).toBe(GENERIC_SMS_REPLY);
+  });
+
+  it("texts the status to the owner's number and never puts it in the webhook response", async () => {
+    const { h } = await waiting();
+    const response = await h.textResponse("status");
+    expect([response.status, response.body]).toEqual([
+      200,
+      '<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+    ]);
+    const status = h.sms.sent.at(-1);
+    expect(status?.to).toBe(OWNER);
+    expect(status?.text).toContain("Hotline: 1 live session.");
+    expect(status?.text).toContain("secret-project");
+    expect(audits(h, "text.sent").at(-1)?.detail).toEqual({ reason: "status" });
   });
 });
 

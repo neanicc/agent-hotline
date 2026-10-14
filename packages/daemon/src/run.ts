@@ -14,7 +14,7 @@ import {
 } from "@hotline/providers";
 import { ensureApiToken } from "./api-token.js";
 import { hotlinePaths, loadConfig } from "./config-file.js";
-import { elevenLabsRoutes, storedToolDeliveries } from "./elevenlabs-webhook.js";
+import { elevenLabsRoutes, storedPostCallWaits, storedToolDeliveries } from "./elevenlabs-webhook.js";
 import { InboundLine } from "./inbound-line.js";
 import { acquireDaemonLock } from "./lock.js";
 import type { LogDestination, LogLevel } from "./logger.js";
@@ -191,7 +191,8 @@ function smsWebhook(
     onOwnerMessage: (message) => orchestrator.ownerText(message),
     onOtherSender: (messageSid) => store.appendAudit("sms.other-sender", { messageSid }, clock()),
     lookup: messageLookup(texter),
-    onUnverified: (_messageSid, failure) => alarm.report("sms", "text", failure),
+    onUnverified: (_messageSid, failure, sender) =>
+      alarm.report("sms", sender === "owner" ? "text" : "other-sender-text", failure),
   });
   return { routes: [route] };
 }
@@ -309,6 +310,8 @@ async function voiceWebhook(
     onUnverified: (what, failure) => alarm.report("voice", what, failure),
     // In SQLite, so a replayed tool call after a restart does not run again.
     deliveries: storedToolDeliveries(store),
+    // In SQLite, so a restart does not reset the bound on processing retries (HL-13c).
+    processingWaits: storedPostCallWaits(store),
     // When a previous run's PinGate verified a call holding instructions, so
     // its post-call transcript still shows the owner's turns after a restart.
     savedPinVerification: (conversationId) => inbound.savedPin(conversationId),

@@ -24,7 +24,10 @@
 //   Hotline line with the owner (outbound only when Hotline placed it). A
 //   finished call that is not with the owner is handed on with no words in
 //   it. A call still going on at ElevenLabs leaves the event unhandled for the
-//   genuine one; a record that contradicts the event confirms nothing.
+//   genuine one; a record that contradicts the event confirms nothing. A call
+//   that is over but still `processing` at ElevenLabs gets a 503 so the event
+//   comes again, at most `MAX_PROCESSING_RETRIES` times per conversation
+//   (counted in the store, HL-13c); after that the call ends as no answer.
 // - A call initiation failure is acted on only when the pulled record shows
 //   that call failed: Hotline's outbound call to the owner, `failed`, with
 //   nothing said. Otherwise it is ignored, so a forged one cannot end a live
@@ -114,6 +117,17 @@ export const POST_CALL_BODY_TIMEOUT_MS = 5_000;
  * 403; ElevenLabs then retries and the asks end as "no answer".
  */
 export const POST_CALL_BODY_LIMIT = 1024 * 1024;
+/**
+ * How many deliveries of one conversation's transcription that find ElevenLabs'
+ * record still `processing` get a `503` so ElevenLabs sends the event again
+ * (HL-13c). The next one ends the call as no answer. ElevenLabs retries a
+ * failed webhook immediately, then after 30 s, 2, 8 and 30 minutes, and turns
+ * a webhook off after 10 failures in a row, so 3 waits cover about 10 minutes
+ * of processing and stay well inside both limits.
+ */
+export const MAX_PROCESSING_RETRIES = 3;
+/** How long a conversation's processing count is kept; longer than ElevenLabs' whole retry schedule. */
+const PROCESSING_WAIT_MS = 2 * 60 * 60 * 1000;
 
 /** What every server-tool call says about the call it came from. */
 export interface ToolCall {
@@ -217,6 +231,41 @@ export interface ElevenLabsRoutesOptions {
    * after a restart the live tools still need the PIN again.
    */
   savedPinVerification?: (conversationId: string) => { verifiedAt: Date; callSid: string } | undefined;
+  /**
+   * Where each conversation's deliveries that found its record still
+   * processing are counted (HL-13c). The daemon passes
+   * `storedPostCallWaits(store)` so a restart does not reset the bound on
+   * retries. Defaults to memory.
+   */
+  processingWaits?: PostCallWaitMemory;
+}
+
+/** Post-call deliveries that found the record still processing, per conversation. Times are epoch milliseconds. */
+export interface PostCallWaitMemory {
+  /**
+   * Counts one more such delivery of `conversationId` and returns how many
+   * there have been, this one included, while the count has not expired.
+   */
+  add(conversationId: string, now: number, expires: number): number;
+}
+
+/** Processing counts kept in memory, lost on a restart. For tests. */
+export function memoryPostCallWaits(): PostCallWaitMemory {
+  const kept = new Map<string, { count: number; expires: number }>();
+  return {
+    add(conversationId, now, expires) {
+      for (const [id, wait] of kept) if (wait.expires <= now) kept.delete(id);
+      const wait = kept.get(conversationId) ?? { count: 0, expires };
+      wait.count += 1;
+      kept.set(conversationId, wait);
+      return wait.count;
+    },
+  };
+}
+
+/** Processing counts kept in the daemon's SQLite store, so they outlive a restart (HL-13c). */
+export function storedPostCallWaits(store: HotlineStore): PostCallWaitMemory {
+  return { add: (conversationId, now, expires) => store.addPostCallWait(conversationId, now, expires) };
 }
 
 /**
@@ -540,6 +589,19 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
     }
   };
 
+  const waits = options.processingWaits ?? memoryPostCallWaits();
+  /** Counts kept for this run when `waits` (the store) fails, so the bound still holds. */
+  const fallbackWaits = memoryPostCallWaits();
+  /** Counts one delivery that found `conversationId` still processing; returns how many so far. */
+  const processingWait = (conversationId: string): number => {
+    const now = options.clock().getTime();
+    try {
+      return waits.add(conversationId, now, now + PROCESSING_WAIT_MS);
+    } catch {
+      return fallbackWaits.add(conversationId, now, now + PROCESSING_WAIT_MS);
+    }
+  };
+
   /** ElevenLabs' record of a conversation, or why it could not be had (`transient`: try again later). */
   const pull = async (
     conversationId: string,
@@ -593,6 +655,23 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
     }
     const { record } = pulled;
     const check = finishedCallCheck(record, event.conversationId, expectations);
+    if (check.type === "processing") {
+      // The call is over and ElevenLabs is still writing its record up: the
+      // event may be genuine and early. Ask for it again, a bounded number of
+      // times; after that the call ends as no answer, never an approval.
+      if (processingWait(event.conversationId) <= MAX_PROCESSING_RETRIES) {
+        await report("post-call", {
+          forgery: false,
+          reason: "the call is still being processed at the provider",
+        });
+        return { type: "retry" };
+      }
+      await report("post-call", {
+        forgery: false,
+        reason: "the provider did not finish processing the call",
+      });
+      return failedCall;
+    }
     if (check.type === "not-final") {
       await report("post-call", { forgery: true, reason: "the call is not over at the provider" });
       return { type: "ignore" };

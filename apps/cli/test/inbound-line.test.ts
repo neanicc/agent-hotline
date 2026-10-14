@@ -544,7 +544,11 @@ describe("status by text", () => {
     const ask: CreateAskRequest = { kind: "question", text: "Pin the ONNX version or skip Windows?" };
     await clientFor(h).createAsk(session, ask);
     await h.settle();
-    const reply = await h.text("status");
+    const texted = h.sms.sent.length;
+    // The status goes out as its own text to the owner, never in the webhook response (HL-13c).
+    expect(await h.text("status")).toBeUndefined();
+    expect(h.sms.sent).toHaveLength(texted + 1);
+    const reply = h.sms.sent.at(-1)?.text;
     expect(reply).toContain("Hotline: 1 live session.");
     expect(reply).toContain("Session 1, Codex in demo-app: waiting on you, open: 1 question.");
     // Agent-written text never goes out by SMS: state and counts only.

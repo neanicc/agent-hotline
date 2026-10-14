@@ -20,6 +20,7 @@ import {
   type PinFailureLog,
   PinGate,
   storedPinFailures,
+  storedPostCallWaits,
   storedToolDeliveries,
 } from "../src/index.js";
 
@@ -250,5 +251,20 @@ describe("server-tool deliveries in SQLite", () => {
     expect(deliveries.get("key-1", t + HOUR)).toBeUndefined();
     deliveries.prune(t + HOUR);
     expect(store.countToolDeliveries(t)).toBe(0);
+  });
+});
+
+describe("post-call processing waits in SQLite (HL-13c)", () => {
+  it("are counted per conversation across a restart, and start again once they expire", async () => {
+    const t = now.getTime();
+    const waits = storedPostCallWaits(store);
+    expect(waits.add("conv_1", t, t + HOUR)).toBe(1);
+    expect(waits.add("conv_1", t + 1, t + 1 + HOUR)).toBe(2);
+    expect(waits.add("conv_2", t + 2, t + 2 + HOUR)).toBe(1);
+    await reopen();
+    const again = storedPostCallWaits(store);
+    expect(again.add("conv_1", t + 3, t + 3 + HOUR)).toBe(3);
+    // A count expires when its first wait plus the window has passed; then the conversation counts afresh.
+    expect(again.add("conv_1", t + HOUR, t + 2 * HOUR)).toBe(1);
   });
 });

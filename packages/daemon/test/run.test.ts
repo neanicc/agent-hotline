@@ -178,19 +178,22 @@ describe("runDaemon", () => {
     const ownerSid = `SM${"1".repeat(32)}`;
     const otherSid = `SM${"2".repeat(32)}`;
     const forgedSid = `SM${"3".repeat(32)}`;
-    // Twilio holds the owner's message; the forged one was never sent.
+    // Twilio holds the owner's message and a stranger's; the forged one was never sent.
+    const inbound = (sid: string, from: string) => ({
+      sid,
+      account_sid: accountSid,
+      direction: "inbound",
+      from,
+      to: "+15555550101",
+      body: "Yes",
+      status: "received",
+      date_created: NOW.toUTCString(),
+    });
     const { daemon, exit } = await launch({
       fetch: fakeApi({
-        [`/2010-04-01/Accounts/${accountSid}/Messages/${ownerSid}.json`]: {
-          sid: ownerSid,
-          account_sid: accountSid,
-          direction: "inbound",
-          from: OWNER,
-          to: "+15555550101",
-          body: "Yes",
-          status: "received",
-          date_created: NOW.toUTCString(),
-        },
+        [`/2010-04-01/Accounts/${accountSid}/Messages/${ownerSid}.json`]: inbound(ownerSid, OWNER),
+        // Every sender's text is pulled before it has any effect (HL-13c).
+        [`/2010-04-01/Accounts/${accountSid}/Messages/${otherSid}.json`]: inbound(otherSid, "+15555550199"),
       }),
     });
 
@@ -217,10 +220,13 @@ describe("runDaemon", () => {
     expect(owner.status).toBe(200);
     // Nothing was texted, so a "yes" answers nothing.
     expect(owner.body).toContain("nothing is waiting for an answer");
-    // A correctly signed webhook for a message Twilio does not have is not used at all.
+    // A correctly signed webhook for a message Twilio does not have is not used
+    // at all, and its response says nothing (HL-13c).
     const forged = await sms(OWNER, forgedSid);
-    expect(forged.status).toBe(200);
-    expect(forged.body).toContain("could not be confirmed with Twilio");
+    expect([forged.status, forged.body]).toEqual([
+      200,
+      '<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+    ]);
     const other = await sms("+15555550199", otherSid);
     expect(other.status).toBe(200);
     expect(other.body).toContain("<Message>");

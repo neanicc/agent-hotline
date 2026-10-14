@@ -25,6 +25,7 @@ import {
   InboundLine,
   type LogOptions,
   MAX_POST_CALLS_IN_FLIGHT,
+  MAX_PROCESSING_RETRIES,
   MAX_STATUS_LENGTH,
   MAX_TOOL_CALLS_IN_FLIGHT,
   MAX_TOOL_DELIVERIES,
@@ -33,6 +34,7 @@ import {
   POST_CALL_BODY_LIMIT,
   type SubmitAnswerResult,
   storedPinFailures,
+  storedPostCallWaits,
   storedToolDeliveries,
   type ToolCall,
   type VoiceAnswer,
@@ -1354,6 +1356,131 @@ describe("verify by pull (HL-13a)", () => {
     expect((await postCall(transcription("conv_live"))).statusCode).toBe(200);
     expect((await postCall(transcription("conv_live"))).statusCode).toBe(200);
     expect(postCalls).toHaveLength(1);
+  });
+});
+
+describe("a record still processing is asked for again, a bounded number of times (HL-13c)", () => {
+  const STILL = {
+    what: "post-call",
+    forgery: false,
+    reason: "the call is still being processed at the provider",
+  };
+  const GAVE_UP = {
+    what: "post-call",
+    forgery: false,
+    reason: "the provider did not finish processing the call",
+  };
+
+  /** ElevenLabs has the finished call the event describes, still `processing`. */
+  function processing(conversation: string) {
+    const body = transcription(conversation);
+    recordAtElevenLabs(body);
+    const record = conversations.get(conversation) as ConversationRecord;
+    conversations.set(conversation, { ...record, status: "processing" });
+    return body;
+  }
+
+  const finish = (conversation: string) => {
+    const record = conversations.get(conversation) as ConversationRecord;
+    conversations.set(conversation, { ...record, status: "done" });
+  };
+
+  it("answers 503 while the record is processing, then takes the genuine transcript once it is done", async () => {
+    const body = processing("conv_lag");
+    for (let i = 0; i < MAX_PROCESSING_RETRIES; i++) {
+      const response = await postCall(body, { unknownAtElevenLabs: true });
+      expect([response.statusCode, response.body]).toEqual([503, ""]);
+    }
+    expect(postCalls).toEqual([]);
+    expect(unverified).toEqual(Array(MAX_PROCESSING_RETRIES).fill(STILL));
+    // ElevenLabs' last retry finds the record done: the owner's answer is not lost.
+    finish("conv_lag");
+    expect((await postCall(body, { unknownAtElevenLabs: true })).statusCode).toBe(200);
+    expect(postCalls).toMatchObject([
+      { type: "transcription", conversationId: "conv_lag", transcript: [{}, { role: "owner" }] },
+    ]);
+  });
+
+  it("ends a call whose record never finishes processing as no answer, never with its words", async () => {
+    const body = processing("conv_stuck");
+    for (let i = 0; i < MAX_PROCESSING_RETRIES; i++) {
+      expect((await postCall(body, { unknownAtElevenLabs: true })).statusCode).toBe(503);
+    }
+    const last = await postCall(body, { unknownAtElevenLabs: true });
+    expect(last.statusCode).toBe(200);
+    // A failed call: every ask on it ends as no answer, the words in the body count for nothing.
+    expect(postCalls).toEqual([
+      { type: "initiation-failure", agentId: AGENT_ID, conversationId: "conv_stuck", reason: "unknown" },
+    ]);
+    expect(unverified.at(-1)).toEqual(GAVE_UP);
+    // A later delivery, even once the record is done, does not reopen it.
+    finish("conv_stuck");
+    expect((await postCall(body, { unknownAtElevenLabs: true })).statusCode).toBe(200);
+    expect(postCalls).toHaveLength(1);
+  });
+
+  it("counts each conversation on its own", async () => {
+    const first = processing("conv_a");
+    const second = processing("conv_b");
+    for (let i = 0; i < MAX_PROCESSING_RETRIES; i++) {
+      expect((await postCall(first, { unknownAtElevenLabs: true })).statusCode).toBe(503);
+    }
+    expect((await postCall(second, { unknownAtElevenLabs: true })).statusCode).toBe(503);
+    expect(postCalls).toEqual([]);
+  });
+
+  it("still never retries an event for a call going on, which ElevenLabs never sends", async () => {
+    conversations.set("conv_live", liveRecord(binding("conv_live")));
+    for (let i = 0; i < MAX_PROCESSING_RETRIES + 2; i++) {
+      expect((await postCall(transcription("conv_live"), { unknownAtElevenLabs: true })).statusCode).toBe(
+        200,
+      );
+    }
+    // Forged events during the call neither end it nor use up its processing retries.
+    expect(postCalls).toEqual([]);
+    expect(unverified.every((u) => u.reason === "the call is not over at the provider")).toBe(true);
+  });
+
+  it("keeps the count across a restart, in the store", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "hotline-hl13c-waits-"));
+    try {
+      const path = join(dir, "hotline.db");
+      let store = await openStore(path);
+      await app.close();
+      app = server({ processingWaits: storedPostCallWaits(store) });
+      const body = processing("conv_restart");
+      for (let i = 0; i < MAX_PROCESSING_RETRIES - 1; i++) {
+        expect((await postCall(body, { unknownAtElevenLabs: true })).statusCode).toBe(503);
+      }
+      // The daemon restarts: a new run, the same store.
+      await app.close();
+      store.close();
+      store = await openStore(path);
+      app = server({ processingWaits: storedPostCallWaits(store) });
+      expect((await postCall(body, { unknownAtElevenLabs: true })).statusCode).toBe(503);
+      expect((await postCall(body, { unknownAtElevenLabs: true })).statusCode).toBe(200);
+      expect(postCalls).toEqual([expect.objectContaining({ type: "initiation-failure" })]);
+      store.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the bound for this run when the store cannot count", async () => {
+    await app.close();
+    app = server({
+      processingWaits: {
+        add: () => {
+          throw new Error("database is locked");
+        },
+      },
+    });
+    const body = processing("conv_broken");
+    for (let i = 0; i < MAX_PROCESSING_RETRIES; i++) {
+      expect((await postCall(body, { unknownAtElevenLabs: true })).statusCode).toBe(503);
+    }
+    expect((await postCall(body, { unknownAtElevenLabs: true })).statusCode).toBe(200);
+    expect(postCalls).toEqual([expect.objectContaining({ type: "initiation-failure" })]);
   });
 });
 

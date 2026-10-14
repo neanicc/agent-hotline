@@ -61,25 +61,53 @@ export interface ExpectedSms {
   messageSid: string;
   /** The webhook's `Body`. */
   body: string;
-  /** `config.owner.phoneNumber`. */
-  ownerNumber: string;
-  /** `config.sms.fromNumber`. */
-  smsNumber: string;
+  /**
+   * The number the text must come from: `config.owner.phoneNumber` for the
+   * owner's text, or the webhook's `From` for any other sender.
+   */
+  fromNumber: string;
+  /** The number it must be to: `config.sms.fromNumber`, or the webhook's `To` for any other sender. */
+  toNumber: string;
+  /** The owner's text: numbers compared as strict E.164. Another sender's are compared exactly. */
+  fromOwner: boolean;
   receivedAt: Date;
 }
 
 /**
- * Why a pulled message is not the owner's text the webhook claims, or
- * undefined when it is: the same SID, inbound, from the owner's number to the
- * Hotline number (strict E.164), the same body, and recent.
+ * A message text as it is compared with the provider's (HL-13c): NFC
+ * normalised, every whitespace run collapsed to one space, and trimmed. A
+ * re-encoding of spaces, line breaks or composed characters on the way must
+ * not refuse a genuine reply; any other difference, a changed word or digit
+ * included, still does.
+ */
+export function comparableSmsText(text: string): string {
+  return text.normalize("NFC").replace(/\s+/gu, " ").trim();
+}
+
+/**
+ * Why a pulled message is not the text the webhook claims, or undefined when
+ * it is: the same SID, inbound, from and to the expected numbers (strict E.164
+ * for the owner's text), the same body after `comparableSmsText` on both
+ * sides, and recent.
  */
 export function smsMismatch(pulled: PulledMessage, expected: ExpectedSms): string | undefined {
   if (pulled.sid !== expected.messageSid) return "the provider returned another message";
   if (pulled.direction !== "inbound") return "the message is not inbound";
   if (pulled.status !== "received" && pulled.status !== "receiving") return "the message was not received";
-  if (!sameE164(pulled.from, expected.ownerNumber)) return "the message is not from the owner's number";
-  if (!sameE164(pulled.to, expected.smsNumber)) return "the message is not to the Hotline number";
-  if (pulled.body !== expected.body) return "the message text differs from the provider's";
+  if (expected.fromOwner) {
+    if (!sameE164(pulled.from, expected.fromNumber)) return "the message is not from the owner's number";
+    if (!sameE164(pulled.to, expected.toNumber)) return "the message is not to the Hotline number";
+  } else {
+    if (expected.fromNumber === "" || pulled.from !== expected.fromNumber) {
+      return "the message is not from the sender's number";
+    }
+    if (expected.toNumber === "" || pulled.to !== expected.toNumber) {
+      return "the message is not to the number it was sent to";
+    }
+  }
+  if (pulled.body === null || comparableSmsText(pulled.body) !== comparableSmsText(expected.body)) {
+    return "the message text differs from the provider's";
+  }
   const created = pulled.dateCreated?.getTime();
   if (created === undefined) return "the message has no time";
   const age = expected.receivedAt.getTime() - created;
@@ -217,17 +245,26 @@ export function liveCallDirection(
  * - `no-owner`: a finished call on the Hotline line that is not a call with
  *   the owner: a stranger calling in, or an outbound call Hotline does not
  *   wait on (given up on). Nothing said on it may count;
- * - `not-final`: still going on (or being processed), so the event came too
- *   early to be ElevenLabs';
+ * - `processing`: this agent's conversation, over but still being processed
+ *   at ElevenLabs (HL-13c). Its event may be genuine and early, so it is worth
+ *   asking for again; nothing in the record counts yet;
+ * - `not-final`: still going on, so the event came too early to be
+ *   ElevenLabs';
  * - `mismatch`: anything else, with why.
  */
 export function finishedCallCheck(
   record: ConversationRecord,
   conversationId: string,
   expected: CallRecordExpectations,
-): { type: "final" } | { type: "no-owner" } | { type: "not-final" } | { type: "mismatch"; reason: string } {
+):
+  | { type: "final" }
+  | { type: "no-owner" }
+  | { type: "processing" }
+  | { type: "not-final" }
+  | { type: "mismatch"; reason: string } {
   const other = conversationMismatch(record, conversationId, expected.agentId);
   if (other !== undefined) return { type: "mismatch", reason: other };
+  if (record.status === "processing") return { type: "processing" };
   if (!FINAL_STATUSES.has(record.status)) return { type: "not-final" };
   const line = hotlineLine(record, expected);
   if (line.reason !== undefined) return { type: "mismatch", reason: line.reason };

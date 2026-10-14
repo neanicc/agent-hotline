@@ -208,7 +208,16 @@ are stored only as salted hashes; that keeps them out of plain sight, but a
 6-digit code's hash can be brute-forced offline in hours, so the hash is
 defence in depth and the pull is the protection. A process that reads the secrets can still
 sign webhooks, but a forged one finds no matching record, confirms nothing, and
-is audited as a possible forgery; the owner gets a text about it.
+is audited as a possible forgery; the owner gets a text about it. Since HL-13c
+that holds for every text path, not only answers: `status`, `call me`, the
+opt-out words, `start`, `help`, free text and other senders' texts are all
+pulled before any effect, a refused one gets empty TwiML, and the status is
+texted to the owner's number instead of returned in the webhook response,
+which goes back to whoever posted it. Message bodies are compared after NFC
+normalisation and whitespace collapsing, so only an encoding difference is
+tolerated. A post-call event whose record is still `processing` is asked for
+again (`503`) at most 3 times per conversation, then the call ends as no
+answer.
 
 **Residual risk.** A same-user process that also reads the provider API keys
 (the Twilio auth token is one, the ElevenLabs API key another) can call the
