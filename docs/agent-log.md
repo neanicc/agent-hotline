@@ -132,7 +132,160 @@ Template:
   its own Keychain access list would close the gap. That is Tier 2 work, not a
   Tier 1 ticket.
 
-## 2026-10-13 — HL-03 Ask queue and call policy
+## 2026-10-13 — HL-04 Daemon skeleton (#25)
+
+- Decision / change: `packages/daemon` gains the server, store, logging and
+  lifecycle, and `apps/cli` gains `hotline daemon [--port <n>]`. Fastify is pinned
+  at 5.12.5, the newest release at least two weeks old. 5.12.6 and 5.12.7 came out
+  today. 5.12.6 fixes GHSA-389g-gv7q-r4x8, a header validation bypass through
+  case-sensitive `propertyNames`, which does not apply: Hotline declares no header
+  schemas and does its own auth in hooks. Bump once 5.12.7 is two weeks old.
+  SQLite uses Node's built-in `node:sqlite`, so there is no native dependency. It
+  works unflagged on Node 22.23.1 (SQLite 3.51.3) and 24.11.0 (3.50.4), and Node
+  unflagged it in 22.13.0, which is already `engines.node`. It prints a one-time
+  `ExperimentalWarning`. The CLI imports the daemon lazily, so `hotline --version`
+  does not.
+- Decisions without a plan answer: (1) **Two listeners**, both on 127.0.0.1 and
+  neither configurable to 0.0.0.0. The agent API is on `daemon.port`. The webhook
+  listener, which serves only `/hooks/*`, is on `daemon.port + 1` and is the
+  tunnel's target. A tunnel therefore cannot reach the agent API whatever its path
+  rules, which is stronger than one port with a prefix. Core's config was left
+  alone, so `daemon.port` 65535 is refused at startup. (2) The API token is the
+  existing `daemon.apiToken` secret: 32 random bytes in base64url, created on
+  first start in the configured store (Keychain on macOS, else the `0600` file)
+  and compared in constant time over SHA-256 digests. (3) The agent API also
+  requires a loopback `Host` header, against DNS rebinding and a misrouted tunnel.
+  Every path needs the token, so an unauthenticated caller cannot tell which
+  routes exist. (4) Webhook routes must declare a verifier. A route without one is
+  refused in `onRequest`, before the body is read, and the verifier runs in
+  `preHandler`, where anything but `true` (a throw included) is a 403. All of
+  `/hooks/*` answers 403 until HL-07 and HL-08 add verified routes. Rejections log
+  method, path and reason only. (5) The store keeps validated JSON records plus
+  query columns. Migrations use `PRAGMA user_version`, one transaction each, and
+  a newer schema is refused. `recordAnswer` runs `answerProblem` inside the
+  insert transaction, and `answered` cannot be set any other way. Triggers make
+  the audit table append-only. The database is `0600` and gets the same
+  symlink and ownership checks as the config. (6) Redaction runs on each final
+  JSON log line, not on chosen fields, so messages, serializers and error stacks
+  are covered. Numbers keep their last four digits. Known secret values,
+  credential-like `name=value` and JSON pairs, Bearer credentials, PEM keys,
+  common key formats and long letter-digit runs are removed. Only Twilio SIDs
+  are kept (see the sixth review round). (7) Shutdown: the first
+  SIGINT or SIGTERM closes both listeners (in-flight requests finish), then the
+  database, and exits 0. After 10 s it gives up and exits 1. A second signal
+  gets Node's default handling.
+- Evidence (automated, worktree, Node 24.11.0 and 22.23.1): `run.sh build`
+  passes (Biome, `tsc -b`, typecheck, CLI smoke) and `run.sh test` runs 229 tests
+  in 17 files. New daemon tests and the extended CLI tests cover redaction, the
+  token, the store and migrations on temp-directory databases, both listeners on
+  ephemeral 127.0.0.1 ports, `runDaemon` with SIGINT and SIGTERM on an injected
+  signal source, the shutdown timeout, and the CLI command. Mutation checks:
+  making `tokensMatch` always true fails 3 tests; removing the `onRequest`
+  webhook guard fails 1, because the `preHandler` check still answers 403.
+  Manual: the built CLI ran as a child process in a temp `HOTLINE_HOME`. Health
+  with the token got 200, without it 401, and a webhook POST got 403. A real
+  SIGTERM and a real SIGINT each exited 0 in about 5 ms, and the logs held
+  neither the token nor the number. No scenario suite exists yet (HL-12). Real
+  agent integration and live calls do not apply.
+- Review fixes (staff review and Greptile on #25):
+  - Fastify's automatic "incoming request" line logged the full URL, query
+    included, before any auth hook ran. Its `req` serializer now logs method and
+    path only, and tests assert that a query marker never reaches the log on
+    either listener. Without the serializer, 2 tests fail.
+  - Two daemons starting at once on the same home could each store a different
+    token. A `daemon.lock` pid file, created exclusively before the token and the
+    database, now refuses a second daemon. Stale locks from dead processes are
+    replaced, and the lock is released on stop and on any startup failure.
+  - `runDaemon` now closes the listeners and store, removes its signal handlers
+    and releases the lock if anything fails after the listeners start,
+    `onReady` included.
+  - The database file is created `0600` before SQLite opens it.
+  - Second review round: replacing a stale lock was racy (two starters could
+    both remove it). Only the starter that exclusively creates
+    `daemon.lock.break` may now replace it, after re-reading that it still
+    holds the stale pid. A 4-starter race test, run 25 times, fails 2 tests
+    with the old plain `rm`. The credential-assignment pattern is now anchored
+    at a name boundary with bounded repetitions. Strings over 16 KiB are cut
+    before pattern redaction, after known secrets have been replaced, and the
+    word at the cut is dropped, so no token fragment survives.
+  - Third round (coordinator security findings on `redact.ts`):
+    - (1) Truncation now uses a backward scan instead of `/[^…]*$/`. That
+      regex took 129 ms on a hostile 16 KiB line, and a test now requires
+      under 50 ms. Every other pattern is anchored or bounded, and six hostile
+      16 KiB shapes are timed.
+    - (2) `pin`, `passcode`, `otp` and Twilio's `Digits` count as secret names
+      in keys, `name=value` and JSON text. `addShortSecret` registers a 4 to 8
+      digit PIN, matched only where it stands alone, and runs after phone
+      masking so it cannot break a number apart.
+    - (3) Object keys go through text redaction. Numbers with 10 to 15 digits
+      are masked as phone numbers, except pino's top-level `time`.
+    - (4) Quoted values honour backslash escapes, and the rest of the word
+      after the closing quote goes too. An unterminated or over-long quote
+      fails closed to the end of the line.
+    - (5) A `%XX` escape before a number is a boundary, and any bare 10 to 15
+      digit run is masked even inside a word.
+    - The bias is to over-redact: ids with 10 or more consecutive digits lose
+      those digits.
+  - Fourth round (coordinator follow-up on 0dc356c):
+    - (1) Every number is redacted like its decimal text, so `{input: 1234}`
+      with that PIN registered, or a number equal to a known secret, is
+      removed under any key.
+    - (2) The short-secret pass now runs before phone masking. It removes
+      whole any digit run or formatted number containing the PIN, so `12345`,
+      `12341234`, a 12-digit run ending in the PIN and `+1 (555) 555-1234` all
+      fail closed, and a masked number can never print the PIN as its last
+      four digits. The digit-cluster pattern is linear, and timed tests cover
+      four hostile shapes with a PIN registered.
+    - (3) Known secrets also match their `encodeURIComponent` form (upper- and
+      lowercase escapes) and their JSON-escaped form.
+  - Fifth round (coordinator, parser differential): form parsers decode `%XX`
+    and `+` before they read a name, which raw-text patterns missed
+    (`Dig%69ts=1234`, `Digits+=1234`, `%44igits=1234`). Each `&`/`;`/`?`/`#`/`,`
+    or whitespace segment holding an escape or `+` is also checked decoded.
+    Malformed escape runs decode byte by byte. If the decoded copy looks secret,
+    the whole raw segment is removed (made fully fail closed in the sixth
+    round). With the pass disabled, 6 tests fail.
+  - Not changed: webhook verification still runs after body parsing (256 KiB
+    cap), which signatures over form parameters need. HL-07 can refuse a
+    missing signature header earlier.
+  - Sixth round (coordinator, last redaction changes in HL-04):
+    - A stray `]` appeared when an earlier pass had already written
+      `[REDACTED]` (`From=%2B15555550100&Digits=4821` gave
+      `Digits=[REDACTED]]`). The assignment value group now consumes an
+      existing marker whole.
+    - The decoded-copy check fails closed: if the decoded segment looks secret,
+      the whole raw segment goes, even when the raw form already matched in
+      part.
+    - The id exemption is now exact: only Twilio `CA`/`SM`/`MM`/`PN`/`MG` SIDs
+      with exactly 32 hex digits. ElevenLabs-prefixed values and UUIDs are
+      removed like any other long run. The daemon logs its own ids through
+      structured fields it controls.
+    - Staff P3: after a shutdown timeout the lock is kept, because the store
+      may still be open, and the stale-pid check frees it once the process
+      exits.
+    - The rest goes to HL-13 (#14): base64, upper-cased or line-split copies
+      of registered secrets, slash-separated phone numbers, and YAML
+      continuation lines.
+  - Staff P2 (audit ids): migration 2 adds nullable `ask_id`, `session_id` and
+    `call_id` columns to `audit`. `appendAudit` takes them as typed ids,
+    validated against core's `Id` and stored unredacted, while `detail` is still
+    redacted with no exemption, so UUID ids stay queryable and a UUID-shaped
+    secret in `detail` is still removed.
+- Logging contract (documented at the top of `logger.ts` and in
+  `docs/daemon.md`):
+  - Callers log parsed, allowlisted fields only.
+  - Request logs carry method and path only.
+  - The redactor is a safety net, not the primary control.
+  - Deeper work belongs to HL-13 (#14): fuzzing the redactor, `.env` lines and
+    the threat model.
+- Open issues or follow-ups: add `daemon.webhookPort` to the config contract
+  (lane:core) if the `port + 1` convention gets in the way. HL-07 needs a
+  urlencoded body parser on the webhook listener and HL-08 the raw body for
+  HMAC; both plug into `WebhookRoute`. HL-13 should extend the redaction corpus
+  with `.env` files and real provider payload shapes. Bump Fastify once a fixed
+  release is two weeks old.
+
+## 2026-10-13 — HL-03 Ask queue and call policy (#24)
 
 - Decision / change: `packages/core` gains `policy.ts` (settings, priority, quiet
   hours, rolling rate limits) and `queue.ts`, a pure state machine:

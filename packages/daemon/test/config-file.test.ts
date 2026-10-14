@@ -28,6 +28,8 @@ describe("hotlinePaths", () => {
       home: "/Users/example/.hotline",
       config: "/Users/example/.hotline/config.json",
       secrets: "/Users/example/.hotline/secrets.json",
+      database: "/Users/example/.hotline/hotline.db",
+      lock: "/Users/example/.hotline/daemon.lock",
     });
   });
 

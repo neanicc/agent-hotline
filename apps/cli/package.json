@@ -17,6 +17,7 @@
     "test": "vitest run --root ../.. --project cli"
   },
   "dependencies": {
-    "@hotline/core": "workspace:*"
+    "@hotline/core": "workspace:*",
+    "@hotline/daemon": "workspace:*"
   }
 }
