@@ -247,6 +247,48 @@ describe("FileSecretStore", () => {
     },
   );
 
+  it("keeps every secret when sets and deletes overlap, across store instances", async () => {
+    const names = [
+      "daemon.apiToken",
+      "elevenlabs.apiKey",
+      "elevenlabs.toolSecret",
+      "elevenlabs.webhookSecret",
+      "twilio.accountSid",
+      "twilio.authToken",
+    ] as const;
+    const first = new FileSecretStore(path);
+    const second = new FileSecretStore(join(dir, ".hotline", "..", ".hotline", "secrets.json"));
+    await first.set("twilio.authToken", "fake-old-value");
+    await Promise.all(
+      names.map((name, index) => (index % 2 === 0 ? first : second).set(name, `fake-${index}`)),
+    );
+    expect(JSON.parse(await readFile(path, "utf8")).secrets).toEqual(
+      Object.fromEntries(names.map((name, index) => [name, `fake-${index}`])),
+    );
+
+    await Promise.all([
+      first.delete("daemon.apiToken"),
+      second.delete("elevenlabs.apiKey"),
+      first.set("twilio.authToken", "fake-new-value"),
+      second.delete("twilio.accountSid"),
+    ]);
+    expect(JSON.parse(await readFile(path, "utf8")).secrets).toEqual({
+      "elevenlabs.toolSecret": "fake-2",
+      "elevenlabs.webhookSecret": "fake-3",
+      "twilio.authToken": "fake-new-value",
+    });
+  });
+
+  it("still runs later updates after a queued one fails", async () => {
+    const store = new FileSecretStore(path);
+    await store.set("daemon.apiToken", "fake-daemon-token");
+    await writeFile(path, "{not json", { mode: 0o600 });
+    await expect(store.set("twilio.authToken", SECRET)).rejects.toThrow(/not valid JSON/);
+    await writeFile(path, JSON.stringify({ version: 1, secrets: {} }), { mode: 0o600 });
+    await store.set("twilio.authToken", SECRET);
+    expect(await store.get("twilio.authToken")).toBe(SECRET);
+  });
+
   it("reports a corrupt file without quoting it", async () => {
     const store = new FileSecretStore(path);
     await store.set("twilio.authToken", SECRET);

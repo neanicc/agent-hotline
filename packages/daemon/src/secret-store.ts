@@ -2,6 +2,7 @@
 // (recommended, plan section 12 question 5) and a user-only 0600 JSON file.
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import {
   SecretFile,
   type SecretName,
@@ -135,11 +136,32 @@ export class KeychainSecretStore implements SecretStore {
   }
 }
 
+/** Tail of the pending read-modify-write chain for each secrets file, keyed by absolute path. */
+const fileUpdates = new Map<string, Promise<void>>();
+
+/**
+ * Runs `update` after every earlier update of the same file in this process has
+ * settled, so concurrent `set` and `delete` calls cannot overwrite each other.
+ * Another process writing the same file is not covered.
+ */
+function serializeUpdate(path: string, update: () => Promise<void>): Promise<void> {
+  const run = (fileUpdates.get(path) ?? Promise.resolve()).then(update);
+  const tail = run.catch(() => undefined);
+  fileUpdates.set(path, tail);
+  void tail.then(() => {
+    if (fileUpdates.get(path) === tail) fileUpdates.delete(path);
+  });
+  return run;
+}
+
 /** A JSON file, mode 0600, that only the owner can read. Refuses to use a file others can read. */
 export class FileSecretStore implements SecretStore {
   readonly kind = "file" as const;
+  private readonly path: string;
 
-  constructor(private readonly path: string) {}
+  constructor(path: string) {
+    this.path = resolve(path);
+  }
 
   async get(name: SecretName): Promise<string | undefined> {
     return (await this.read()).secrets[name];
@@ -147,15 +169,19 @@ export class FileSecretStore implements SecretStore {
 
   async set(name: SecretName, value: string): Promise<void> {
     checkValue(value);
-    const file = await this.read();
-    await this.write({ ...file, secrets: { ...file.secrets, [name]: value } });
+    await serializeUpdate(this.path, async () => {
+      const file = await this.read();
+      await this.write({ ...file, secrets: { ...file.secrets, [name]: value } });
+    });
   }
 
   async delete(name: SecretName): Promise<void> {
-    const file = await this.read();
-    if (!(name in file.secrets)) return;
-    const { [name]: _removed, ...rest } = file.secrets;
-    await this.write({ ...file, secrets: rest });
+    await serializeUpdate(this.path, async () => {
+      const file = await this.read();
+      if (!(name in file.secrets)) return;
+      const { [name]: _removed, ...rest } = file.secrets;
+      await this.write({ ...file, secrets: rest });
+    });
   }
 
   private async read(): Promise<SecretFile> {
