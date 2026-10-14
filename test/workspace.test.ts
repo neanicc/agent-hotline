@@ -23,13 +23,21 @@ interface Manifest {
   optionalDependencies?: Record<string, string>;
 }
 
-const workspaceDirs = ["packages", "apps"].flatMap((parent) =>
-  readdirSync(new URL(`${parent}/`, root), { withFileTypes: true })
-    .filter(
-      (entry) => entry.isDirectory() && existsSync(new URL(`${parent}/${entry.name}/package.json`, root)),
-    )
-    .map((entry) => `${parent}/${entry.name}`),
-);
+// The scenario suite (HL-12) is a workspace package of its own at the top level.
+const SUITE_DIR = "eval";
+const workspaceDirs = [
+  ...["packages", "apps"].flatMap((parent) =>
+    readdirSync(new URL(`${parent}/`, root), { withFileTypes: true })
+      .filter(
+        (entry) => entry.isDirectory() && existsSync(new URL(`${parent}/${entry.name}/package.json`, root)),
+      )
+      .map((entry) => `${parent}/${entry.name}`),
+  ),
+  ...(existsSync(new URL(`${SUITE_DIR}/package.json`, root)) ? [SUITE_DIR] : []),
+];
+
+/** `extends` from a package's tsconfig back to the root's tsconfig.base.json. */
+const baseFrom = (dir: string) => `${"../".repeat(dir.split("/").length)}tsconfig.base.json`;
 
 const EXACT_VERSION = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
 
@@ -69,7 +77,14 @@ function pinSatisfiesMinimum(pin: string, minimum: string): boolean {
 describe("workspace", () => {
   it("contains the planned packages", () => {
     expect(workspaceDirs.sort()).toEqual(
-      ["apps/cli", "packages/agents", "packages/core", "packages/daemon", "packages/providers"].sort(),
+      [
+        "apps/cli",
+        SUITE_DIR,
+        "packages/agents",
+        "packages/core",
+        "packages/daemon",
+        "packages/providers",
+      ].sort(),
     );
   });
 
@@ -106,7 +121,7 @@ describe("workspace", () => {
       const tsconfig = readJson<{ extends?: string; compilerOptions?: Record<string, unknown> }>(
         `${dir}/tsconfig.json`,
       );
-      expect(tsconfig.extends, dir).toBe("../../tsconfig.base.json");
+      expect(tsconfig.extends, dir).toBe(baseFrom(dir));
       expect(nonLayoutOptions(tsconfig.compilerOptions), `${dir} may only set layout options`).toEqual([]);
     }
   });

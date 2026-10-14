@@ -9,6 +9,7 @@ const projects = [
   { name: "providers", dir: "packages/providers" },
   { name: "agents", dir: "packages/agents" },
   { name: "cli", dir: "apps/cli" },
+  { name: "scenarios", dir: "eval" },
   { name: "workspace", dir: "." },
 ];
 
