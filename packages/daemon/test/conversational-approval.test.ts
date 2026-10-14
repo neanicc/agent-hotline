@@ -122,6 +122,20 @@ describe("conversational approval by voice (HL-14c)", () => {
     },
   );
 
+  it("denies at once when the owner says no to the read-back but the model submits allow (HL-09c)", async () => {
+    const h = await start();
+    const session = await h.registerSession();
+    const request = permission(h, session, "low", "pnpm test");
+    await h.advance(BATCH_MS);
+    h.voice.script(scriptedHuman.confirms(1, "sure", "nope"));
+    await h.voice.playPending();
+    await h.settle();
+    // Never approved, never texted for approval: the request ends as no answer, which denies it.
+    expect(h.daemon.store.getAnswer(request.id)).toBeUndefined();
+    expect(await verdict(h, request)).toBe("deny");
+    expect(h.sms.sent).toHaveLength(0);
+  });
+
   it("denies when the owner says no to the read-back", async () => {
     const h = await start();
     const session = await h.registerSession();

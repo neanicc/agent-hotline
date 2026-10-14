@@ -279,10 +279,11 @@ export class VoiceCalls {
             askId,
             callId: call.callId,
           });
-          if (held.decision.type === "deny") {
+          if (held.decision.type === "deny" || check.declined === true) {
             // A refusal takes effect even unconfirmed: nothing is recorded as the
             // owner's words, but the request ends now as no answer (a deny), and is
-            // never sent out again for approval.
+            // never sent out again for approval. So does an allow the owner said
+            // no to at its read-back.
             events.push({ type: "unclear", askId });
             settledIds.add(askId);
           }

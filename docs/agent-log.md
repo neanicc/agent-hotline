@@ -2035,3 +2035,24 @@ Template:
     - P3: the fast yes table keeps "ok", "okay", "alright", "sure" and
       "sounds good". The fast path only runs on a reply to a read-back that
       asked for a yes, which is the condition the review suggested.
+- Bot staff review of 0fd09ba (approve with nits, 84; no P0 or P1):
+  - P2 fixed: with one ask on the call, a loose read-back ("git push origin
+    main, yes?") could confirm `git push --force origin main`. A permission
+    read-back must now name every command and tool token, short ones
+    included, whether or not other asks share the call. Decision: the tool
+    counts too, so "Allow Read ..." never confirms a `Write`. Cost: the
+    persona's example read-back ("Allow pnpm test in demo-app? Yes?") leaves
+    out the tool, so a model that follows it literally fails closed and the
+    ask is texted. Follow-up for the providers lane: make the example name the
+    tool. A long permission request needs its whole command read back, so the
+    long-ask rule now helps only readings and non-permission asks. "please"
+    joins the filler words.
+  - P3 taken: a clear no to the read-back of a submitted allow (the fast
+    path's no, or a judge's `declined`) ends the request at once as no answer
+    (`unclear`), which denies it, as an unconfirmed deny does. It is not
+    texted for approval.
+  - P2 on module size and the unwired judge: noted. The real judge is a
+    follow-up that needs the owner's approval and a plan change.
+  - P3 on "mm-hmm" for high-risk asks: high-risk allows still need the PIN.
+  - Mutation checks: no full-command rule (3 tests fail), a fast no not
+    flagged (2), a decline not ending the request (1).

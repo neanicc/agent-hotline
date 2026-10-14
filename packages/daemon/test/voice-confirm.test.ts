@@ -156,12 +156,23 @@ describe("readings of long asks", () => {
     expect(readings([GREETING, one], [LONG, OTHER_LONG])).toEqual([undefined, undefined]);
   });
 
-  it("approves a long ask after its short read-back", () => {
+  it("approves a long permission request only after a read-back that names its whole command", () => {
     const reading = agent(`Claude in demo-app wants to use Bash: ${LONG.text}. Okay?`);
-    const transcript = [GREETING, reading, owner("sure"), SHORT_BACK, owner("yep, do it")];
-    expect(
-      confirmVoiceDecision({ transcript, asks: [LONG], index: 0, decision: allow, ownerWords: "yep do it" }),
-    ).toEqual({ confirmed: true, excerpt: "yep, do it" });
+    const check = (back: TranscriptTurn) =>
+      confirmVoiceDecision({
+        transcript: [GREETING, reading, owner("sure"), back, owner("yep, do it")],
+        asks: [LONG],
+        index: 0,
+        decision: allow,
+        ownerWords: "yep do it",
+      });
+    // The short read-back reads the ask, but it is not what the owner would be approving.
+    expect(check(SHORT_BACK)).toEqual({
+      confirmed: false,
+      reason: "the request was not read back for a yes",
+    });
+    const full = agent(`Allow Bash to ${LONG.text} for Claude in demo-app? Yes?`);
+    expect(check(full)).toEqual({ confirmed: true, excerpt: "yep, do it" });
   });
 });
 
@@ -824,14 +835,23 @@ describe("judgeVoiceDecision: replies the fast path cannot decide go to the judg
     expect(judge.inputs).toEqual([["yeah let's ship that one"]]);
   });
 
-  it.each([
-    ["declined", "the judge heard a no in the owner's reply"],
-    ["unclear", "the judge found the owner's reply unclear"],
-  ] as const)("is not confirmed when the judge says %s", async (verdict, reason) => {
-    expect(await judgeVoiceDecision(input("yeah let's ship that one"), new FakeJudge(verdict), 50)).toEqual({
+  it("is not confirmed when the judge says declined, and the decline is flagged so the request ends", async () => {
+    expect(
+      await judgeVoiceDecision(input("yeah let's ship that one"), new FakeJudge("declined"), 50),
+    ).toEqual({
       confirmed: false,
-      reason,
+      reason: "the judge heard a no in the owner's reply",
+      declined: true,
     });
+  });
+
+  it("is not confirmed when the judge says unclear", async () => {
+    expect(await judgeVoiceDecision(input("yeah let's ship that one"), new FakeJudge("unclear"), 50)).toEqual(
+      {
+        confirmed: false,
+        reason: "the judge found the owner's reply unclear",
+      },
+    );
   });
 
   it("is not confirmed when the judge throws or does not answer in time", async () => {
@@ -1031,5 +1051,63 @@ describe("the read-back's cue must be the voice agent's, not the ask's", () => {
     [DEPLOY, "Allow Bash to deploy now for Claude in demo-app? Yes?"],
   ])("the voice agent's own question still makes a read-back (%#)", (ask, second) => {
     expect(check(ask, second)).toEqual({ confirmed: true, excerpt: "ok" });
+  });
+});
+
+describe("a permission read-back names the whole command, even alone on a call", () => {
+  const approve = (ask: ReadAsk, back: string, reply = "yes") =>
+    confirmVoiceDecision({
+      transcript: [
+        GREETING,
+        agent(`Claude in demo-app wants to use ${ask.toolName}: ${ask.text}. Okay?`),
+        owner("sure"),
+        agent(back),
+        owner(reply),
+      ],
+      asks: [ask],
+      index: 0,
+      decision: allow,
+      ownerWords: reply,
+    });
+  const FORCE: ReadAsk = {
+    text: "git push --force origin main",
+    nickname: "Claude in demo-app",
+    toolName: "Bash",
+  };
+  const WRITE: ReadAsk = { text: "the deploy config", nickname: "Claude in demo-app", toolName: "Write" };
+
+  it("never confirms a forced push from a read-back that leaves out --force", () => {
+    expect(approve(FORCE, "Allow Bash to git push origin main for Claude in demo-app? Yes?")).toEqual({
+      confirmed: false,
+      reason: "the request was not read back for a yes",
+    });
+    expect(approve(FORCE, "Allow Bash to git push --force origin main for Claude in demo-app? Yes?")).toEqual(
+      {
+        confirmed: true,
+        excerpt: "yes",
+      },
+    );
+  });
+
+  it("never confirms a Write from a read-back that names another tool, or none", () => {
+    for (const back of [
+      "Allow Read to the deploy config for Claude in demo-app? Yes?",
+      "Allow the deploy config for Claude in demo-app? Yes?",
+    ]) {
+      expect(approve(WRITE, back).confirmed).toBe(false);
+    }
+    expect(approve(WRITE, "Allow Write to the deploy config for Claude in demo-app? Yes?").confirmed).toBe(
+      true,
+    );
+  });
+
+  it("flags a clear no to the read-back of an allow, so the request ends", () => {
+    expect(
+      approve(FORCE, "Allow Bash to git push --force origin main for Claude in demo-app? Yes?", "nope"),
+    ).toEqual({
+      confirmed: false,
+      reason: "the owner said no to the read-back",
+      declined: true,
+    });
   });
 });

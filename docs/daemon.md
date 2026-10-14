@@ -359,8 +359,7 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
       `Write` one on the same file;
     - exactly one such candidate is read; more than one reads nothing.
     Alone on a call, an ask has nothing to be told apart from and the share
-    rule alone applies, so the persona's own example ("Allow pnpm test in
-    demo-app? Yes?") is recognised. With several asks, a read-back that leaves
+    rule alone applies to its readings. With several asks, a read-back that leaves
     out a distinguishing word (often the agent part of the session name, or a
     long command's tail) reads nothing, and the ask is texted. The ask's windows are the person's turns right
     after each such reading, up to the next agent turn of any kind: an agent
@@ -391,8 +390,15 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
     ask's: a "yes" or "confirm" that the ask text holds never counts, a `?` is
     looked for only outside the ask text said verbatim, and an ask whose text
     has a `?` ("Run the migration?") needs its read-back to say "yes" or
-    "confirm" when the text was not said verbatim. The owner's words must be
-    found in the window right after a read-back, checked newest first. The reply is everything the
+    "confirm" when the text was not said verbatim. The read-back is what the
+    owner approves, so for a permission request it must also name every token
+    of the command and the tool name, short ones included, even alone on a
+    call: "Allow Bash to git push origin main? Yes?" is no read-back of `git
+    push --force origin main`, and "Allow Read to ..." none of a `Write`. (The
+    persona's example "Allow pnpm test in demo-app? Yes?" leaves out the tool,
+    so a read-back that follows it literally is not confirmed and the ask is
+    texted; the fake provider's read-back names the tool.) The owner's words
+    must be found in the window right after a read-back, checked newest first. The reply is everything the
     owner said about the ask from that read-back on (its window and any later
     window of the ask). What it means is decided in two steps:
     - the fast path (`replyVerdict`) decides common replies at once. A reply
@@ -423,8 +429,10 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
 
     Doubt markers no longer reject a reply on their own: they keep the fast
     path from agreeing and send the reply to the judge. A clear-no reply, or a
-    judge's `declined`, leaves the allow not confirmed (the ask is texted).
-    Only a `deny` the voice agent submitted ends the request at once. Doubt
+    judge's `declined`, to the read-back of a submitted allow ends the request
+    at once as no answer (`unclear`), which denies it, exactly as an
+    unconfirmed `deny` does: the owner said no, so it is never texted for
+    approval. Doubt
     before the read-back does not count, so "hmm", then "Sorry, is that a yes
     or a no? Allow ...? Yes?", then "yeah go ahead" agrees, and so does "no",
     a read-back, then "okay yes" (a deny the voice agent submitted for the

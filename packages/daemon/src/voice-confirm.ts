@@ -231,7 +231,17 @@ export function soundsDoubtful(text: string, questions = true): boolean {
 const isKey = (word: string) => word.length >= 3 && !COMMON.has(word);
 
 /** Short words that never tell two commands apart in a read-back. */
-const FILLER_COMMAND_WORDS = wordSet("a an to in of on at by it is or as be");
+const FILLER_COMMAND_WORDS = wordSet("a an to in of on at by it is or as be please");
+
+/** Whether an ask is a permission request (a tool name without a kind counts as one). */
+const isPermission = (ask: ReadAsk) =>
+  ask.kind === "permission" || (ask.kind === undefined && ask.toolName !== undefined);
+
+/** Every token of a permission request's command and tool name, short ones included, minus filler. */
+function commandWords(ask: ReadAsk): Set<string> {
+  const words = [...tokens(ask.text.slice(0, READ_TEXT_LENGTH)), ...tokens(ask.toolName ?? "")];
+  return new Set(words.filter((w) => !COMMON.has(w) && !FILLER_COMMAND_WORDS.has(w)));
+}
 
 interface AskKeys {
   /** Every word that identifies the ask: its text, session name and tool. */
@@ -263,8 +273,8 @@ function keyWords(asks: readonly ReadAsk[]): AskKeys[] {
     return {
       all: keys.size > 0 ? keys : new Set(every),
       textKeys: new Set(text.filter(isKey)),
-      commandWords: new Set([...text, ...tool].filter((w) => !COMMON.has(w) && !FILLER_COMMAND_WORDS.has(w))),
-      permission: ask.kind === "permission" || (ask.kind === undefined && ask.toolName !== undefined),
+      commandWords: commandWords(ask),
+      permission: isPermission(ask),
     };
   });
   return parts.map((part, i) => {
@@ -395,17 +405,26 @@ export function answerWindows(
  * "confirm" when the text was not said verbatim. So an ask such as "Run the
  * migration?" or "Please confirm: deploy" never turns a plain re-reading of
  * itself into a read-back.
+ *
+ * The read-back is what the owner approves, so for a permission request it
+ * must name every token of the command and the tool name (`commandWords`),
+ * even alone on a call: "git push origin main, yes?" is never a read-back of
+ * "git push --force origin main", nor "Allow Read ..." of a `Write`.
  */
 function isReadBack(
   transcript: readonly TranscriptTurn[],
   read: readonly (number | undefined)[],
   index: number,
   at: number,
-  askText: string,
+  ask: ReadAsk,
 ): boolean {
   if (read[at] !== index || !read.slice(0, at).includes(index)) return false;
   const message = normalized(transcript[at]?.message ?? "");
-  const text = normalized(askText.slice(0, READ_TEXT_LENGTH)).trim();
+  if (isPermission(ask)) {
+    const said = new Set(tokens(message));
+    if (![...commandWords(ask)].every((word) => said.has(word))) return false;
+  }
+  const text = normalized(ask.text.slice(0, READ_TEXT_LENGTH)).trim();
   const own = new Set(tokens(text));
   if (tokens(message).some((word) => ASKS_FOR_YES.has(word) && !own.has(word))) return true;
   const outside = text.length > 0 ? message.split(text).join(" ") : message;
@@ -458,6 +477,12 @@ export type VoiceConfirmation =
   | {
       confirmed: false;
       reason: string;
+      /**
+       * Set when the owner said no to the read-back of an allow (the fast
+       * path's clear no, or the judge's `declined`): call orchestration ends
+       * the request at once as no answer, which denies it, as for a deny.
+       */
+      declined?: true;
       /**
        * Set when the fast path could not decide the owner's reply to a
        * read-back: what `judgeVoiceDecision` may ask a `ReplyJudge` about.
@@ -554,12 +579,12 @@ function confirmAllow(
   windows: readonly ReadingWindow[],
   ownerWords: string,
   askWords: ReadonlySet<string>,
-  askText: string,
+  ask: ReadAsk,
 ): VoiceConfirmation {
   // Newest first: the reply the model submitted is most likely to the last
   // read-back, and an earlier unclear reply ("yes, if the tests pass") then
   // comes before it and does not count.
-  const backs = windows.filter((window) => isReadBack(transcript, read, index, window.at, askText)).reverse();
+  const backs = windows.filter((window) => isReadBack(transcript, read, index, window.at, ask)).reverse();
   if (backs.length === 0) return { confirmed: false, reason: "the request was not read back for a yes" };
   const match = matchingTurns(
     ownerWords,
@@ -577,7 +602,9 @@ function confirmAllow(
   const excerpt = match.text.slice(0, MAX_EXCERPT);
   const verdict = replyVerdict(reply, transcript[from]?.message ?? "", askWords);
   if (verdict === "agreed") return { confirmed: true, excerpt };
-  if (verdict === "declined") return { confirmed: false, reason: "the owner said no to the read-back" };
+  if (verdict === "declined") {
+    return { confirmed: false, reason: "the owner said no to the read-back", declined: true };
+  }
   if (verdict === "unclear")
     return { confirmed: false, reason: "the owner's reply to the read-back is not clear" };
   return {
@@ -600,7 +627,8 @@ export function confirmVoiceDecision({
   if (opened.length === 0) return { confirmed: false, reason: "the ask's reading is not in the transcript" };
   if (decision.type === "allow") {
     const askWords = keyWords(asks)[index]?.all ?? new Set<string>();
-    return confirmAllow(transcript, read, index, opened, ownerWords, askWords, asks[index]?.text ?? "");
+    const ask = asks[index] ?? { text: "", nickname: "" };
+    return confirmAllow(transcript, read, index, opened, ownerWords, askWords, ask);
   }
   const windows = opened.map((window) => window.turns);
   const match = matchingTurns(ownerWords, windows);
@@ -666,7 +694,7 @@ export async function judgeVoiceDecision(
     const verdict = await Promise.race([judge.judge([...reply]), timeout]);
     if (verdict === "agreed") return { confirmed: true, excerpt };
     if (verdict === "declined")
-      return { confirmed: false, reason: "the judge heard a no in the owner's reply" };
+      return { confirmed: false, reason: "the judge heard a no in the owner's reply", declined: true };
     if (verdict === "timeout") return { confirmed: false, reason: "the judge did not answer in time" };
     return { confirmed: false, reason: "the judge found the owner's reply unclear" };
   } catch {
