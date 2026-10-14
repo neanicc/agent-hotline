@@ -15,8 +15,37 @@ give one of them a new instruction.
 
 Pick any ElevenLabs voice for the caller, including a clone of your own.
 
-> Status: pre-alpha. The repository currently holds the plan, agent workflows,
-> CI structure and scenario targets. Install instructions arrive with HL-01.
+> Status: pre-alpha. The workspace builds and tests, but the `hotline` command
+> only prints its version and help so far. Setup for real calls arrives with
+> later tickets ([plan section 9](docs/plan.md#9-tickets)).
+
+## Quickstart (development)
+
+You need Node 22 (the version in [.node-version](.node-version)) and Corepack,
+which provides the pinned pnpm from `package.json`.
+
+```sh
+corepack enable
+pnpm install --frozen-lockfile
+pnpm run build        # tsc project build into each package's dist/
+pnpm run typecheck    # build plus a typecheck of every test file
+pnpm run test         # Vitest, all packages
+pnpm run lint         # Biome lint and format check (`pnpm run format` fixes)
+pnpm run hotline --version   # runs the built CLI: "hotline 0.0.0"
+```
+
+`pnpm --filter @hotline/core test` runs one package's tests. CI calls the same
+steps through [scripts/ci/run.sh](scripts/ci/run.sh) (`setup`, `build`, `test`,
+`package`, `eval`); see [docs/ci.md](docs/ci.md). Nothing in the test suite
+touches a real network, phone, Twilio or ElevenLabs.
+
+| Path | Holds |
+| --- | --- |
+| `packages/core` | Contracts, config, ask queue, call policy, answer parsing (pure) |
+| `packages/daemon` | Local agent API, webhook routes, call orchestration, store, audit log |
+| `packages/providers` | Voice and SMS provider interfaces, real clients and fakes |
+| `packages/agents` | MCP server and hook adapters for Claude Code and Codex |
+| `apps/cli` | The `hotline` command |
 
 ## How it works
 
