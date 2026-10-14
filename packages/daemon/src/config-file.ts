@@ -11,6 +11,8 @@ export interface HotlinePaths {
   config: string;
   /** `secrets.json`: the 0600 fallback secret store, used when the Keychain is not. */
   secrets: string;
+  /** `hotline.db`: the daemon's SQLite store (sessions, asks, answers, calls, audit). */
+  database: string;
 }
 
 export interface PathOptions {
@@ -27,7 +29,12 @@ export function hotlinePaths({ env, homeDir }: PathOptions): HotlinePaths {
     throw new ConfigError("HOTLINE_HOME must be an absolute path", []);
   }
   const home = override || join(homeDir, ".hotline");
-  return { home, config: join(home, "config.json"), secrets: join(home, "secrets.json") };
+  return {
+    home,
+    config: join(home, "config.json"),
+    secrets: join(home, "secrets.json"),
+    database: join(home, "hotline.db"),
+  };
 }
 
 /**

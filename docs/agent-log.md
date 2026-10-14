@@ -131,3 +131,65 @@ Template:
   checks need. Putting the provider calls behind a separately signed helper with
   its own Keychain access list would close the gap. That is Tier 2 work, not a
   Tier 1 ticket.
+
+## 2026-10-13 — HL-04 Daemon skeleton (#PR)
+
+- Decision / change: `packages/daemon` gains the server, store, logging and
+  lifecycle, and `apps/cli` gains `hotline daemon [--port <n>]`. Fastify is pinned
+  at 5.12.5, the newest release at least two weeks old. 5.12.6 and 5.12.7 came out
+  today. 5.12.6 fixes GHSA-389g-gv7q-r4x8, a header validation bypass through
+  case-sensitive `propertyNames`, which does not apply: Hotline declares no header
+  schemas and does its own auth in hooks. Bump once 5.12.7 is two weeks old.
+  SQLite uses Node's built-in `node:sqlite`, so there is no native dependency. It
+  works unflagged on Node 22.23.1 (SQLite 3.51.3) and 24.11.0 (3.50.4), and Node
+  unflagged it in 22.13.0, which is already `engines.node`. It prints a one-time
+  `ExperimentalWarning`. The CLI imports the daemon lazily, so `hotline --version`
+  does not.
+- Decisions without a plan answer: (1) **Two listeners**, both on 127.0.0.1 and
+  neither configurable to 0.0.0.0. The agent API is on `daemon.port`. The webhook
+  listener, which serves only `/hooks/*`, is on `daemon.port + 1` and is the
+  tunnel's target. A tunnel therefore cannot reach the agent API whatever its path
+  rules, which is stronger than one port with a prefix. Core's config was left
+  alone, so `daemon.port` 65535 is refused at startup. (2) The API token is the
+  existing `daemon.apiToken` secret: 32 random bytes in base64url, created on
+  first start in the configured store (Keychain on macOS, else the `0600` file)
+  and compared in constant time over SHA-256 digests. (3) The agent API also
+  requires a loopback `Host` header, against DNS rebinding and a misrouted tunnel.
+  Every path needs the token, so an unauthenticated caller cannot tell which
+  routes exist. (4) Webhook routes must declare a verifier. A route without one is
+  refused in `onRequest`, before the body is read, and the verifier runs in
+  `preHandler`, where anything but `true` (a throw included) is a 403. All of
+  `/hooks/*` answers 403 until HL-07 and HL-08 add verified routes. Rejections log
+  method, path and reason only. (5) The store keeps validated JSON records plus
+  query columns. Migrations use `PRAGMA user_version`, one transaction each, and
+  a newer schema is refused. `recordAnswer` runs `answerProblem` inside the
+  insert transaction, and `answered` cannot be set any other way. Triggers make
+  the audit table append-only. The database is `0600` and gets the same
+  symlink and ownership checks as the config. (6) Redaction runs on each final
+  JSON log line, not on chosen fields, so messages, serializers and error stacks
+  are covered. Numbers keep their last four digits. Known secret values,
+  credential-like `name=value` and JSON pairs, Bearer credentials, PEM keys,
+  common key formats and long letter-digit runs are removed. Twilio CA/SM SIDs,
+  ElevenLabs ids and UUIDs are kept so logs stay usable. (7) Shutdown: the first
+  SIGINT or SIGTERM closes both listeners (in-flight requests finish), then the
+  database, and exits 0. After 10 s it gives up and exits 1. A second signal
+  gets Node's default handling.
+- Evidence (automated, worktree, Node 24.11.0 and 22.23.1): `run.sh build`
+  passes (Biome, `tsc -b`, typecheck, CLI smoke) and `run.sh test` runs 229 tests
+  in 17 files. New daemon tests and the extended CLI tests cover redaction, the
+  token, the store and migrations on temp-directory databases, both listeners on
+  ephemeral 127.0.0.1 ports, `runDaemon` with SIGINT and SIGTERM on an injected
+  signal source, the shutdown timeout, and the CLI command. Mutation checks:
+  making `tokensMatch` always true fails 3 tests; removing the `onRequest`
+  webhook guard fails 1, because the `preHandler` check still answers 403.
+  Manual: the built CLI ran as a child process in a temp `HOTLINE_HOME`. Health
+  with the token got 200, without it 401, and a webhook POST got 403. A real
+  SIGTERM and a real SIGINT each exited 0 in about 5 ms, and the logs held
+  neither the token nor the number. No scenario suite exists yet (HL-12). Real
+  agent integration and live calls do not apply.
+- Open issues or follow-ups: add `daemon.webhookPort` to the config contract
+  (lane:core) if the `port + 1` convention gets in the way. HL-07 needs a
+  urlencoded body parser on the webhook listener and HL-08 the raw body for
+  HMAC; both plug into `WebhookRoute`. HL-13 should extend the redaction corpus
+  with `.env` files and real provider payload shapes. Bump Fastify once a fixed
+  release is two weeks old.
