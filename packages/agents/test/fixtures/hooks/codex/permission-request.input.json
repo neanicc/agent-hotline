@@ -1,0 +1,14 @@
+{
+  "session_id": "00000000-0000-4000-8000-000000000002",
+  "transcript_path": "/Users/example/.codex/sessions/2026/10/13/rollout-2026-10-13T21-58-00-00000000-0000-4000-8000-000000000002.jsonl",
+  "cwd": "/Users/example/src/demo-app",
+  "hook_event_name": "PermissionRequest",
+  "model": "example-model",
+  "permission_mode": "default",
+  "turn_id": "turn-0001",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "git push origin agent/demo",
+    "description": "Push the branch to the remote"
+  }
+}

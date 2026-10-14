@@ -6,7 +6,15 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["packages/**", "apps/**", "test/**", "*.json", "*.ts", "!**/dist"]
+    "includes": [
+      "packages/**",
+      "apps/**",
+      "test/**",
+      "*.json",
+      "*.ts",
+      "!**/dist",
+      "!packages/agents/test/fixtures/hooks/codex/schema"
+    ]
   },
   "formatter": {
     "enabled": true,

@@ -12,5 +12,8 @@
   },
   "scripts": {
     "test": "vitest run --root ../.. --project core"
+  },
+  "dependencies": {
+    "zod": "4.6.5"
   }
 }
