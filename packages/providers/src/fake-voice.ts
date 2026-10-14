@@ -330,6 +330,10 @@ export class FakeVoiceProvider implements VoiceProvider {
     };
     // The short read-back the prompt asks for before an allow: the ask's own
     // (redacted, cut) text and session name, taken from its fenced `asks` line.
+    // That line comes from `describeAsk` in voice.ts, whose fences are in this
+    // order: session name, then the tool name when the ask has one, then the
+    // text, then any options. The fake-voice tests pin the read-back's exact
+    // words, so a change to that layout fails them.
     const readBack = (ask: number) => {
       const line = placed?.variables.asks.split("\n")[ask - 1] ?? "";
       const fenced = [...line.matchAll(/<agent_text>(.*?)<\/agent_text>/g)].map((m) => m[1] ?? "");
