@@ -168,6 +168,16 @@ describe("hotline init", () => {
     expect(await verifyPin("482913", config.owner.pinHash)).toBe(true);
   });
 
+  it("refuses --force over a config it cannot read, rather than dropping its ids", async () => {
+    await mkdir(setup.hotlineHome, { mode: 0o700 });
+    const configPath = join(setup.hotlineHome, "config.json");
+    await writeFile(configPath, '{"voice": {"agentId": "agent_fake_1"', { mode: 0o600 });
+    const result = await cli(["init", ...FLAGS, "--force"], testContext(setup, { env: env(SECRETS) }));
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("is not a JSON object; fix it, or move it aside");
+    expect(await readFile(configPath, "utf8")).toBe('{"voice": {"agentId": "agent_fake_1"');
+  });
+
   it("validates settings before writing anything", async () => {
     const result = await cli(
       ["init", ...FLAGS.map((flag) => (flag === "+15555550100" ? "5555550100" : flag))],

@@ -3,8 +3,7 @@
 // agent's config files. Each changed file gets a timestamped backup first, and
 // the change is printed as a diff. Running it twice changes nothing.
 import { randomBytes } from "node:crypto";
-import { constants } from "node:fs";
-import { chmod, copyFile, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
   AGENT_FLAGS,
@@ -206,10 +205,9 @@ export async function installCommand(
       if (dryRun) continue;
       if (current !== undefined) {
         const backup = `${path}.hotline-backup-${stamp(now)}`;
-        // COPYFILE_EXCL: never overwrite an earlier backup. Backups can hold
-        // private settings, so only the owner may read them.
-        await copyFile(path, backup, constants.COPYFILE_EXCL);
-        await chmod(backup, 0o600);
+        // "wx": never overwrite an earlier backup. Backups can hold private
+        // settings, so they are created owner-only (0600) from the start.
+        await writeFile(backup, current.text, { mode: 0o600, flag: "wx" });
         out.stdout(`backup: ${backup}`);
       } else {
         await mkdir(dirname(path), { recursive: true, mode: 0o700 });

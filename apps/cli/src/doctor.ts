@@ -270,9 +270,10 @@ async function elevenLabsChecks(
     checks.push({ status: "fail", name, detail: "cannot read the agent without the API key" });
     return checks;
   }
-  const { AGENT_DEFINITION_VERSION, TOOL_NAMES } = await import("@hotline/providers");
+  const { AGENT_DEFINITION_VERSION, TOOL_NAMES, toolPath } = await import("@hotline/providers");
   try {
-    const deployed = await new ElevenLabsAdmin(apiKey, fetchFor(context)).getAgent(agentId);
+    const admin = new ElevenLabsAdmin(apiKey, fetchFor(context));
+    const deployed = await admin.getAgent(agentId);
     const version = deployed.definitionVersion;
     checks.push(
       version === AGENT_DEFINITION_VERSION
@@ -296,6 +297,27 @@ async function elevenLabsChecks(
       const id = recorded[tool];
       return id === undefined || !deployed.toolIds.includes(id);
     });
+    // A tool that still calls an old tunnel URL, or sends another secret, fails every
+    // answer closed while everything else looks healthy.
+    const stale: string[] = [];
+    if (missing.length === 0) {
+      const origin =
+        config.tunnel.publicUrl === undefined ? undefined : new URL(config.tunnel.publicUrl).origin;
+      for (const tool of TOOL_NAMES) {
+        const deployedTool = await admin.getTool(recorded[tool] as string);
+        const urlOk = origin !== undefined && deployedTool.url === `${origin}/hooks${toolPath(tool)}`;
+        const secretOk =
+          config.voice.toolSecretId !== undefined && deployedTool.secretId === config.voice.toolSecretId;
+        if (!urlOk || !secretOk) stale.push(tool);
+      }
+    }
+    if (stale.length > 0) {
+      checks.push({
+        status: "fail",
+        name,
+        detail: `the tools ${stale.join(", ")} call another URL or use another secret than this config; run hotline voice apply`,
+      });
+    }
     checks.push(
       missing.length === 0
         ? { status: "pass", name, detail: `the agent has all ${TOOL_NAMES.length} Hotline tools` }
@@ -356,18 +378,20 @@ export async function runChecks(context: CliContext, home: string | undefined): 
       ? { status: "pass", name: "away", detail: `away mode is ${away.away ? "on" : "off"}` }
       : { status: "warn", name: "away", detail: `away mode reads as off: ${away.problem}` },
   );
-  let user: ConfigLocation;
-  let project: ConfigLocation;
+  const scopes: ConfigLocation[] = [];
   try {
-    user = configLocation(context, home, false);
-    project = configLocation(context, home, true);
+    const user = configLocation(context, home, false);
+    const project = configLocation(context, home, true);
+    scopes.push(user);
+    // In the home folder itself, `.claude/settings.json` is the user file: check it once.
+    const inHome = project.project === user.home;
+    if (!inHome) scopes.push(project);
   } catch (error) {
     checks.push({ status: "fail", name: "agents", detail: (error as Error).message });
     return checks;
   }
   for (const agent of ["claude", "codex"] as const) {
-    checks.push(...(await agentChecks(agent, user, config)));
-    if (project.project !== user.home) checks.push(...(await agentChecks(agent, project, config)));
+    for (const scope of scopes) checks.push(...(await agentChecks(agent, scope, config)));
   }
   checks.push(claudeIdleCheck(context, config));
   checks.push(...(await elevenLabsChecks(context, config, values.get("elevenlabs.apiKey"))));

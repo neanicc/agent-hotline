@@ -10,7 +10,8 @@
 //         https://elevenlabs.io/docs/api-reference/workspace/secrets/create, .../secrets/update
 //   POST  /v1/convai/tools              {tool_config} -> {id}
 //   PATCH /v1/convai/tools/{tool_id}    {tool_config}
-//         https://elevenlabs.io/docs/api-reference/tools/create, .../tools/update
+//   GET   /v1/convai/tools/{tool_id}    -> {id, tool_config: {api_schema: {url, request_headers}}}
+//         https://elevenlabs.io/docs/api-reference/tools/create, .../tools/update, .../tools/get
 //   POST  /v1/convai/agents/create      agent body -> {agent_id}
 //   PATCH /v1/convai/agents/{agent_id}  agent body
 //   GET   /v1/convai/agents/{agent_id}  -> {agent_id, tags, conversation_config, ...}
@@ -24,6 +25,7 @@ import {
   hotlineToolConfigs,
   isVoiceId,
   TOOL_NAMES,
+  TOOL_SECRET_HEADER,
 } from "@hotline/providers";
 import type { CliFetch } from "./setup.js";
 
@@ -50,6 +52,13 @@ export interface DeployedAgent {
   definitionVersion?: number;
   voiceId?: string;
   toolIds: string[];
+}
+
+export interface DeployedTool {
+  /** `tool_config.api_schema.url`: where ElevenLabs sends this tool's calls. */
+  url?: string;
+  /** The workspace secret id behind the tool-secret header. */
+  secretId?: string;
 }
 
 export interface VoiceSummary {
@@ -152,6 +161,20 @@ export class ElevenLabsAdmin {
     await this.call("PATCH", `/v1/convai/tools/${ElevenLabsAdmin.id(toolId, "a tool")}`, "update a tool", {
       tool_config: toolConfig,
     });
+  }
+
+  async getTool(toolId: string): Promise<DeployedTool> {
+    const body = await this.call(
+      "GET",
+      `/v1/convai/tools/${ElevenLabsAdmin.id(toolId, "a tool")}`,
+      "read a tool",
+    );
+    const schema = record(record(body.tool_config).api_schema);
+    const header = record(record(schema.request_headers)[TOOL_SECRET_HEADER]);
+    return {
+      ...(typeof schema.url === "string" ? { url: schema.url } : {}),
+      ...(typeof header.secret_id === "string" ? { secretId: header.secret_id } : {}),
+    };
   }
 
   async createAgent(agent: unknown): Promise<string> {

@@ -121,6 +121,22 @@ describe("editHooks", () => {
       },
     });
     expect(readHooks(notOurs, "s", "claude")).toEqual([]);
+    // Without "hook", or with a bare program other than hotline, a command is never Hotline's.
+    const lookalikes = JSON.stringify({
+      hooks: {
+        PermissionRequest: [
+          {
+            hooks: [
+              { type: "command", command: "claude permission" },
+              { type: "command", command: "myguard hook claude permission" },
+              { type: "command", command: "hook claude permission" },
+            ],
+          },
+        ],
+      },
+    });
+    expect(readHooks(lookalikes, "s", "claude")).toEqual([]);
+    expect(editHooks(lookalikes, "s", "claude", "hotline", true)).toBe(lookalikes);
     expect(editHooks(notOurs, "s", "claude", "hotline", true)).toBe(notOurs);
   });
 

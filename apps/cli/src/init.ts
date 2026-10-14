@@ -104,14 +104,20 @@ export async function initCommand(
     });
     if (existing !== undefined) {
       if (!force) throw new InitError(`${paths.config} already exists; pass --force to replace its settings`);
+      // Never drop a config silently: it holds the ElevenLabs ids, and losing them
+      // would orphan the deployed agent and tools.
+      let parsed: unknown;
       try {
-        const parsed: unknown = JSON.parse(existing);
-        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-          raw = parsed as Record<string, unknown>;
-        }
+        parsed = JSON.parse(existing);
       } catch {
-        // Unreadable: start over.
+        parsed = undefined;
       }
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        throw new InitError(
+          `${paths.config} is not a JSON object; fix it, or move it aside to start over (note its voice ids first)`,
+        );
+      }
+      raw = parsed as Record<string, unknown>;
     }
     const owner = section(raw, "owner");
     const quietHours = section(raw, "quietHours");

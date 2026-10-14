@@ -52,6 +52,8 @@ users can open is made private.
   missing. Credentials it is not given are reported as `not set`.
 - An existing config is kept unless you pass `--force`. With `--force`, settings
   you do not give again (rate limits, nicknames, voice ids, the PIN hash) stay.
+  A config `init` cannot read is refused, never replaced: it may hold the
+  ElevenLabs ids, and dropping them would orphan the deployed agent.
 - Output shows the owner number as its last four digits and never a secret.
 
 ## `hotline voice`
@@ -68,7 +70,8 @@ users can open is made private.
 - `hotline voice list` lists the voices in your ElevenLabs account (up to 10
   pages of 100, and says so when there are more) and marks the current one.
 - `hotline voice set <voice id>` checks the id with `isVoiceId` before anything
-  is saved or sent, saves `voice.voiceId`, and re-applies the agent. See
+  is saved or sent, saves `voice.voiceId`, and re-applies the agent. If the
+  re-apply fails it says the voice was saved but not applied, and exits 1. See
   [voice.md](voice.md) for choosing or cloning a voice.
 
 ElevenLabs endpoints and sources are listed at the top of
@@ -96,8 +99,8 @@ Writes the entries from [mcp.md](mcp.md#config-snippets) and
   diff only.
 - Running it again changes nothing. An older Hotline hook (another launcher, a
   different wait) is replaced, not duplicated. A hook counts as Hotline's when
-  its command is exactly one program (or `node <file>.js`), then `hook <agent>
-  <event>` and only `--wait-seconds` or `--port`, whatever the launcher.
+  its command is `hotline`, an absolute path or `node <file>.js`, then exactly
+  `hook <agent> <event>` and only `--wait-seconds` or `--port`.
 - A Codex config that already defines `mcp_servers.hotline` in any TOML form
   (a table, a quoted name, `hotline = {...}` under `[mcp_servers]`, dotted or
   inline keys) is refused, never edited.
@@ -131,7 +134,7 @@ fails.
 | away mode | | the state file is unusable (it then reads as off) |
 | Claude Code and Codex installs (user, and the current project) | a hook's `--wait-seconds` is not below its `timeout`; Codex `tool_timeout_sec` is not above `policy.askTimeoutMinutes`; a Claude per-server `timeout` shorter than that | not installed; a hook or the MCP server is missing; less than 30 s between wait and timeout; a wait shorter than the ask timeout |
 | Claude Code idle timeout | `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` is not above the ask timeout | it is not set in this shell |
-| ElevenLabs agent | no phone number id or agent; the deployed agent's `definition-v<n>` tag is not `AGENT_DEFINITION_VERSION`; it lacks one of the four tools, or their ids are not recorded | its voice differs from the config |
+| ElevenLabs agent | no phone number id or agent; the deployed agent's `definition-v<n>` tag is not `AGENT_DEFINITION_VERSION`; it lacks one of the four tools, or their ids are not recorded; a tool calls another URL than `<tunnel.publicUrl>/hooks/el/tools/<name>` or uses another secret id than `voice.toolSecretId` | its voice differs from the config |
 | webhooks | `tunnel.publicUrl` is unset while a real provider needs it | |
 
 The monthly cost estimate from plan section 8 is not in `doctor` yet.
@@ -143,5 +146,12 @@ test message that needs no answer. It refuses unless the config, the agent id,
 the phone number id and the API key exist, prints that it will ring the owner's
 phone (last four digits), and asks you to type `yes` unless you pass `--yes`.
 With `voice.provider` set to `fake` nothing rings: the fake provider records
-the call. Tests use the fake provider or a fake HTTP layer only; a real test
+the call.
+
+A test call goes straight to the voice provider, not through the daemon's call
+policy, so quiet hours and the call rate limits do not apply to it. Instead it
+keeps its own cooldown: two minutes between real test calls (`test-call.json` in
+the hotline home). If its post-call webhook reaches the daemon, the daemon does
+not know the conversation, records `voice.post-call-ignored` in the audit log
+and changes nothing. Tests use the fake provider or a fake HTTP layer only; a real test
 call is part of the [live check](live-check.md), done by a human.

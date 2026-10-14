@@ -46,17 +46,20 @@ export function hookCommand(launcher: string, agent: AgentFlag, event: HookEvent
 
 /**
  * Whether a hook command is Hotline's `<launcher> hook <agent> <event>`, whatever
- * launcher wrote it (`hotline`, a `--command` path, or `node .../main.js`). The
- * shape must match exactly: one program word, then `hook <agent> <event>` and
- * only Hotline's own `--wait-seconds` and `--port` options.
+ * launcher wrote it (`hotline`, a `--command` absolute path, or `node .../main.js`).
+ * The shape must match exactly: the launcher, then `hook <agent> <event>` and only
+ * Hotline's own `--wait-seconds` and `--port` options.
  */
 function isHotlineHook(command: unknown, agent: AgentFlag, event: HookEvent): boolean {
   if (typeof command !== "string") return false;
   const words = command.trim().split(/\s+/);
   const at = words.indexOf("hook");
+  if (at < 1) return false;
   const program = words.slice(0, at);
+  // `hotline`, an absolute path (`--command`), or `node <file>.js`; never a bare other program.
   const programOk =
-    program.length === 1 || (program.length === 2 && program[0] === "node" && /\.js$/.test(program[1] ?? ""));
+    (program.length === 1 && (program[0] === "hotline" || (program[0] ?? "").startsWith("/"))) ||
+    (program.length === 2 && program[0] === "node" && /\.js$/.test(program[1] ?? ""));
   if (!programOk || words[at + 1] !== agent || words[at + 2] !== HOOK_EVENTS[event]) return false;
   const options = words.slice(at + 3);
   for (let index = 0; index < options.length; index += 2) {

@@ -1,6 +1,8 @@
 // `hotline voice list|set|apply` and `hotline test-call`. Every ElevenLabs request
 // goes through the injected `fetch`; tests pass a fake and never reach the network.
 import { randomBytes } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { Config } from "@hotline/core";
 import type { VoiceProvider } from "@hotline/providers";
 import type { CliContext, Output } from "./cli.js";
@@ -115,7 +117,15 @@ export async function voiceCommand(
         out.stdout("Not applied yet: set tunnel.publicUrl, then run hotline voice apply");
         return 0;
       }
-      await apply(context, out, paths.config, config);
+      try {
+        await apply(context, out, paths.config, config);
+      } catch (error) {
+        // Say plainly that the phone still uses the old voice.
+        out.stderr(
+          `hotline voice set: saved, but not applied: ${(error as Error).message}. The agent keeps its old voice until hotline voice apply succeeds.`,
+        );
+        return 1;
+      }
       return 0;
     }
     if (rest.length > 0) {
@@ -149,6 +159,22 @@ export async function voiceCommand(
   }
 }
 
+/** Shortest time between two real test calls. */
+export const TEST_CALL_COOLDOWN_MS = 2 * 60 * 1000;
+
+/** When the last real test call was placed (ms), or undefined. An unreadable stamp counts as none. */
+async function lastTestCall(path: string): Promise<number | undefined> {
+  const { privatePathProblem } = await import("@hotline/daemon");
+  if ((await privatePathProblem(path)) !== undefined) return undefined;
+  try {
+    const at = (JSON.parse(await readFile(path, "utf8")) as { at?: unknown }).at;
+    const time = typeof at === "string" ? Date.parse(at) : Number.NaN;
+    return Number.isNaN(time) ? undefined : time;
+  } catch {
+    return undefined;
+  }
+}
+
 /** The one ask a test call reads out. Fixed words only. */
 const TEST_ASK = {
   askId: "test-call",
@@ -179,8 +205,21 @@ export async function testCallCommand(
   const { createRedactor } = await import("@hotline/daemon");
   const { ElevenLabsVoiceProvider, FakeVoiceProvider } = await import("@hotline/providers");
   try {
-    const { config, secrets } = await loadSetup(context);
+    const { paths, config, secrets } = await loadSetup(context);
     const owner = config.owner.phoneNumber;
+    // test-call goes around the daemon's call policy (rate limits, quiet hours), so
+    // it keeps its own cooldown: a loop of `test-call --yes` cannot ring on and on.
+    const now = (context.now ?? (() => new Date()))();
+    const stampPath = join(paths.home, "test-call.json");
+    const last = await lastTestCall(stampPath);
+    if (
+      config.voice.provider !== "fake" &&
+      last !== undefined &&
+      now.getTime() - last < TEST_CALL_COOLDOWN_MS
+    ) {
+      const wait = Math.ceil((TEST_CALL_COOLDOWN_MS - (now.getTime() - last)) / 1000);
+      throw new SetupError(`a test call was placed less than 2 minutes ago; try again in ${wait}s`);
+    }
     let provider: VoiceProvider;
     if (config.voice.provider === "fake") {
       provider = new FakeVoiceProvider({
@@ -226,6 +265,11 @@ export async function testCallCommand(
         out.stdout("Not ringing.");
         return 1;
       }
+    }
+    if (config.voice.provider !== "fake") {
+      // Recorded before the request: a call that fails after ringing still counts.
+      const { writePrivateFile } = await import("@hotline/daemon");
+      await writePrivateFile(stampPath, `${JSON.stringify({ version: 1, at: now.toISOString() })}\n`);
     }
     const placed = await provider.callOwner({
       callId: `test-${randomBytes(6).toString("hex")}`,

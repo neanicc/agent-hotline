@@ -1510,6 +1510,23 @@ Template:
     diff falls back to a block replacement past 1,000,000 table cells.
   - Each fix has a test; `scripts/ci/run.sh build` and `test` pass after
     catching up with main (HL-14b, definition v3): 1297 tests in 53 files.
+- Staff review fixes on PR #45 (heads 517d927 and a4ddf9a):
+  - `doctor` reads each tool (`GET /v1/convai/tools/{id}`) and fails when its
+    URL is not `<tunnel.publicUrl>/hooks/el/tools/<name>` or its header uses
+    another secret id than `voice.toolSecretId`.
+  - `test-call` bypasses the daemon's call policy by design, so it keeps a
+    two-minute cooldown (`test-call.json`); the bypass is documented. The
+    daemon already ignores and audits a post-call for an unknown conversation
+    (`voice.post-call-ignored`, covered in `orchestration.test.ts`).
+  - Hook ownership needs `hook` after a launcher that is `hotline`, an
+    absolute path or `node <file>.js`; a bare `myguard hook ...` is never
+    Hotline's.
+  - `init --force` refuses an unreadable config instead of dropping its ids;
+    `voice set` says "saved, but not applied" when the re-apply fails;
+    backups are created 0600 with `wx` instead of copy-then-chmod.
+  - Not changed: `doctor` still sends the token to whatever holds the
+    daemon's port on 127.0.0.1, the same trust the MCP server and hooks
+    already place in that port (docs/mcp.md).
 - Open issues or follow-ups:
   - `doctor` does not show the monthly cost estimate from plan section 8 yet.
   - Move the ElevenLabs management client into `packages/providers` once

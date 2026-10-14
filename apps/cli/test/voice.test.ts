@@ -222,6 +222,18 @@ describe("hotline voice set", () => {
   });
 });
 
+describe("hotline voice set, when the apply fails", () => {
+  it("says the voice was saved but not applied, and exits 1", async () => {
+    await writeSetup({ agentId: "agent_fake_1", toolSecretId: "sec_fake_1" });
+    const fetch = fakeFetch(route("PATCH", "/v1/convai/secrets/sec_fake_1", 401));
+    const result = await cli(["voice", "set", "MyCl0neId0000000000a"], testContext(setup, { fetch }));
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("saved, but not applied");
+    expect(result.stderr).toContain("keeps its old voice until hotline voice apply succeeds");
+    expect((await readConfig()).voice.voiceId).toBe("MyCl0neId0000000000a");
+  });
+});
+
 describe("hotline voice list", () => {
   it("lists valid voices as one safe line each and marks the current one", async () => {
     await writeSetup({ voiceId: "MyCl0neId0000000000a" });
@@ -305,6 +317,23 @@ describe("hotline test-call", () => {
     expect(body.to_number).toBe("+15555550100");
     expect(body.agent_id).toBe("agent_fake_1");
     expect(body.conversation_initiation_client_data.dynamic_variables.asks).toContain("This is a test call");
+  });
+
+  it("keeps a 2-minute cooldown between real test calls", async () => {
+    await writeSetup({ agentId: "agent_fake_1" });
+    const fetch = fakeFetch(
+      route("POST", "/v1/convai/twilio/outbound-call", 200, {
+        success: true,
+        conversation_id: "conv_test_1",
+      }),
+    );
+    const at = (time: string) => testContext(setup, { fetch, now: () => new Date(time) });
+    expect((await cli(["test-call", "--yes"], at("2026-10-14T12:00:00.000Z"))).code).toBe(0);
+    const soon = await cli(["test-call", "--yes"], at("2026-10-14T12:01:00.000Z"));
+    expect(soon.code).toBe(1);
+    expect(soon.stderr).toContain("try again in 60s");
+    expect((await cli(["test-call", "--yes"], at("2026-10-14T12:02:01.000Z"))).code).toBe(0);
+    expect(fetch.requests).toHaveLength(2);
   });
 
   it("refuses without a config, an agent or the API key", async () => {

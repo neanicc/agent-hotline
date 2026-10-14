@@ -6,7 +6,15 @@ import { FileSecretStore, writePrivateFile } from "@hotline/daemon";
 import { AGENT_DEFINITION_VERSION } from "@hotline/providers";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { CliFetch } from "../src/setup.js";
-import { cli, fakeFetch, route, type TempSetup, tempSetup, testContext } from "./setup-helpers.js";
+import {
+  cli,
+  fakeFetch,
+  type Recorded,
+  route,
+  type TempSetup,
+  tempSetup,
+  testContext,
+} from "./setup-helpers.js";
 
 const SECRETS = {
   "daemon.apiToken": "fake-api-token-0123456789abcdefghijklmnopqrstu",
@@ -32,6 +40,7 @@ async function writeSetup(overrides: Record<string, unknown> = {}) {
       agentPhoneNumberId: "phnum_fake_1",
       voiceId: "Voice0000000000000001",
       toolIds: TOOL_IDS,
+      toolSecretId: "sec_fake_1",
     },
     sms: { provider: "fake" },
     tunnel: { publicUrl: "https://hotline-fake.example.com" },
@@ -50,9 +59,24 @@ async function installAll() {
   }
 }
 
-function healthy(version = AGENT_DEFINITION_VERSION) {
+const TOOL_NAME_BY_ID = Object.fromEntries(Object.entries(TOOL_IDS).map(([name, id]) => [id, name]));
+
+function healthy(version = AGENT_DEFINITION_VERSION, toolOrigin = "https://hotline-fake.example.com") {
   return fakeFetch(
     route("GET", "/v1/health", 200, { ok: true, version: "0.0.0" }),
+    route("GET", /^\/v1\/convai\/tools\/t\d$/, 200, (request: Recorded) => {
+      const id = new URL(request.url).pathname.split("/").at(-1) ?? "";
+      return {
+        id,
+        tool_config: {
+          type: "webhook",
+          api_schema: {
+            url: `${toolOrigin}/hooks/el/tools/${TOOL_NAME_BY_ID[id]}`,
+            request_headers: { "x-hotline-tool-secret": { secret_id: "sec_fake_1" } },
+          },
+        },
+      };
+    }),
     route("GET", "/v1/convai/agents/agent_fake_1", 200, {
       agent_id: "agent_fake_1",
       tags: ["agent-hotline", `definition-v${version}`],
@@ -110,6 +134,30 @@ describe("hotline doctor", () => {
     expect(await toolsFail({ toolIds: { ...TOOL_IDS, get_status: "t9" } })).toContain(
       "lacks the tools get_status",
     );
+  });
+
+  it("fails when the tools still call an old tunnel URL or use another secret", async () => {
+    await writeSetup();
+    await installAll();
+    const moved = await cli(
+      ["doctor", "--home", setup.home],
+      context(healthy(AGENT_DEFINITION_VERSION, "https://old.example.com")),
+    );
+    expect(moved.code).toBe(1);
+    expect(lines(moved.stdout, "FAIL").join("\n")).toContain(
+      "the tools submit_answer, verify_pin, get_status, send_instruction call another URL or use another secret",
+    );
+    await writeSetup({
+      voice: {
+        agentId: "agent_fake_1",
+        agentPhoneNumberId: "phnum_fake_1",
+        voiceId: "Voice0000000000000001",
+        toolIds: TOOL_IDS,
+        toolSecretId: "sec_other",
+      },
+    });
+    const rekeyed = await cli(["doctor", "--home", setup.home], context());
+    expect(lines(rekeyed.stdout, "FAIL").join("\n")).toContain("use another secret");
   });
 
   it("fails when the deployed agent is an older definition", async () => {
