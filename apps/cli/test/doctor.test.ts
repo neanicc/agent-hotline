@@ -401,6 +401,79 @@ describe("hotline doctor reply judge (HL-09d)", () => {
     expect(host.runs).toEqual([]);
   });
 
+  it("names the credential the judge uses, never a value (HL-09e)", async () => {
+    await writeSetup();
+    const claude = await cli(
+      ["doctor", "--home", setup.home],
+      context(healthy(), {}, new FakeJudgeHost({ claude: CLAUDE_PATH })),
+    );
+    expect(judgeLines(claude.stdout)).toEqual([
+      expect.stringMatching(/^PASS\s+judge\s+claude-code: .*; credential: plan login \(Claude Code\);/),
+    ]);
+    const codex = await cli(
+      ["doctor", "--home", setup.home],
+      context(healthy(), {}, new FakeJudgeHost({ codex: "/fake/bin/codex" })),
+    );
+    expect(judgeLines(codex.stdout)).toEqual([
+      expect.stringMatching(/^PASS\s+judge\s+codex: .*; credential: plan login \(Codex\);/),
+    ]);
+    await writeSetup({ judge: { backend: "anthropic-api" } });
+    const key = "sk-ant-fake-judge-key-0002";
+    await new FileSecretStore(join(setup.hotlineHome, "secrets.json")).set("anthropic.apiKey", key);
+    const api = await cli(
+      ["doctor", "--home", setup.home],
+      context(healthy(), {}, new FakeJudgeHost({ claude: CLAUDE_PATH })),
+    );
+    expect(judgeLines(api.stdout)).toEqual([
+      expect.stringMatching(
+        /^PASS\s+judge\s+anthropic-api: .*; credential: Anthropic API key \(judge\.backend: anthropic-api\);/,
+      ),
+    ]);
+    expect(api.stdout + api.stderr).not.toContain(key);
+  });
+
+  it("warns that an API key in the environment is ignored by the plan-login backends, never printing it", async () => {
+    await writeSetup();
+    const anthropicKey = "sk-ant-fake-env-key-0001";
+    const openaiKey = "sk-openai-fake-env-key-0001";
+    const both = await cli(
+      ["doctor", "--home", setup.home],
+      context(
+        healthy(),
+        { ANTHROPIC_API_KEY: anthropicKey, OPENAI_API_KEY: openaiKey },
+        new FakeJudgeHost({ claude: CLAUDE_PATH }),
+      ),
+    );
+    expect(judgeLines(both.stdout)).toEqual([
+      expect.stringMatching(/^PASS\s+judge\s+claude-code: .*plan login \(Claude Code\)/),
+      expect.stringMatching(
+        /^WARN\s+judge\s+ANTHROPIC_API_KEY and OPENAI_API_KEY are set in this environment .*ignores it and runs claude-code on your plan login, not API billing/,
+      ),
+    ]);
+    expect(both.stdout + both.stderr).not.toContain(anthropicKey);
+    expect(both.stdout + both.stderr).not.toContain(openaiKey);
+    expect(both.code).toBe(0);
+    const codex = await cli(
+      ["doctor", "--home", setup.home],
+      context(healthy(), { OPENAI_API_KEY: openaiKey }, new FakeJudgeHost({ codex: "/fake/bin/codex" })),
+    );
+    expect(judgeLines(codex.stdout)[1]).toMatch(
+      /^WARN\s+judge\s+OPENAI_API_KEY is set in this environment .*runs codex on your plan login/,
+    );
+    // No warning without a key, or when the judge is off and nothing is sent.
+    const clean = await cli(
+      ["doctor", "--home", setup.home],
+      context(healthy(), {}, new FakeJudgeHost({ claude: CLAUDE_PATH })),
+    );
+    expect(judgeLines(clean.stdout)).toHaveLength(1);
+    await writeSetup({ judge: { backend: "off" } });
+    const off = await cli(
+      ["doctor", "--home", setup.home],
+      context(healthy(), { ANTHROPIC_API_KEY: anthropicKey }, new FakeJudgeHost({ claude: CLAUDE_PATH })),
+    );
+    expect(judgeLines(off.stdout)).toEqual([expect.stringMatching(/^PASS\s+judge\s+off/)]);
+  });
+
   it("with --check-judge, asks one fixed question and passes only on agreed", async () => {
     await writeSetup();
     const good = new FakeJudgeHost({ claude: CLAUDE_PATH }, () => agreed);

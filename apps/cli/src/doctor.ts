@@ -364,6 +364,9 @@ async function elevenLabsChecks(
   return checks;
 }
 
+/** API keys `hotline doctor` names when set, because the plan-login judge backends ignore them (HL-09e). */
+export const PLAN_LOGIN_IGNORED_KEYS = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"] as const;
+
 /** The fixed reply `--check-judge` sends: no owner words, a clear yes the judge must agree to. */
 export const JUDGE_CHECK_REPLY = "yes, go ahead";
 
@@ -379,7 +382,7 @@ async function judgeCheck(
   callJudge: boolean,
 ): Promise<Check[]> {
   const name = "judge";
-  const { nodeJudgeHost, selectReplyJudge } = await import("@hotline/daemon");
+  const { judgeCredentialSource, nodeJudgeHost, selectReplyJudge } = await import("@hotline/daemon");
   const searchPath = context.env.PATH;
   const selection = await selectReplyJudge({
     choice: config.judge.backend,
@@ -416,13 +419,26 @@ async function judgeCheck(
       },
     ];
   }
+  const credential = judgeCredentialSource(selection.backend, config.judge.backend);
   const checks: Check[] = [
     {
       status: "pass",
       name,
-      detail: `${selection.backend}: ${selection.detail}; only your short spoken reply is sent to it`,
+      detail: `${selection.backend}: ${selection.detail}; credential: ${credential}; only your short spoken reply is sent to it`,
     },
   ];
+  // HL-09e: an API key in the environment is withheld from the CLI backends,
+  // which run on the plan login. Say so, so the owner is not surprised by it.
+  if (selection.backend === "claude-code" || selection.backend === "codex") {
+    const ignored = PLAN_LOGIN_IGNORED_KEYS.filter((key) => (context.env[key] ?? "") !== "");
+    if (ignored.length > 0) {
+      checks.push({
+        status: "warn",
+        name,
+        detail: `${ignored.join(" and ")} ${ignored.length === 1 ? "is" : "are"} set in this environment (a daemon started from it inherits it); the reply judge ignores it and runs ${selection.backend} on your plan login, not API billing (for API billing choose judge.backend: anthropic-api)`,
+      });
+    }
+  }
   if (callJudge) {
     const verdict = await selection.judge.judge([JUDGE_CHECK_REPLY]).catch(() => "failed");
     checks.push(

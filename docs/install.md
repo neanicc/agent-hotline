@@ -114,7 +114,24 @@ tool, limited to its read-only sandbox without network; choose `--judge
 claude-code` if you want a judge with no tools. The CLI gets only the environment it needs
 (`PATH`, `HOME`, locale, proxy settings and its own login variables such as
 `CLAUDE_CONFIG_DIR` or `CODEX_HOME`); no `HOTLINE_*` variable or Hotline
-credential reaches it. A yes with a condition ("yes if the tests pass", "sure,
+credential reaches it.
+
+**The judge uses your plan, not API billing.** With Claude Code or Codex, the
+judge runs on the login you already pay for (your Claude or ChatGPT plan), even
+when the daemon was started with an API key in its environment.
+`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL` and every
+other `ANTHROPIC_*` variable, the Bedrock, Vertex and Foundry switches
+(`CLAUDE_CODE_USE_*`), `OPENAI_API_KEY`, `OPENAI_BASE_URL` and `CODEX_API_KEY`
+are never passed to the CLI, because either CLI would otherwise bill the API
+instead of your plan. `hotline doctor` names the credential the judge uses
+(`plan login (Claude Code)`, `plan login (Codex)` or `Anthropic API key`) and
+warns when `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` is set, since the judge
+ignores it. If you want API billing, choose `--judge anthropic-api` with the
+stored key. An `apiKeyHelper` in your own Claude Code settings file is not an
+environment variable and is not affected; remove it if you want the judge on
+your plan.
+
+A yes with a condition ("yes if the tests pass", "sure,
 but not on main") or taken back ("yes... actually no") is never an approval. If
 the judge errs, takes longer than 20 seconds, or none is available, the reply is
 unclear and the request is texted to you. The judge runs after you hang up,
@@ -212,7 +229,12 @@ One `PASS`, `WARN` or `FAIL` line per check, then `INFO` lines with the monthly
 cost estimate, then a count of the checks. Exits 1 if anything fails; `INFO`
 lines never pass, warn or fail. The `judge` line names the reply judge the
 daemon would use, found the way the daemon finds it (a CLI on the `PATH`, or the
-stored key) without any model call. `--check-judge` also asks it one tiny fixed
+stored key) without any model call, and the credential it runs on (`plan login
+(Claude Code)`, `plan login (Codex)`, or `Anthropic API key (judge.backend:
+anthropic-api)`), never a value. A second `judge` line warns when
+`ANTHROPIC_API_KEY` or `OPENAI_API_KEY` is set in the environment doctor runs
+in (a daemon started from the same shell inherits it): the Claude Code and
+Codex backends ignore it. `--check-judge` also asks it one tiny fixed
 question, which is one model call on your login or key.
 
 | Check | Fails when | Warns when |
@@ -220,7 +242,7 @@ question, which is one model call on your login or key.
 | config | missing, unsafe or invalid | |
 | secrets (set or not, never values) | a credential the configured providers need is missing | the daemon has not created its API token yet |
 | daemon | it refuses the token, or something else answers on its port | it is not running |
-| reply judge | with `--check-judge`, its answer to the fixed reply "yes, go ahead" is not `agreed` (not logged in, no network, a bad key) | no judge was chosen yet (`judge.backend` unset; nothing is sent), or no backend is available (the `PATH` searched is named), so unclear replies are texted (`judge.backend: "off"` passes) |
+| reply judge | with `--check-judge`, its answer to the fixed reply "yes, go ahead" is not `agreed` (not logged in, no network, a bad key) | no judge was chosen yet (`judge.backend` unset; nothing is sent), or no backend is available (the `PATH` searched is named), so unclear replies are texted (`judge.backend: "off"` passes); `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` is set while the judge is Claude Code or Codex (ignored: the judge stays on your plan login) |
 | away mode | | the state file is unusable (it then reads as off) |
 | Claude Code and Codex installs (user, and the current project) | a hook's `--wait-seconds` is not below its `timeout`; Codex `tool_timeout_sec` is not above `policy.askTimeoutMinutes`; a Claude per-server `timeout` shorter than that | not installed; a hook or the MCP server is missing; less than 30 s between wait and timeout; a wait shorter than the ask timeout |
 | Claude Code idle timeout | `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` is not above the ask timeout | it is not set in this shell |
