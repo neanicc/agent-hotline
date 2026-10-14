@@ -44,6 +44,7 @@ describe("parseConfig", () => {
       tunnel: {},
       daemon: { port: 7341 },
       secrets: { store: "auto" },
+      judge: {},
       costs: { ...DEFAULT_COST_RATES },
       nicknames: {},
     });

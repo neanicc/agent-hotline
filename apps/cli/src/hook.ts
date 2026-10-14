@@ -1,7 +1,7 @@
 // `hotline hook <claude|codex> <permission|stop>` and `hotline away [on|off|status]`.
 // See docs/hooks.md.
 import type { Readable } from "node:stream";
-import type { AgentKind } from "@hotline/core";
+import { type AgentKind, JUDGE_ENV } from "@hotline/core";
 import type { CliContext, Output } from "./cli.js";
 import { loadDaemonSetup } from "./setup.js";
 
@@ -64,6 +64,11 @@ export async function hookCommand(
   out: Output,
   context: CliContext,
 ): Promise<number> {
+  // The reply judge's own agent CLI run (HL-09d): never phone anyone about it.
+  if (context.env[JUDGE_ENV] === "1") {
+    out.stderr("hotline hook: inside the reply judge; doing nothing");
+    return 0;
+  }
   const positional: string[] = [];
   let port: number | undefined;
   let waitSeconds: number | undefined;

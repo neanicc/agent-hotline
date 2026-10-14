@@ -51,9 +51,9 @@ afterEach(async () => {
 const home = () => join(dir, "home");
 const paths = () => hotlinePaths({ env: { HOTLINE_HOME: home() }, homeDir: "/nonexistent" });
 
-function context(stdin?: PassThrough): CliContext {
+function context(stdin?: PassThrough, env: Record<string, string> = {}): CliContext {
   return {
-    env: { HOTLINE_HOME: home() },
+    env: { HOTLINE_HOME: home(), ...env },
     homeDir: join(dir, "nonexistent-home"),
     platform: process.platform,
     signals,
@@ -62,7 +62,7 @@ function context(stdin?: PassThrough): CliContext {
   };
 }
 
-async function cli(argv: string[], input?: string) {
+async function cli(argv: string[], input?: string, env: Record<string, string> = {}) {
   const stdout: string[] = [];
   const stderr: string[] = [];
   let stdin: PassThrough | undefined;
@@ -73,7 +73,7 @@ async function cli(argv: string[], input?: string) {
   const code = await run(
     argv,
     { stdout: (t) => stdout.push(t), stderr: (t) => stderr.push(t) },
-    context(stdin),
+    context(stdin, env),
   );
   return { code, stdout, stderr };
 }
@@ -186,6 +186,35 @@ describe("hotline hook", () => {
     expect(result.stderr.join("\n")).toContain("not set up");
     const stop = await cli(["hook", "codex", "stop"], fixtureText("codex/stop.input.json"));
     expect(stop).toMatchObject({ code: 0, stdout: [] });
+  });
+
+  it("does nothing inside the reply judge's own agent run (HOTLINE_JUDGE=1), even in away mode", async () => {
+    const daemon = await setUp();
+    await cli(["away", "on"]);
+    const port = String(daemon.apiPort);
+    for (const [agent, dirName] of [
+      ["claude", "claude-code"],
+      ["codex", "codex"],
+    ] as const) {
+      for (const event of ["permission", "stop"] as const) {
+        const file = event === "permission" ? "permission-request" : "stop";
+        const result = await cli(
+          ["hook", agent, event, "--port", port],
+          fixtureText(`${dirName}/${file}.input.json`),
+          { HOTLINE_JUDGE: "1" },
+        );
+        expect(result).toMatchObject({ code: 0, stdout: [] });
+        expect(result.stderr.join("\n")).toContain("inside the reply judge");
+      }
+    }
+    // No ask reached the daemon, so nobody was phoned.
+    expect(daemon.store.listAsks()).toEqual([]);
+    // Without the variable the same away-mode hook would have asked the daemon.
+    const normal = await cli(
+      ["hook", "codex", "permission", "--port", port, "--wait-seconds", "1"],
+      fixtureText("codex/permission-request.input.json"),
+    );
+    expect(normal.stdout).not.toEqual([]);
   });
 
   it("phones through the daemon and prints the agent's documented output", async () => {
