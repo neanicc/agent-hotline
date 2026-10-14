@@ -36,6 +36,20 @@ export class SmsSendError extends Error {
 }
 
 /** Validates an E.164 number, throwing a message that does not quote it. */
+/**
+ * Whether `candidate` is exactly `expected`, both valid E.164 numbers. Nothing
+ * is normalised or stripped, so a variant such as "+1 555 555 0100" or
+ * "15555550100" never matches, and a malformed number on either side fails.
+ */
+export function sameE164(candidate: string | null | undefined, expected: string): boolean {
+  return (
+    typeof candidate === "string" &&
+    PhoneNumber.safeParse(candidate).success &&
+    PhoneNumber.safeParse(expected).success &&
+    candidate === expected
+  );
+}
+
 export function requirePhoneNumber(value: string, what: string): string {
   if (!PhoneNumber.safeParse(value).success) throw new TypeError(`${what} must be an E.164 phone number`);
   return value;

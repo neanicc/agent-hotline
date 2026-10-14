@@ -10,7 +10,9 @@
 //   caller ID still needs the PIN; a lockout is texted to the owner here.
 // - Instructions are the owner's own words. `send_instruction` only holds one;
 //   it is queued once the post-call transcript backs it (`confirmInstruction`:
-//   the owner's own turns, after the PIN, naming the session, not taken back).
+//   the owner's whole utterance after the PIN, exactly one session named, read
+//   back and confirmed with a yes, not taken back). Each is confirmed on its
+//   own: nothing else the model sent can excuse a turn of the transcript.
 //   It is redacted and capped before it is stored, with the matching excerpt.
 //   Nothing an agent writes can become one. An instruction not confirmed is
 //   dropped, and the owner is texted that it did not go through.
@@ -284,13 +286,13 @@ export class InboundLine {
       return;
     }
     let notQueued = 0;
-    const instructions = memory.held.map((held) => held.instruction);
     // Crossed off one at a time, so a retry after a failure never queues one twice.
+    // Each is confirmed on its own: nothing else the model sent on the call
+    // can excuse a turn of the transcript (such as a take-back).
     for (let held = memory.held[0]; held !== undefined; held = memory.held[0]) {
-      const others = instructions.filter((other) => other !== held.instruction);
       const check =
         event.type === "transcription"
-          ? confirmInstruction(event.transcript, { ...held, otherInstructions: others })
+          ? confirmInstruction(event.transcript, held)
           : ({ confirmed: false, reason: "the call never connected" } as const);
       const session = this.#store.getSession(held.sessionId);
       if (!check.confirmed || session === undefined || session.state === "ended") {

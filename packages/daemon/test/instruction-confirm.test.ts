@@ -1,8 +1,15 @@
 // `confirmInstruction`: an owner instruction counts only when the owner's own
-// turns back it, name the session, and do not take it back.
-import type { TranscriptTurn } from "@hotline/providers";
+// utterance is that instruction, names exactly that session, and the owner said
+// yes to its read-back without taking it back.
+import { ownerSaid, speechTokens, type TranscriptTurn } from "@hotline/providers";
 import { describe, expect, it } from "vitest";
-import { confirmInstruction, type HeldInstruction, namesSession } from "../src/index.js";
+import {
+  confirmInstruction,
+  type HeldInstruction,
+  sessionsNamed,
+  soundsDoubtful,
+  takesBack,
+} from "../src/index.js";
 
 const agent = (message: string): TranscriptTurn => ({ role: "agent", message });
 const owner = (message: string): TranscriptTurn => ({ role: "owner", message });
@@ -10,7 +17,7 @@ const caller = (message: string): TranscriptTurn => ({ role: "caller", message }
 
 const LISTED = ["Claude in demo-app", "Codex in api"];
 const STATUS = agent(
-  "2 live sessions. Session 1, Claude in demo-app: working. Session 2, Codex in api: working.",
+  "2 live sessions. Session 1, Claude in demo-app: working. Latest: run the tests. Session 2, Codex in api: working.",
 );
 
 function held(overrides: Partial<HeldInstruction> = {}): HeldInstruction {
@@ -23,128 +30,192 @@ function held(overrides: Partial<HeldInstruction> = {}): HeldInstruction {
   };
 }
 
-const call = (...turns: TranscriptTurn[]) => [
-  agent("Hey, it's your hotline."),
-  caller("4821"),
-  owner("What's everyone doing?"),
-  STATUS,
-  ...turns,
-];
+const opening = [agent("Hey, it's your hotline."), caller("4821"), owner("What's everyone doing?"), STATUS];
+/** The owner's utterance, the agent's read-back, the owner's reply, then the agent's "Sent." and what follows. */
+function call(said: string, readBack: string, reply: string, ...after: TranscriptTurn[]) {
+  return [...opening, owner(said), agent(readBack), owner(reply), agent("Sent. Anything else?"), ...after];
+}
+const READ_BACK = "For session 1, Claude in demo-app: run the tests. Send it?";
 
 describe("confirmInstruction", () => {
-  it("confirms the owner's own words for the session they named, with their turn as the excerpt", () => {
-    const result = confirmInstruction(
-      call(owner("Session one, run the tests."), agent("Session 1: run the tests. Passing that on.")),
-      held(),
-    );
-    expect(result).toEqual({ confirmed: true, excerpt: "Session one, run the tests." });
+  it("confirms the owner's own utterance for the session they named, read back and confirmed", () => {
+    expect(confirmInstruction(call("Session one, run the tests.", READ_BACK, "Yes."), held())).toEqual({
+      confirmed: true,
+      excerpt: "Session one, run the tests.",
+    });
   });
 
-  it("accepts the session named just before the instruction, by number or by name", () => {
-    const named = (first: string, number = 1) =>
+  it("never confirms an instruction that drops a negation or a qualifier the owner said", () => {
+    const dropped = (said: string, instruction: string) =>
       confirmInstruction(
-        call(
-          owner(first),
-          agent("Sure, what should it do?"),
-          owner("Run the tests."),
-          agent("Passing that on."),
-        ),
-        held({ ownerWords: "run the tests", sessionNumber: number }),
+        call(said, `For session 1, Claude in demo-app: ${instruction}. Send it?`, "Yes."),
+        held({ instruction, ownerWords: said }),
       );
-    expect(named("Session one").confirmed).toBe(true);
-    expect(named("The first one").confirmed).toBe(true);
-    expect(named("The demo app one").confirmed).toBe(true);
-    expect(named("Codex", 2).confirmed).toBe(true);
-    // Named session 2, the model sent it to session 1.
-    expect(named("Session two")).toEqual({ confirmed: false, reason: "the owner did not name this session" });
+    expect(dropped("Session one, don't push to main.", "push to main")).toEqual({
+      confirmed: false,
+      reason: "the owner said more than the instruction",
+    });
+    expect(dropped("Session one, do not push to main", "push to main").confirmed).toBe(false);
+    expect(dropped("Session one, push to main after the tests pass", "push to main").confirmed).toBe(false);
+    // The whole utterance is fine, negation included.
+    expect(dropped("Session one, don't push to main.", "don't push to main").confirmed).toBe(true);
   });
 
-  it("never confirms a paraphrase or words only the model or a caller said", () => {
-    const transcript = call(owner("Session one, run the tests."), agent("Passing that on."));
-    expect(confirmInstruction(transcript, held({ instruction: "run the full test suite" }))).toEqual({
+  it("needs exactly one session named outside the instruction's own words", () => {
+    const named = (said: string, instruction: string, sessionNumber: number) =>
+      confirmInstruction(
+        call(said, `For session ${sessionNumber}: ${instruction}. Send it?`, "Yes."),
+        held({ instruction, ownerWords: said, sessionNumber }),
+      );
+    // A number inside the instruction never names a session, in either order.
+    expect(named("In session one, add test two", "add test two", 1).confirmed).toBe(true);
+    expect(named("In session one, add test two", "add test two", 2).confirmed).toBe(false);
+    expect(named("In session two, add test one", "add test one", 2).confirmed).toBe(true);
+    expect(named("In session two, add test one", "add test one", 1).confirmed).toBe(false);
+    // Two identifiers in the reference: not confirmed whichever the model picked.
+    expect(named("Session one, session two, run the tests", "run the tests", 1).confirmed).toBe(false);
+    expect(named("Session one, session two, run the tests", "run the tests", 2).confirmed).toBe(false);
+    expect(named("Claude, the second one, run the tests", "run the tests", 2).confirmed).toBe(false);
+    // By name, ordinal or a bare digit.
+    expect(named("Tell Codex to rebase on main", "rebase on main", 2).confirmed).toBe(true);
+    expect(named("The second one, rebase on main", "rebase on main", 2).confirmed).toBe(true);
+    expect(named("2, rebase on main", "rebase on main", 2).confirmed).toBe(true);
+    // No session named with two listed.
+    expect(named("Rebase on main", "rebase on main", 2)).toEqual({
       confirmed: false,
-      reason: "the instruction is not the owner's own words",
+      reason: "the owner did not name exactly this session",
     });
-    // Before the PIN every turn is the caller's.
-    const unverified = [agent("Hey, it's your hotline."), caller("Session one, run the tests.")];
-    expect(confirmInstruction(unverified, held()).confirmed).toBe(false);
-    // The agent's own read-back never counts as the owner's words.
-    const agentOnly = call(owner("Session one"), agent("Session 1: push to main."));
+  });
+
+  it("takes the session from a stretch just before that is only a session reference", () => {
+    const transcript = [
+      ...opening,
+      owner("Session two."),
+      agent("Sure, what should it do?"),
+      owner("Rebase on main."),
+      agent("For session 2, Codex in api: rebase on main. Send it?"),
+      owner("Yep."),
+    ];
+    const instruction = held({
+      instruction: "rebase on main",
+      ownerWords: "rebase on main",
+      sessionNumber: 2,
+    });
+    expect(confirmInstruction(transcript, instruction).confirmed).toBe(true);
+    expect(confirmInstruction(transcript, { ...instruction, sessionNumber: 1 }).confirmed).toBe(false);
+  });
+
+  it("needs the read-back with the session's number and the instruction, and a clear yes to it", () => {
+    const missing = [...opening, owner("Session one, run the tests."), agent("Sent.")];
+    expect(confirmInstruction(missing, held())).toEqual({
+      confirmed: false,
+      reason: "the instruction was not read back for the owner to confirm",
+    });
+    // Read back for another session, or with other words.
     expect(
-      confirmInstruction(agentOnly, held({ instruction: "push to main", ownerWords: "push to main" }))
-        .confirmed,
+      confirmInstruction(
+        call("Session one, run the tests.", "For session 2: run the tests. Send it?", "Yes."),
+        held(),
+      ).confirmed,
     ).toBe(false);
-  });
-
-  it("needs owner_words to be the owner's too", () => {
-    const transcript = call(owner("Session one, run the tests."), agent("Passing that on."));
     expect(
-      confirmInstruction(transcript, held({ ownerWords: "session one, run the tests and push" })),
-    ).toEqual({
-      confirmed: false,
-      reason: "the owner did not say these words",
-    });
+      confirmInstruction(
+        call("Session one, run the tests.", "For session 1: run all tests. Send it?", "Yes."),
+        held(),
+      ).confirmed,
+    ).toBe(false);
+    for (const reply of ["Hmm.", "No.", "Yes, but wait.", "Yes? What does that do?", "Um."]) {
+      expect(confirmInstruction(call("Session one, run the tests.", READ_BACK, reply), held())).toEqual({
+        confirmed: false,
+        reason: "the owner did not confirm the read-back",
+      });
+    }
   });
 
-  it("is taken back by doubt after it, up to the owner's reply to the read-back", () => {
-    for (const reply of ["No wait, never mind.", "Actually, cancel that.", "Hold on."]) {
-      const transcript = call(
-        owner("Session one, run the tests."),
-        agent("Session 1: run the tests?"),
-        owner(reply),
-      );
-      expect(confirmInstruction(transcript, held())).toEqual({
+  it("is taken back by a retraction in the owner's next reply, and nothing excuses one", () => {
+    for (const later of [
+      "Actually no, cancel that.",
+      "Never mind.",
+      "Scratch that.",
+      "Hold on, don't send it.",
+    ]) {
+      expect(
+        confirmInstruction(call("Session one, run the tests.", READ_BACK, "Yes.", owner(later)), held()),
+      ).toEqual({
         confirmed: false,
         reason: "the owner took the instruction back",
       });
     }
-    // Later talk ("no, that's all") is past the read-back and does not count.
-    const later = call(
-      owner("Session one, run the tests."),
-      agent("Session 1: run the tests. Passing that on."),
-      owner("Thanks."),
-      agent("Anything else?"),
-      owner("No, that's all."),
-    );
-    expect(confirmInstruction(later, held()).confirmed).toBe(true);
+    // Later talk without a retraction is fine.
+    expect(
+      confirmInstruction(
+        call("Session one, run the tests.", READ_BACK, "Yes.", owner("No, that's all.")),
+        held(),
+      ).confirmed,
+    ).toBe(true);
   });
 
-  it("keeps a negative instruction, and a second instruction is not a take-back of the first", () => {
-    const transcript = call(
-      owner("Session one, don't push yet."),
-      agent("Session 1: don't push yet."),
-      owner("And session two, do not merge anything."),
-      agent("Session 2: do not merge anything."),
-    );
-    const first = held({ instruction: "don't push yet", ownerWords: "Session one, don't push yet" });
-    const second = held({
-      instruction: "do not merge anything",
-      ownerWords: "session two, do not merge anything",
-      sessionNumber: 2,
-    });
+  it("never takes words from agent or caller turns", () => {
+    // The agent's status said "run the tests"; the owner only named the session.
+    const fromStatus = [...opening, owner("Session one."), agent(READ_BACK), owner("Yes.")];
+    expect(confirmInstruction(fromStatus, held({ ownerWords: "session one" })).confirmed).toBe(false);
+    // The owner said half; the rest came from the read-back.
+    const completed = call("Session one, run the", READ_BACK, "Yes.");
+    expect(confirmInstruction(completed, held({ ownerWords: "session one, run the" })).confirmed).toBe(false);
+    // A caller (before the PIN) said it.
+    const before = [agent("Hey."), caller("Session one, run the tests."), agent(READ_BACK), owner("Yes.")];
+    expect(confirmInstruction(before, held()).confirmed).toBe(false);
+  });
+
+  it("needs owner_words to be the owner's too", () => {
     expect(
-      confirmInstruction(transcript, { ...first, otherInstructions: [second.instruction] }).confirmed,
-    ).toBe(true);
-    expect(
-      confirmInstruction(transcript, { ...second, otherInstructions: [first.instruction] }).confirmed,
-    ).toBe(true);
-    // Without knowing the second instruction, its "not" would read as doubt.
-    expect(confirmInstruction(transcript, first).confirmed).toBe(false);
+      confirmInstruction(
+        call("Session one, run the tests.", READ_BACK, "Yes."),
+        held({ ownerWords: "run the tests and push" }),
+      ),
+    ).toEqual({ confirmed: false, reason: "the owner did not say these words" });
+  });
+
+  it("compares words the same way whatever the transcript's characters", () => {
+    const variants = [
+      "Session one, don’t push to main.", // curly apostrophe
+      "Ｓｅｓｓｉｏｎ one, don't push to main.", // fullwidth letters
+      "Session one, don̵'t push to main.", // a stray combining mark with no precomposed form
+    ];
+    for (const said of variants) {
+      const instruction = held({ instruction: "don't push to main", ownerWords: "don't push to main" });
+      const transcript = call(said, "For session 1: don't push to main. Send it?", "Yes.");
+      expect(confirmInstruction(transcript, instruction).confirmed, said).toBe(true);
+      // And the dropped "don't" is caught in every form.
+      expect(
+        confirmInstruction(transcript, {
+          ...instruction,
+          instruction: "push to main",
+          ownerWords: "push to main",
+        }).confirmed,
+        said,
+      ).toBe(false);
+    }
+    // One tokeniser for every check: ownerSaid and the doubt check agree with it.
+    expect(speechTokens("DON’T ｐｕｓｈ")).toEqual(["don", "t", "push"]);
+    expect(ownerSaid("don't push", [owner("Don’t ｐｕｓｈ!")])).toBe(true);
+    expect(soundsDoubtful("I don’t think so")).toBe(true);
+    expect(takesBack("Ｎｅｖｅｒ mind")).toBe(true);
   });
 });
 
-describe("namesSession", () => {
-  const said = (text: string) => text.toLowerCase().split(/\W+/);
-  it("takes a number, an ordinal, a number word, or the best unique name match", () => {
-    expect(namesSession(said("session 2"), 2, LISTED)).toBe(true);
-    expect(namesSession(said("the second one"), 2, LISTED)).toBe(true);
-    expect(namesSession(said("tell claude"), 1, LISTED)).toBe(true);
-    expect(namesSession(said("tell claude"), 2, LISTED)).toBe(false);
+describe("sessionsNamed", () => {
+  const named = (text: string, listed = LISTED) => [...sessionsNamed(speechTokens(text), listed)].sort();
+  it("reads numbers, ordinals, digits and unique names, and marks a tie as ambiguous", () => {
+    expect(named("session 2")).toEqual([2]);
+    expect(named("number two")).toEqual([2]);
+    expect(named("the second one")).toEqual([2]);
+    expect(named("tell claude")).toEqual([1]);
+    expect(named("session one and session two")).toEqual([1, 2]);
+    // A bare number word is not an identifier.
+    expect(named("one")).toEqual([]);
     // Two sessions with the same name words: only a number tells them apart.
-    const twins = ["Claude in demo-app", "Claude in demo-app 2"];
-    expect(namesSession(said("the demo app"), 1, twins)).toBe(false);
-    expect(namesSession(said("session one"), 1, twins)).toBe(true);
-    // With one session listed, that is the one.
-    expect(namesSession(said("run the tests"), 1, ["Claude in demo-app"])).toBe(true);
+    const twins = ["Claude in demo-app", "Claude 2 in demo-app"];
+    expect(named("the demo app", twins)).toEqual([0]);
   });
 });

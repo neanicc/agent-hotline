@@ -26,6 +26,7 @@ import {
   type PostCallEvent,
   parsePostCallEvent,
   SIGNATURE_HEADER,
+  sameE164,
   TOOL_BODIES,
   TOOL_SECRET_HEADER,
   type ToolBodies,
@@ -275,15 +276,14 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
     };
   };
 
-  const ownerOnCall = (body: GetStatusBody) =>
-    body.caller_id === options.ownerNumber || body.called_number === options.ownerNumber;
+  // Strict E.164 on both sides: no number variant collides with or slips past the owner's.
+  const isOwner = (number: string | undefined) => sameE164(number, options.ownerNumber);
+  const ownerOnCall = (body: GetStatusBody) => isOwner(body.caller_id) || isOwner(body.called_number);
   // Outbound only for a conversation Hotline placed, to the owner's number from
   // elsewhere; anything else that passed `ownerOnCall` is treated as inbound
   // from (what claims to be) the owner, so it needs the PIN first.
   const callDirection = (body: GetStatusBody): ToolCall["direction"] =>
-    options.placedCall(body.conversation_id) &&
-    body.called_number === options.ownerNumber &&
-    body.caller_id !== options.ownerNumber
+    options.placedCall(body.conversation_id) && isOwner(body.called_number) && !isOwner(body.caller_id)
       ? "outbound"
       : "inbound";
 

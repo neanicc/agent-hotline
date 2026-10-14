@@ -477,18 +477,38 @@ anyone else's text the generic SMS reply.
   5 per call, 3 waiting per session, 20 in all (`too-many`). At the post-call
   event each held instruction must pass `confirmInstruction`
   (`instruction-confirm.ts`):
-  - the instruction itself is words the owner said, in one run of consecutive
-    owner turns (`ownerSaid`; on an inbound call only turns after the PIN are
-    the owner's), and `owner_words` are the owner's in that stretch or the one
-    before it. A paraphrase never counts;
-  - the owner named that session there: its number ("session two", "the second
-    one", "2"), or its name better than any other session the status listed.
-    With one session listed, that one is meant;
-  - nothing the owner said after it, up to their reply to the agent's next turn
-    (the read-back), sounds doubtful (`soundsDoubtful` without questions: "no
-    wait", "never mind", "actually"). The instruction's own words may say
-    "don't", and a turn giving another instruction from the same call is not a
-    take-back.
+  - the owner's utterance (one stretch of owner turns between two agent turns;
+    on an inbound call only turns after the PIN are the owner's, and a stretch
+    with anyone else's turn never counts) is the instruction and nothing else:
+    the instruction's words in order, preceded at most by a session reference
+    ("session two", "tell Codex to", "the second one") and filler, followed at
+    most by filler ("thanks"). So "don't push to main" never confirms "push to
+    main", a qualifier after it is never dropped, and every word of the
+    instruction comes from the owner's own turns, never from the status or a
+    read-back. `owner_words` must be the owner's words in that utterance;
+  - exactly one session is identified in that reference (or, when it has none,
+    in an owner stretch just before that is only a session reference): by
+    "session N" or "number N", an ordinal, a bare digit, or a name matching it
+    better than any other listed session. Words inside the instruction never
+    name a session ("in session one, add test two" names session 1 only). Two
+    identifiers, or none with more than one session listed, mean not
+    confirmed;
+  - the agent's next turn is the read-back the prompt asks for ("For session
+    2, Codex in api: rebase on main. Send it?"): it names "session <n>" for
+    that session and repeats the instruction's words, and the owner's reply is
+    a clear yes (a yes word, nothing doubtful, no question, no retraction);
+  - the owner's next reply after that holds no retraction ("never mind",
+    "cancel that", "scratch that", "forget it", "don't send", "actually no",
+    "wait"). Each instruction is checked on its own; nothing else the model
+    sent on the call can excuse a turn.
+  Every comparison uses one tokeniser, `speechTokens` in `@hotline/providers`
+  (NFKC, lower case, apostrophe look-alikes, combining marks dropped), shared
+  with `ownerSaid` and `voice-confirm.ts`, so curly apostrophes, fullwidth
+  letters and stray marks compare the same in every check. Numbers on calls
+  and texts are compared with `sameE164`: both sides must be valid E.164 and
+  identical, with no digit stripping, so "15555550100" or "+1 555 555 0100" is
+  someone else. The PIN is only ever checked through `verify_pin`; nothing in a
+  transcript can stand for it.
   A confirmed instruction is redacted, cut to 1000 characters and stored
   (`instructions` table) with the matching owner turns as its excerpt and the
   conversation id. Anything else is dropped (`voice.instruction-unconfirmed`

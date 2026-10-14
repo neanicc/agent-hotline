@@ -106,10 +106,23 @@ function transcript(conversationId: string, ...owner: string[]): Exclude<PostCal
     durationSeconds: 75,
     transcript: [
       { role: "agent", message: "Hey, it's your hotline." },
-      ...owner.flatMap((message) => [
-        { role: "owner" as const, message },
-        { role: "agent" as const, message: "Passing that on." },
-      ]),
+      // "session N, <instruction>" is read back and confirmed, as the prompt says.
+      ...owner.flatMap((message) => {
+        const instruction = /^session (\d+), (.*)$/.exec(message);
+        return [
+          { role: "owner" as const, message },
+          ...(instruction === null
+            ? []
+            : [
+                {
+                  role: "agent" as const,
+                  message: `For session ${instruction[1]}: ${instruction[2]}. Send it?`,
+                },
+                { role: "owner" as const, message: "Yes." },
+              ]),
+          { role: "agent" as const, message: "Sent." },
+        ];
+      }),
     ],
   };
 }

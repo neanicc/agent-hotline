@@ -27,7 +27,7 @@
 // transcript, or words found in the wrong place, is not confirmed, and the ask
 // stays unanswered (call policy then texts it). Pure: no I/O, no clock.
 import type { Decision } from "@hotline/core";
-import { ownerSaid, type TranscriptTurn } from "@hotline/providers";
+import { normalizeSpeech, ownerSaid, speechTokens, type TranscriptTurn } from "@hotline/providers";
 
 /** One ask as it was read out on the call, for finding its reading in the transcript. */
 export interface ReadAsk {
@@ -90,18 +90,10 @@ const DONE_PHRASES = [
 const QUESTION_WORDS = wordSet("what why how which when where who whose explain wonder curious question");
 /** Doubt that only shows as a phrase. */
 const DOUBT_PHRASES = ["hang on", "hold on", "not yet", "no way", "never mind", "dont do"];
-/** Apostrophe look-alikes a transcript may use for "don't". */
-const APOSTROPHES = /[’‘ʼ`´′]/g;
-
-function normalized(text: string): string {
-  return text.toLowerCase().normalize("NFKC").replace(APOSTROPHES, "'");
-}
-
-function tokens(text: string): string[] {
-  return normalized(text)
-    .split(/[^\p{L}\p{N}]+/u)
-    .filter((word) => word.length > 0);
-}
+// One normalisation for every owner-words comparison (`ownerSaid` uses it
+// too): NFKC, lower case, apostrophe look-alikes as `'`, combining marks dropped.
+const normalized = normalizeSpeech;
+const tokens = speechTokens;
 
 /**
  * Whether `text` holds any refusal, negation, hesitation or retraction. Any

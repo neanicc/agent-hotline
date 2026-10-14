@@ -80,8 +80,9 @@ recognises as that ask's reading, and a read-back too short to be recognised
 (for a long ask) leaves the yes uncounted and the ask texted.
 
 Version 5 (HL-10) fills in calls you place: after the PIN the agent reads each
-session with its number from `get_status`, repeats an instruction back with the
-session's number and name, and sends it verbatim; it tells you the instruction
+session with its number from `get_status`, reads an instruction back as "For
+session <n>, <name>: <instruction>. Send it?", and sends it verbatim only after
+your yes; it tells you the instruction
 reaches the agent after the call, and never calls `submit_answer` on a call you
 placed. The daemon queues an instruction only when your own words in the call
 transcript back it ([inbound line](daemon.md#inbound-line)).

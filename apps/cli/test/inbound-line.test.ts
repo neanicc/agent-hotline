@@ -250,7 +250,6 @@ describe("the owner calls in", () => {
         { kind: "pin", digits: PIN },
         { kind: "status" },
         { kind: "instruct", session: 2, instruction: "rebase on main", words: "Session two, rebase on main" },
-        { kind: "say", words: "yes" },
         { kind: "instruct", session: 1, instruction: "fix the lint", words: "and session one, fix the lint" },
       ),
     );
@@ -383,6 +382,158 @@ describe("only the owner's own words, after the PIN, become an instruction", () 
     expect(h.daemon.store.listInstructions()).toEqual([]);
     const audit = h.daemon.store.listAudit().filter((e) => e.event === "voice.instruction-unconfirmed");
     expect(audit.map((e) => e.detail.reason)).toEqual(["the instruction is not the owner's own words"]);
+  });
+});
+
+describe("bypasses the confirmation must refuse", () => {
+  /** Two sessions: Claude (1), then Codex (2). */
+  async function twoSessions(h: Hotline) {
+    const claude = await hookSession(h, "claude-code");
+    h.clock.now = new Date(h.clock.now.getTime() + 1_000);
+    const codex = await hookSession(h, "codex");
+    return { claude, codex };
+  }
+  const call = (h: Hotline, ...steps: Parameters<typeof scriptedHuman.says>) =>
+    h.voice.inboundCall(scriptedHuman.says({ kind: "pin", digits: PIN }, { kind: "status" }, ...steps));
+
+  it("a number inside the instruction never routes it to another session, in either order", async () => {
+    const h = await start();
+    const { claude, codex } = await twoSessions(h);
+    const words = "In session one, add test two";
+    // The model routes it to session 2 because the owner said "two".
+    await call(h, { kind: "instruct", session: 2, instruction: "add test two", words });
+    await call(h, {
+      kind: "instruct",
+      session: 1,
+      instruction: "add test one",
+      words: "In session two, add test one",
+    });
+    await h.settle();
+    expect(h.daemon.store.listInstructions()).toEqual([]);
+    // Routed as the owner said: queued.
+    await call(h, { kind: "instruct", session: 1, instruction: "add test two", words });
+    await call(h, {
+      kind: "instruct",
+      session: 2,
+      instruction: "add test one",
+      words: "In session two, add test one",
+    });
+    await h.settle();
+    expect(h.daemon.store.listInstructions({ sessionId: claude }).map((i) => i.text)).toEqual([
+      "add test two",
+    ]);
+    expect(h.daemon.store.listInstructions({ sessionId: codex }).map((i) => i.text)).toEqual([
+      "add test one",
+    ]);
+  });
+
+  it("an instruction that drops the owner's \"don't\" is never queued", async () => {
+    const h = await start();
+    await hookSession(h, "claude-code");
+    await call(h, {
+      kind: "instruct",
+      session: 1,
+      instruction: "push to main",
+      words: "Session one, don't push to main",
+    });
+    await h.settle();
+    expect(h.daemon.store.listInstructions()).toEqual([]);
+    expect(h.sms.sent.map((sms) => sms.text)).toEqual([expect.stringContaining("not passed on")]);
+  });
+
+  it('a "never mind" the model sends as another instruction does not erase the owner\'s take-back', async () => {
+    const h = await start();
+    await twoSessions(h);
+    await call(
+      h,
+      {
+        kind: "instruct",
+        session: 1,
+        instruction: "delete the branch",
+        words: "Session one, delete the branch",
+      },
+      // The owner retracts; the model launders it as an instruction for session 2.
+      { kind: "instruct", session: 2, instruction: "never mind", words: "No wait, never mind", reply: null },
+    );
+    await h.settle();
+    expect(h.daemon.store.listInstructions()).toEqual([]);
+    const reasons = h.daemon.store
+      .listAudit()
+      .filter((e) => e.event === "voice.instruction-unconfirmed")
+      .map((e) => e.detail.reason);
+    expect(reasons).toEqual([
+      "the owner took the instruction back",
+      "the owner said more than the instruction",
+    ]);
+  });
+
+  it("an instruction sent without the read-back and the owner's yes is never queued", async () => {
+    const h = await start();
+    await hookSession(h, "claude-code");
+    await call(h, {
+      kind: "instruct",
+      session: 1,
+      instruction: "run the tests",
+      words: "Session one, run the tests",
+      reply: null,
+    });
+    await call(h, {
+      kind: "instruct",
+      session: 1,
+      instruction: "run the tests",
+      words: "Session one, run the tests",
+      reply: "hmm, not sure",
+    });
+    await h.settle();
+    expect(h.daemon.store.listInstructions()).toEqual([]);
+    expect(
+      h.daemon.store
+        .listAudit()
+        .flatMap((e) => (e.event === "voice.instruction-unconfirmed" ? [e.detail.reason] : [])),
+    ).toEqual([
+      "the instruction was not read back for the owner to confirm",
+      "the owner did not confirm the read-back",
+    ]);
+  });
+
+  it("only the owner's number in exact E.164 counts: format variants are strangers", async () => {
+    const h = await start();
+    await hookSession(h, "claude-code");
+    for (const variant of [
+      "15555550100",
+      "+1 555 555 0100",
+      "+1-555-555-0100",
+      "(555) 555-0100",
+      "+015555550100",
+    ]) {
+      const played = await h.voice.inboundCall(
+        scriptedHuman.says({ kind: "pin", digits: PIN }, { kind: "status" }),
+        variant,
+      );
+      expect(
+        played.tools.map((t) => t.response),
+        variant,
+      ).toEqual([{ result: "refused", end_call: true }]);
+      expect(await h.text("status", { from: variant }), variant).toBe(
+        "Sorry, this number does not accept messages.",
+      );
+    }
+    expect(h.daemon.store.listInstructions()).toEqual([]);
+  });
+
+  it("a PIN said in conversation is never taken from the transcript: only verify_pin counts", async () => {
+    const h = await start();
+    await hookSession(h, "claude-code");
+    const played = await h.voice.inboundCall(
+      scriptedHuman.says(
+        { kind: "say", words: `My PIN is ${PIN}` },
+        { kind: "status" },
+        { kind: "instruct", session: 1, instruction: "run the tests", words: "Session one, run the tests" },
+      ),
+    );
+    await h.settle();
+    expect(played.tools.map((t) => t.response.result)).toEqual(["pin-required", "pin-required"]);
+    expect(h.daemon.store.listInstructions()).toEqual([]);
   });
 });
 

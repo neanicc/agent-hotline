@@ -1837,15 +1837,37 @@ Template:
   `POST /v1/sessions/:id/instructions/take` does the same for the MCP server
   (after `ask_human`) and the Stop hook. Agent definition v5 (inbound steps).
 - Decision: an instruction is held until the post-call transcript backs it,
-  like other voice decisions. `confirmInstruction` needs the instruction itself
-  in one run of the owner's own turns (after the PIN on an inbound call),
-  `owner_words` in that stretch or the one before, the session named there (by
-  number, or by name better than any other listed session; one listed session
-  is the one meant), and no doubt from the owner after it up to their reply to
-  the read-back. `voice-confirm.ts` is unchanged; only its exported
-  `soundsDoubtful` is reused, with questions not counted. Reason: the model
-  writes `instruction` and `owner_words`, the status it read holds agent text,
-  and an instruction becomes an agent's next prompt.
+  like other voice decisions. Reason: the model writes `instruction`,
+  `owner_words` and `session_number`, the status it read holds agent text, and
+  an instruction becomes an agent's next prompt. The rules as finally
+  shipped (after the security review below): the owner's whole utterance is
+  the instruction plus at most a leading session reference and filler;
+  exactly one session identified outside the instruction's words; the
+  read-back "For session <n>, <name>: <instruction>. Send it?" with a clear yes
+  (the owner's protocol from HL-14c and HL-09c); no retraction in the owner's
+  next reply.
+- Review fixes (security review of 270c8db, coordinator): (1) a digit or
+  number word anywhere near the instruction named a session, so "in session
+  one, add test two" named both 1 and 2 and the model chose; now exactly one
+  identifier, outside the instruction's words. (2) `ownerSaid` matched a
+  substring, so "don't push to main" confirmed "push to main"; now the
+  utterance must be the instruction and nothing else but a session reference
+  and filler. (3) Turns matching model-supplied `otherInstructions` were
+  skipped by the take-back check, so the model could launder "never mind" as
+  another instruction; the parameter and its call site in `inbound-line.ts`
+  are gone, each instruction is checked alone, and retractions are never
+  excused. (4) The read-back and a yes to it are required; the prompt says so
+  (still definition v5, which this PR introduced and nobody has deployed, so no
+  second bump). (5) Owner numbers are compared with `sameE164` (both sides
+  valid E.164 and identical, no normalising) in the ElevenLabs routes, the
+  post-call owner check and the SMS webhook; the PIN is only ever checked
+  through `verify_pin`. (6) One tokeniser, `speechTokens` in providers, for
+  `ownerSaid`, `voice-confirm.ts` and `instruction-confirm.ts`, with tests for
+  curly apostrophes, fullwidth letters and combining marks. The swap leaves
+  voice-confirm's decisions as they were (all 1457 earlier tests pass),
+  except that a combining mark with no precomposed form no longer splits a
+  word. (7) The status's agent text stays fenced and capped (name 60, latest
+  ask 120), and agent turns never count as the owner's words.
 - Decision: sessions are named by number. `get_status` numbers live sessions
   by registration and remembers, per call, which number is which session;
   `send_instruction` takes only a number that call's status read out
@@ -1880,7 +1902,11 @@ Template:
 - Evidence: `scripts/ci/run.sh build` passes; `scripts/ci/run.sh test` 57
   files, 1369 tests, passed three times in a row. After catching up with main
   (HL-06b #46 and #52, no conflicts outside this log), build passes and test
-  passed 57 files, 1457 tests, three times in a row. New end-to-end tests
+  passed 57 files, 1457 tests, three times in a row. After the security
+  review fixes: build passes and test passed 57 files, 1467 tests, three times
+  in a row; mutation checks on the new rules, each reverted: extra words
+  allowed (4 tests fail), several sessions named accepted (1), read-back
+  skipped (2), take-back skipped (3). New end-to-end tests
   (`apps/cli/test/inbound-line.test.ts`) run the real daemon routes with the
   fake voice and SMS providers, then the real hook adapter and MCP server:
   PIN, status, instruction, delivery at the Stop hook (no call placed) and at
