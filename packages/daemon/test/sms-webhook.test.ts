@@ -707,14 +707,36 @@ describe("every text path is pulled before any effect (HL-13c)", () => {
     }
     expect(lookups).toHaveLength(OTHER_SENDER_LOOKUPS_PER_HOUR);
     expect((await post({ params: message({ From: STRANGER }) })).body).toBe(BARE);
+    expect((await post({ params: message({ From: STRANGER }) })).body).toBe(BARE);
     expect(lookups).toHaveLength(OTHER_SENDER_LOOKUPS_PER_HOUR);
     expect(others).toEqual([]);
+    // A flood over the limit is reported once an hour, not per text.
+    const overLimit = unverified.filter(
+      (u) => u.reason === "texts from other numbers are over the lookup limit",
+    );
+    expect(overLimit).toEqual([expect.objectContaining({ forgery: false })]);
     // The owner is never limited.
     expect((await post({ params: message() })).statusCode).toBe(200);
     expect(received).toHaveLength(1);
     // An hour later strangers are looked up again.
     now = new Date(now.getTime() + 60 * 60 * 1000);
     expect((await post({ params: message({ From: STRANGER }) })).body).toContain(GENERIC_SMS_REPLY);
+  });
+
+  it("gives a lookup slot back when the lookup fails", async () => {
+    await app.close();
+    app = server({
+      lookup: async () => {
+        throw new PullError("Could not reach Twilio (ECONNREFUSED)", "unreachable");
+      },
+    });
+    for (let i = 0; i < OTHER_SENDER_LOOKUPS_IN_FLIGHT * 3; i++) {
+      expect((await post({ params: message({ From: STRANGER }) })).body).toBe(BARE);
+    }
+    // Every one was looked up (and failed): no slot was kept by a failed lookup.
+    expect(unverified.map((u) => u.reason)).toEqual(
+      Array(OTHER_SENDER_LOOKUPS_IN_FLIGHT * 3).fill("the provider lookup failed (unreachable)"),
+    );
   });
 
   it("never lets forged texts from other numbers spend the generic replies", async () => {

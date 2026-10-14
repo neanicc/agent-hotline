@@ -176,6 +176,8 @@ export function twilioSmsRoute(options: TwilioSmsRouteOptions): WebhookRoute {
   /** Twilio lookups for other senders: how many run now, and when each this hour started. */
   let otherSenderLookupsRunning = 0;
   let otherSenderLookups: number[] = [];
+  /** When a text over the lookup limit was last reported, so a flood is audited once an hour. */
+  let lookupLimitReportedAt: number | undefined;
   /** Takes a lookup slot for another sender's text, or says it is over a limit. */
   const mayLookUpOtherSender = (now: number): boolean => {
     otherSenderLookups = otherSenderLookups.filter((at) => now - at < HOUR_MS && at <= now);
@@ -285,6 +287,23 @@ export function twilioSmsRoute(options: TwilioSmsRouteOptions): WebhookRoute {
         { messageSid, sender },
         "sms from another number not looked up: over the lookup limit",
       );
+      const now = receivedAt.getTime();
+      if (
+        lookupLimitReportedAt === undefined ||
+        now - lookupLimitReportedAt >= HOUR_MS ||
+        now < lookupLimitReportedAt
+      ) {
+        lookupLimitReportedAt = now;
+        try {
+          await options.onUnverified?.(
+            messageSid,
+            { forgery: false, reason: "texts from other numbers are over the lookup limit" },
+            sender,
+          );
+        } catch (error) {
+          request.log.error({ err: error, messageSid }, "could not report an sms over the lookup limit");
+        }
+      }
       return { text: undefined, handled: false };
     }
     let check: Awaited<ReturnType<typeof confirmed>>;

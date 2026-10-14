@@ -3541,6 +3541,11 @@ Template:
   left to the conductor as a follow-up issue.)
 - Staff review of 9b3592d (no P0 to P2): the "no in-flight cap" line above
   is reworded to say no route-level cap. The forged-events residual risk is
-  already in `docs/security.md`'s accepted residual risks. Auditing the first
-  dropped stranger lookup in each window is left as a follow-up (only a
-  `warn` log today).
+  already in `docs/security.md`'s accepted residual risks.
+- Staff review of ebe4336: (P2) the forged-events risk is now also stated in
+  the processing-retry row of `docs/security.md`'s limits table; no code
+  change, as the review says. (P3) The first text over the stranger lookup
+  limit in each hour is audited as `security.unverified` through
+  `onUnverified` (no owner text). (P3) A test shows a failed lookup gives its
+  slot back: 12 failing lookups in a row are all made (with no release, the
+  fifth would be refused).

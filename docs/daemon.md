@@ -144,7 +144,9 @@ the `twilio.accountSid` and `twilio.authToken` secrets exist. Otherwise it logs
   recorded in the audit log by message SID only. Texts from other numbers
   are looked up at Twilio at most 4 at once and 60 an hour
   (`OTHER_SENDER_LOOKUPS_IN_FLIGHT`, `OTHER_SENDER_LOOKUPS_PER_HOUR`, HL-13c);
-  one over either limit gets the bare empty TwiML and has no effect. This is
+  one over either limit gets the bare empty TwiML and has no effect, and the
+  first in each hour is audited as `security.unverified` ("texts from other
+  numbers are over the lookup limit"; the owner is not texted). This is
   not a route cap: it applies after the signature is checked and only to
   other senders, so a request claiming another number can use it up but
   never holds up a text from the owner.
