@@ -171,8 +171,10 @@ request still needs the owner's own yes, and every failure denies. Its limits:
 
 The redactor is a safety net under the logging contract (request logs carry
 method and path only; bodies and headers of webhooks are never logged). It errs
-towards removing too much. Accepted gaps, each found by a probe or the fuzzer
-and none a current leak:
+towards removing too much: once an encoded segment that looks secret is removed
+and leaves a quote open, every segment up to the closing quote goes too, so a
+stray quote after one can blank the rest of a line. Accepted gaps, each found
+by a probe or the fuzzer and none a current leak:
 
 - A registered secret re-encoded another way: base64, upper-cased, or split
   across lines.
@@ -226,7 +228,7 @@ and none a current leak:
 
 Tracked on GitHub; each fails safe today.
 
-- Persist the PIN failure budgets, the forgery-alarm hourly text limit (HL-13a)
+- Persist ([#78](https://github.com/neanicc/agent-hotline/issues/78)) the PIN failure budgets, the forgery-alarm hourly text limit (HL-13a)
   and held inbound instructions in SQLite, and the tool-call and post-call replay
   memories, so a restart resets none of them. These touch HL-13a's files and wait
   for #69.

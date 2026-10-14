@@ -652,8 +652,11 @@ function safePath(path: string, cwd: string): boolean {
  * ripgrep options that only change what is searched or printed (HL-13). rg
  * keeps adding options that run programs (`--pre`, `--hostname-bin`), so rg is
  * judged by this positive list: any other option, in any case, is high.
+ * Audited against `rg --help` of ripgrep 14.1.1: every letter and name below is
+ * a search, filter or output option there (`-h` is `--help`). A test checks the
+ * list against the installed rg's help when rg is available.
  */
-const RG_LONG_OPTIONS: ReadonlySet<string> = new Set(
+export const RIPGREP_LONG_OPTIONS: ReadonlySet<string> = new Set(
   (
     "--line-number --no-line-number --ignore-case --case-sensitive --smart-case --files-with-matches " +
     "--files-without-match --count --count-matches --word-regexp --line-regexp --fixed-strings " +
@@ -664,19 +667,19 @@ const RG_LONG_OPTIONS: ReadonlySet<string> = new Set(
   ).split(" "),
 );
 /** Single-letter rg flags that take no value (`-z`, which runs decompressors, is not one). */
-const RG_FLAGS = "nNiIsSlLcwxFvoHhuUqab";
+export const RIPGREP_FLAGS = "nNiIsSlLcwxFvoHhuUqab";
 /** Single-letter rg options whose value is the next word or attached digits. */
-const RG_VALUE_OPTIONS = "ABCmtTge";
+export const RIPGREP_VALUE_OPTIONS = "ABCmtTge";
 
 function knownRgOption(arg: string): boolean {
   if (arg === "--" || !arg.startsWith("-")) return true;
   if (arg.startsWith("--"))
-    return RG_LONG_OPTIONS.has(arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg);
+    return RIPGREP_LONG_OPTIONS.has(arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg);
   const body = arg.slice(1);
-  if (body.length === 1) return RG_FLAGS.includes(body) || RG_VALUE_OPTIONS.includes(body);
+  if (body.length === 1) return RIPGREP_FLAGS.includes(body) || RIPGREP_VALUE_OPTIONS.includes(body);
   // `-A3`, `-m10`: a value option with attached digits; `-nw`: a cluster of plain flags.
   if (/^[ABCm]\d+$/.test(body)) return true;
-  return [...body].every((flag) => RG_FLAGS.includes(flag));
+  return [...body].every((flag) => RIPGREP_FLAGS.includes(flag));
 }
 
 /** Whether any argument is one of `options`, also as `--opt=value`, `-xVALUE` or in a cluster such as `-iz`. */

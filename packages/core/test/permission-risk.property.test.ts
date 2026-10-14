@@ -16,7 +16,14 @@
 import { spawnSync } from "node:child_process";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { classifyPermission, shellCommand, splitShell } from "../src/index.js";
+import {
+  classifyPermission,
+  RIPGREP_FLAGS,
+  RIPGREP_LONG_OPTIONS,
+  RIPGREP_VALUE_OPTIONS,
+  shellCommand,
+  splitShell,
+} from "../src/index.js";
 
 const cwd = "/Users/example/src/demo-app";
 const classify = (command: unknown, toolName = "Bash") =>
@@ -450,4 +457,37 @@ describe.skipIf(BASH === undefined && ZSH === undefined)("permission classifier:
       expect(classify(command).risk).toBe("high");
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// 3. The positive rg option list against the installed rg's help (when there is one)
+
+const RG_HELP = (() => {
+  const help = spawnSync("rg", ["--help"], { encoding: "utf8", env: { PATH: process.env.PATH ?? "" } });
+  return help.status === 0 ? help.stdout : undefined;
+})();
+
+describe.skipIf(RG_HELP === undefined)("permission classifier: rg options", () => {
+  it("allows only short options rg documents", () => {
+    for (const letter of [...RIPGREP_FLAGS, ...RIPGREP_VALUE_OPTIONS]) {
+      expect(RG_HELP, `-${letter}`).toMatch(new RegExp(`^\\s+-${letter}[, ]`, "m"));
+    }
+  });
+
+  it("allows only long options rg documents, or their documented negation", () => {
+    for (const option of RIPGREP_LONG_OPTIONS) {
+      const base = option.replace(/^--no-/, "--");
+      const documented = [option, base, `--no-${base.slice(2)}`].some((name) =>
+        new RegExp(`(?:^|[\\s,])${name}(?:[=,\\s]|$)`, "m").test(RG_HELP ?? ""),
+      );
+      expect(documented, option).toBe(true);
+    }
+  });
+});
+
+it("never lists an rg option that runs a program", () => {
+  for (const option of ["--pre", "--pre-glob", "--search-zip", "--hostname-bin", "--type-add"]) {
+    expect(RIPGREP_LONG_OPTIONS.has(option), option).toBe(false);
+  }
+  expect(RIPGREP_FLAGS).not.toContain("z");
 });

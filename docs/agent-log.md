@@ -2929,3 +2929,8 @@ Template:
 - Deferred (needs #69, HL-13a, which changes the same files): persist the PIN
   failure budgets, the forgery-alarm hourly text limit, held inbound
   instructions and the tool-call and post-call replay memories.
+- Review fix (staff review P2 on #77): the rg option lists are exported and
+  audited by hand against `rg --help` of ripgrep 14.1.1 (every letter and name
+  is a search, filter or output option; `-h` is help). A test checks them
+  against the installed rg's help and skips where rg is not on `PATH` (it was
+  not on this Mac's `PATH`, so it skipped locally).
