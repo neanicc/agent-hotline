@@ -1,0 +1,27 @@
+{
+  "name": "@hotline/scenarios",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "hotline-scenarios": "./dist/main.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/suite.d.ts",
+      "default": "./dist/suite.js"
+    }
+  },
+  "scripts": {
+    "test": "vitest run --root .. --project scenarios"
+  },
+  "dependencies": {
+    "@hotline/agents": "workspace:*",
+    "@hotline/core": "workspace:*",
+    "@hotline/daemon": "workspace:*",
+    "@hotline/providers": "workspace:*",
+    "@modelcontextprotocol/sdk": "1.31.0",
+    "smol-toml": "1.8.0"
+  }
+}

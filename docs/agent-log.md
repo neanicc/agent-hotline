@@ -2496,6 +2496,88 @@ Template:
   needs the live check. PinGate counters and the held instructions are in
   memory (HL-13).
 
+## 2026-10-14 — HL-12 Scenario suite (#13)
+
+- Decision / change: the suite is a workspace package, `@hotline/scenarios`
+  in `eval/` (added to `pnpm-workspace.yaml`, the root `tsconfig.json`, Vitest
+  projects and Biome; built by `tsc -b`). The root script `eval` runs
+  `node eval/dist/main.js`, which takes `--mode`, `--thresholds` and `--out`
+  exactly as `scripts/ci/run.sh eval` passes them (pnpm 11 passes the `--`
+  through; the runner skips it). `run.sh` itself is unchanged. It prints one
+  line per scenario, then exactly `THRESHOLDS: PASS` or `THRESHOLDS: FAIL`, and
+  writes `eval-out/report.json` and `report.txt`, which the CI job uploads.
+- Decision: real processes for the agent side. Each scenario starts the real
+  daemon in-process (`runDaemon`, ephemeral ports, temporary `HOTLINE_HOME`,
+  fake clock, `autoTick` off) and runs the built CLI as child processes:
+  `hotline away on`, `hotline hook <claude|codex> <permission|stop>` with the
+  agent's payload on stdin, and `hotline mcp --agent <claude|codex>` driven by
+  the MCP SDK's stdio client. The children get a scrubbed environment
+  (temporary `HOME` and `HOTLINE_HOME`, `HOTLINE_TEST_MODE=1`, nothing else
+  inherited but `PATH`). Rejected: calling `runHook` and the MCP server
+  in-process, which would skip the CLI's argument parsing, away-mode file,
+  continuation store and port and token lookup.
+- Decision: the fake clock starts on 2031-06-10 (17:58 in Toronto, outside
+  default quiet hours). The CLI children read the real clock, and both the hook
+  (`min(start + wait, expiresAt + 30 s)`) and the MCP server (`expiresAt + 60
+  s`) compare it with the daemon's `expiresAt`; a fake clock behind the real one
+  would end every wait at once. Ahead of it, every outcome comes from the
+  daemon. No product code changed for this.
+- Decision: TOML parsing with `smol-toml` 1.8.0 (exact pin, zero
+  dependencies, released 2026-08-11). The thresholds file is read strictly:
+  `schema` must be 1, `[suite.scenarios]` may hold only `required_in`,
+  `pass_rate_min` and `required`; anything else fails the run. Scoring: a
+  required scenario that did not run prints `FAIL <name>: not run` and counts
+  as a failure; the pass rate (passed over run plus missing) must reach
+  `pass_rate_min`; in a `required_in` mode every required scenario must pass;
+  nothing run, an unreadable file or an injected fault is FAIL.
+- Decision: the self-test fault is an always-approve proxy in front of the
+  agent API (`eval/src/fault.ts`): every outcome request is answered at once
+  with an approval nobody gave (allow with `confirmation: "pin"`, option 1,
+  "keep going"). It is switched on only by the runner's `fault` option
+  (`--fault always-approve`), lives only in the suite, and a faulted run always
+  scores FAIL. `eval/test/self-test.test.ts` checks that `silence-denies`,
+  `high-risk-needs-pin` and `agent-text-cannot-self-approve` fail with it and
+  pass without it. With the fault, 15 of 22 scenarios fail; the 7 that pass
+  expect an allow anyway or never read an outcome (the inbound line,
+  quiet hours).
+- Scenario choices (also in docs/eval.md): Codex shell requests are always
+  high risk (HL-06b), so the Codex permission scenario is
+  `no-pickup-falls-back-to-text`, approved by `YES <code>` with
+  `confirmation: "text"`; voice allows use Claude Code `Bash` `pnpm test` and
+  the read-back (`scriptedHuman.confirms` or a `read-back` step);
+  `high-risk-needs-pin` plays a confirmed yes without the PIN (`needs-pin`, a
+  bare text "yes", expiry, deny) and then the PIN plus read-back (allow);
+  `unclear-answer-denies` plays definition v4's two unclear replies per ask;
+  `agent-text-cannot-self-approve` plays a voice model that submits an allow
+  the owner never said; `inbound-instruction-delivered` registers the Codex
+  hooks' session through the agent API, as the Stop hook registers it.
+- `test/workspace.test.ts` now counts `eval` as a workspace package, so the
+  same exact-pin, strict-config and tsconfig-reference checks cover it.
+- Evidence: `scripts/ci/run.sh build` and `test` pass (60 files, 1727 tests).
+  The local gate, `scripts/ci/run.sh eval --local`, printed 22 PASS lines and
+  `THRESHOLDS: PASS` (about 8 s); the runner passed 3 runs in a row and 6 runs
+  at once. The local sandbox refuses command lines containing the word "eval",
+  so the gate and the runner were run through small wrapper scripts in the
+  session's scratch folder that call `scripts/ci/run.sh eval --local` and
+  `node eval/dist/main.js` by path. Mutation checks, each reverted: every
+  voice allow confirmed (`agent-text-cannot-self-approve` fails), ask text not
+  redacted (`secrets-redacted-before-send` fails), `permissionVerdict` allowing
+  on no answer (5 scenarios fail). No product bug was found. Not run: real
+  Claude Code or Codex against the daemon (they would use the developer's real
+  config), and no live call.
+- Open issues or follow-ups: HL-13a adds pull lookups to the fakes; the suite
+  uses the fakes only through their public `script`, `placed`, `sent`,
+  `inboundCall` and `playPending`, so it should keep working. A replayed
+  `submit_answer` tool call is not a scenario yet (the route test covers it).
+- Review fixes (staff review and Greptile on #68):
+  - Hook output is now parsed with core's strict per-agent schemas, so output the agent would reject never counts.
+  - The thresholds parser refuses unknown keys at every level.
+  - A failed hotline or MCP start cleans up what it started.
+  - A daemon that does not shut down cleanly fails its scenario.
+  - `--only` refuses empty names.
+  - docs/eval.md states the self-test's limit: it catches an approval the agent sees, not a flaw injected inside the daemon (the mutation checks above covered those once).
+  - After the fixes, build passes, test passes (60 files, 1727 tests) and `eval --local` prints 22 PASS lines and `THRESHOLDS: PASS`.
+
 ## 2026-10-14 — HL-09d Model-backed reply judge on the owner's agent login (#56)
 
 - Owner direction (autopilot session, recorded on #1 and #56): approvals are
