@@ -55,6 +55,12 @@ export interface HotlineOptions {
   autoTick?: boolean;
   /** Replaces the HTTP client the fake voice provider uses to reach the daemon. */
   voiceClient?: (real: VoiceToolClient) => VoiceToolClient;
+  /**
+   * Moves the fake clock on this much after each server-tool call, so the
+   * transcript's turn times run on as on a real call (an inbound call's turns
+   * count as the owner's only after the moment the PIN was verified).
+   */
+  toolStepMs?: number;
   start?: Date;
   /** Reuse a hotline home (restart tests). */
   dir?: string;
@@ -62,6 +68,8 @@ export interface HotlineOptions {
 
 export interface Hotline {
   dir: string;
+  /** The agent API token, for a real `DaemonClient`. */
+  token: string;
   daemon: Daemon;
   orchestrator: CallOrchestrator;
   voice: FakeVoiceProvider;
@@ -117,14 +125,17 @@ export async function startHotline(options: HotlineOptions = {}): Promise<Hotlin
   const clock = { now: options.start ?? START };
   let hooksUrl = "";
   const real: VoiceToolClient = {
-    tool: (name, body) =>
-      httpVoiceToolClient({
+    tool: async (name, body) => {
+      const response = await httpVoiceToolClient({
         hooksUrl,
         toolSecret: TOOL_SECRET,
         webhookSecret: WEBHOOK_SECRET,
         fetch: globalThis.fetch as unknown as HttpFetch,
         clock: () => clock.now,
-      }).tool(name, body),
+      }).tool(name, body);
+      if (options.toolStepMs !== undefined) clock.now = new Date(clock.now.getTime() + options.toolStepMs);
+      return response;
+    },
     postCall: (payload) =>
       httpVoiceToolClient({
         hooksUrl,
@@ -188,6 +199,7 @@ export async function startHotline(options: HotlineOptions = {}): Promise<Hotlin
   let ids = 0;
   const hotline: Hotline = {
     dir,
+    token,
     daemon,
     orchestrator,
     voice,

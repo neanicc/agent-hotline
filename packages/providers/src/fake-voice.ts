@@ -61,8 +61,13 @@ export type HumanStep =
   | { kind: "unclear"; ask: number; words: string }
   /** Asks what the agents are doing: `get_status`. */
   | { kind: "status" }
-  /** Gives session `session` an instruction: `send_instruction`. */
-  | { kind: "instruct"; session: number; instruction: string; words?: string }
+  /**
+   * Gives session `session` an instruction in `words` (default `instruction`).
+   * The agent reads it back ("For session <n>: <instruction>. Send it?"), the
+   * owner replies `reply` (default "yes"; `null` skips the read-back, as a
+   * confused model would), then the agent calls `send_instruction`.
+   */
+  | { kind: "instruct"; session: number; instruction: string; words?: string; reply?: string | null }
   /** Says nothing; the agent makes no tool call. */
   | { kind: "silence" }
   /** Hangs up here; the remaining steps never happen. */
@@ -402,14 +407,24 @@ export class FakeVoiceProvider implements VoiceProvider {
       } else if (step.kind === "status") {
         say("user", "What's everyone doing?");
         response = await tool("get_status", {});
+        // The agent reads the status out, its fences dropped as the prompt says.
+        if (typeof response.status === "string")
+          say("agent", response.status.replace(/<\/?agent_text>/g, ""));
       } else {
         const words = step.words ?? step.instruction;
         say("user", words);
+        // The prompt's read-back of an instruction and the owner's reply, before
+        // it is sent (definition v5). `reply: null` plays a model that skips it.
+        if (step.reply !== null) {
+          say("agent", `For session ${step.session}: ${step.instruction}. Send it?`);
+          say("user", step.reply ?? "yes");
+        }
         response = await tool("send_instruction", {
           session_number: step.session,
           instruction: step.instruction,
           owner_words: words,
         });
+        say("agent", "Sent.");
       }
       if (step.kind === "answer" || step.kind === "read-back") say("agent", "Got it.");
       // A well-behaved agent ends the call when a tool says so.

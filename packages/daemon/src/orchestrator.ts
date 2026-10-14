@@ -83,6 +83,8 @@ export interface CallOrchestratorOptions {
   newCode?: () => string;
   /** How long `stop` waits for the step in progress; default `STOP_WAIT_MS`. */
   stopWaitMs?: number;
+  /** The reply to the owner's `status` text (the inbound line's `statusText`). */
+  status?: () => string;
 }
 
 export class CallOrchestrator {
@@ -121,6 +123,7 @@ export class CallOrchestrator {
       ...(options.sms === undefined ? {} : { sms: options.sms }),
       redact: options.redact,
       ...(options.newCode === undefined ? {} : { newCode: options.newCode }),
+      ...(options.status === undefined ? {} : { status: options.status }),
       log,
       process: processEvent,
     });

@@ -153,7 +153,7 @@ export class VoiceCalls {
 
   #hold(voice: VoiceAnswer): SubmitAnswerResult {
     const call = this.#callFor(voice.conversationId);
-    // Asks are answered only on a call Hotline placed to the owner (the inbound line is HL-10).
+    // Asks are answered only on a call Hotline placed to the owner; an inbound call answers none (HL-10).
     if (call === undefined || voice.direction !== "outbound") return "not-recorded";
     const askId = call.askIds[voice.askNumber - 1];
     const queue = this.#state.data.queue;

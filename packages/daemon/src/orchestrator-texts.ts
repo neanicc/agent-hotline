@@ -30,6 +30,8 @@ export interface OwnerTextsOptions {
   redact: (text: string) => string;
   /** For tests: the next confirmation code. Default: 6 random digits. */
   newCode?: () => string;
+  /** The reply to a `status` text: what every live session is doing. */
+  status?: () => string;
   /** The orchestrator's current logger (it can be attached after construction). */
   log: () => OrchestratorLog;
   /** Steps the queue with an event and everything it leads to. */
@@ -171,6 +173,10 @@ export class OwnerTexts {
     switch (plan.type) {
       case "ignore":
         return undefined;
+      case "status":
+        // The webhook only lets the owner's number through, and the reply goes
+        // back to that number: a spoofed sender never sees it.
+        return this.#options.status?.() ?? TEXT_REPLIES.statusUnavailable;
       case "call-me": {
         const actions = await this.#options.process({ type: "call-me" });
         const ignored = actions.find((action) => action.type === "ignored" && action.event === "call-me");

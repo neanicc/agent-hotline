@@ -277,6 +277,25 @@ instruction (a `text` decision, checked by core's `stopInstruction`) becomes
 the next prompt. "That's it" (`done`), no answer, a timeout or any failure
 prints nothing, so the agent stops. Silence never continues an agent.
 
+Instructions the owner left for this session on a call to the Hotline number
+([inbound line](daemon.md#inbound-line), HL-10) come first: after the loop
+guards, the hook registers the session (only with the agent's own session id)
+and lists its queued instructions (`GET /v1/sessions/:id/instructions`). If
+there are any, nobody is phoned about the stop: the hook checks away mode again
+and saves its continuation count, and only then acknowledges them
+(`POST .../instructions/ack`, `via: "stop"`) and continues the agent with the
+acknowledged ones (one per line in `reason`). So an instruction is marked
+delivered only when nothing but printing the output is left; if anything
+before that fails, it stays queued for the next stop or ask. If an
+instruction arrives while the stop waits on the owner, the daemon cancels the
+stop and the hook, seeing no answer, lists and acknowledges it the same way.
+The daemon confirmed each one against the owner's own words in the call
+transcript; the hook only relays it. The same loop guards and continuation
+count apply, and a failure to list them asks the owner as before. After the
+owner's `done` the hook takes none. Delivery is at most once: a hook killed
+between the acknowledgement and printing its output loses that instruction
+rather than delivering it twice.
+
 Loop guards, always on:
 
 - **`stop_hook_active`.** A turn the human started (`false`) starts a fresh

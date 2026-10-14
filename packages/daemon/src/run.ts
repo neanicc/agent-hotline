@@ -12,9 +12,11 @@ import {
 import { ensureApiToken } from "./api-token.js";
 import { hotlinePaths, loadConfig } from "./config-file.js";
 import { elevenLabsRoutes } from "./elevenlabs-webhook.js";
+import { InboundLine } from "./inbound-line.js";
 import { acquireDaemonLock } from "./lock.js";
 import type { LogDestination, LogLevel } from "./logger.js";
-import { CallOrchestrator } from "./orchestrator.js";
+import { CallOrchestrator, type OrchestratorLog } from "./orchestrator.js";
+import { silentLog } from "./orchestrator-state.js";
 import { PinGate, verifyPin } from "./pin.js";
 import { createRedactor, type Redactor } from "./redact.js";
 import { type Exec, openSecretStore } from "./secret-store.js";
@@ -208,9 +210,8 @@ async function voiceProvider(
 /**
  * The ElevenLabs server-tool and post-call routes, when the config and secret
  * store have everything they need. Otherwise none is registered and
- * `/hooks/el/*` stays a 403. Answers and post-call events go to call
- * orchestration; until the inbound line (HL-10) takes over, instructions are
- * recorded in the audit log by kind only and the status is not read out.
+ * `/hooks/el/*` stays a 403. Answers go to call orchestration; status and
+ * instructions to the inbound line; post-call events to both.
  */
 async function voiceWebhook(
   config: Config,
@@ -218,6 +219,7 @@ async function voiceWebhook(
   redactor: Redactor,
   store: HotlineStore,
   orchestrator: CallOrchestrator,
+  inbound: InboundLine,
   clock: () => Date,
 ): Promise<WebhookSetup> {
   if (config.voice.provider !== "elevenlabs") return { routes: [], off: "the voice provider is fake" };
@@ -238,8 +240,11 @@ async function voiceWebhook(
     check: (pin) => verifyPin(pin, pinHash),
     clock,
     onVerified: (pin) => redactor.addShortSecret(pin),
-    // Recorded now; the inbound line (HL-10) also texts the owner about it.
-    onLockout: (direction) => store.appendAudit("voice.pin-lockout", { direction }, clock()),
+    // Audited and texted to the owner by the inbound line.
+    onLockout: (direction) => {
+      // Only defensive: pinLockout audits first and its text already catches provider errors.
+      inbound.pinLockout(direction).catch(() => {});
+    },
   });
   const routes = elevenLabsRoutes({
     toolSecret,
@@ -254,15 +259,15 @@ async function voiceWebhook(
     redact: (text) => redactor.text(text),
     handlers: {
       submitAnswer: (answer) => orchestrator.submitAnswer(answer),
-      getStatus: () => "Status is not available yet.",
-      sendInstruction: ({ receivedAt }) => {
-        store.appendAudit("voice.instruction", { queued: false }, receivedAt);
-        return "unknown-session";
-      },
+      getStatus: (call) => inbound.getStatus(call),
+      sendInstruction: (instruction) => inbound.sendInstruction(instruction),
       postCall: async (event, receivedAt) => {
         const detail = event.type === "transcription" ? { status: event.status } : { reason: event.reason };
         store.appendAudit(`voice.${event.type}`, detail, receivedAt);
+        // Asked before call orchestration forgets the call at its post-call event.
+        const placed = orchestrator.placedCall(event.conversationId);
         await orchestrator.postCall(event, receivedAt);
+        await inbound.postCall(event, receivedAt, placed);
       },
     },
   });
@@ -303,7 +308,16 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
     if (typeof twilio !== "string") redactor.addSecret(twilio.authToken);
     const caller = options.providers?.voice ?? (await voiceProvider(config, secrets, redactor, fetch));
     const texter = options.providers?.sms ?? smsProvider(config, twilio, redactor, fetch);
+    let daemonLog: OrchestratorLog | undefined;
+    const inbound = new InboundLine({
+      store,
+      clock,
+      redact: (text) => redactor.text(text),
+      ...(texter === undefined ? {} : { sms: texter }),
+      log: () => daemonLog ?? silentLog,
+    });
     const calls = new CallOrchestrator({
+      status: () => inbound.statusText(),
       store,
       settings: policySettings(config),
       clock,
@@ -314,7 +328,7 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
     });
     orchestrator = calls;
     const sms = smsWebhook(config, twilio, redactor, store, orchestrator, clock);
-    const voice = await voiceWebhook(config, secrets, redactor, store, orchestrator, clock);
+    const voice = await voiceWebhook(config, secrets, redactor, store, orchestrator, inbound, clock);
     daemon = await startDaemon({
       apiToken,
       store,
@@ -335,7 +349,10 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
       daemon.log.info({ reason }, "outbound texts off");
     }
     orchestrator.attachLog(daemon.log);
+    daemonLog = daemon.log;
     await orchestrator.start();
+    // Instructions a previous run held for a post-call event were lost with it: tell the owner.
+    await inbound.recover();
     store.appendAudit(
       "daemon.started",
       { version: options.version, apiPort: daemon.apiPort, hooksPort: daemon.hooksPort },
