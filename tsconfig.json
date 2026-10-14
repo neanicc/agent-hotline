@@ -5,6 +5,7 @@
     { "path": "packages/daemon" },
     { "path": "packages/providers" },
     { "path": "packages/agents" },
-    { "path": "apps/cli" }
+    { "path": "apps/cli" },
+    { "path": "eval" }
   ]
 }

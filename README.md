@@ -18,9 +18,9 @@ Pick any ElevenLabs voice for the caller, including a clone of your own
 
 > Status: pre-alpha, Tier 1 in progress. Outbound calls, texts, permission
 > approvals, away mode, the inbound status line, the installer and packaging are
-> built and tested against fake providers. The scenario suite (HL-12) and the
-> security pass (HL-13) are still open, and no live call has been recorded
-> yet ([docs/live-check.md](docs/live-check.md)). Progress:
+> built and tested against fake providers, and the scenario suite runs every
+> flow end to end against them. The security pass (HL-13) is still open, and no
+> live call has been recorded yet ([docs/live-check.md](docs/live-check.md)). Progress:
 > [plan section 9](docs/plan.md#9-tickets).
 
 ## What you need
@@ -194,6 +194,7 @@ pnpm run test         # Vitest, all packages, fakes only
 pnpm run lint         # Biome (`pnpm run format` fixes)
 pnpm run package      # dist/hotline; scripts/ci/run.sh package also runs it from a temp folder
 pnpm run hotline --version   # the unbundled CLI from apps/cli/dist
+pnpm run eval -- --mode local   # the scenario suite against the built tree (docs/eval.md)
 ```
 
 CI calls the same steps through [scripts/ci/run.sh](scripts/ci/run.sh) (`setup`,
@@ -207,6 +208,7 @@ scenario suite, [docs/eval.md](docs/eval.md).
 | `packages/providers` | Voice and SMS provider interfaces, real clients and fakes |
 | `packages/agents` | MCP server and hook adapters for Claude Code and Codex |
 | `apps/cli` | The `hotline` command |
+| `eval` | The scenario suite: runner, scripted humans, self-test; human-owned `thresholds.toml` |
 
 ## How this repository is built
 
