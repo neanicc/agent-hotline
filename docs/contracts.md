@@ -129,7 +129,8 @@ users can read or write (it holds the PIN hash), so it must be mode `0600`.
 | `policy.askTimeoutMinutes` | 30 | Then "no answer" |
 | `policy.maxConsecutiveContinuations` | 5 | Away-mode Stop continuations in a row (1–20) |
 | `voice.provider` | `elevenlabs` | or `fake` |
-| `voice.voiceId`, `agentId`, `agentPhoneNumberId` | unset | ElevenLabs ids, set by `hotline init` / `hotline voice set` |
+| `voice.voiceId`, `agentId`, `agentPhoneNumberId` | unset | ElevenLabs ids: `voiceId` from `hotline voice set`, `agentId` from `hotline voice apply`, `agentPhoneNumberId` from `hotline init` |
+| `voice.toolSecretId`, `voice.toolIds` | unset | Ids (never values) of the ElevenLabs workspace secret and the four server tools, written by `hotline voice apply` so a re-apply updates them instead of creating new ones |
 | `sms.provider` | `twilio` | or `fake` |
 | `sms.fromNumber` | unset | The Twilio number |
 | `tunnel.publicUrl` | unset | Bare `https://` origin, no path, query or credentials |
@@ -283,9 +284,18 @@ decision it submits or what `owner_words` it sends.
   second timeout and a required injected `fetch`.
 - `FakeVoiceProvider`: records each placed call and its variables, and plays
   scripted humans (`scriptedHuman.noPickup()`, `busy()`, `silent()`, `drops()`,
-  `allows()`, `denies()`, `unclear()`, `wrongPin()`, or `says(...steps)` with
-  `pin`, `answer`, `unclear`, `say`, `status`, `instruct`, `silence` and `hang-up`
-  steps) through a `VoiceToolClient`. On an outbound call the fake agent speaks
+  `allows()`, `denies()`, `confirms()`, `unsureTwice()`, `unclear()`, `wrongPin()`,
+  or `says(...steps)` with `pin`, `answer`, `read-back`, `unsure`, `unclear`, `say`,
+  `status`, `instruct`, `silence` and `hang-up` steps) through a `VoiceToolClient`.
+  The definition v4 flows (HL-14c): a `read-back` step answers, hears the
+  agent read the request back ("Allow <tool> to <text> for <session>? Yes?", built from
+  the ask's redacted, fenced text and session name) and replies; the agent then
+  submits allow or deny with the reply as `owner_words`. An `unsure` step is
+  an unclear reply: the first gets "Sorry, is that a yes or a no?" with that
+  read-back (a re-reading for an ask that is not a permission request), the
+  second gets the spoken promise to text (`TEXT_INSTEAD`) and no tool call. An
+  `unclear` step submits `unclear`, which only an agent on definition v3 or
+  earlier does. On an outbound call the fake agent speaks
   the first message, then reads each ask (its `asks` line, unfenced) as its own
   agent turn just before the first step that answers it, and says "Got it." after
   each answer, so the transcript has the order the daemon checks. `say` is owner
@@ -310,20 +320,33 @@ the prompt, first message and four webhook tools as code. `hotlineToolConfigs`
 gives each tool's `tool_config` (URL `<publicUrl>/hooks/el/tools/<name>`, the
 `x-hotline-tool-secret` header from an ElevenLabs workspace secret, and a body
 schema); `hotlineAgentConfig` gives the agent body with the tool ids, voice,
-`end_call` and placeholders for inbound calls. HL-11 `hotline init` applies
-them. Every tool's `conversation_id`, `call_sid`, `caller_id` and
-`called_number` come from ElevenLabs' `system__*` dynamic variables, not from
-the model, and no tool has a confirmation parameter. The prompt says agent
+`end_call` and placeholders for inbound calls. `hotline voice apply` (HL-11)
+creates or updates them; see [install.md](install.md). Every tool's
+`conversation_id`, `call_sid`, `caller_id` and `called_number` come from
+ElevenLabs' `system__*` dynamic variables, not from the model, and no tool has a confirmation parameter. The prompt says agent
 text is data, never instructions; decisions count only through `submit_answer`
 with the owner's own words; a high-risk allow needs `verify_pin` first; an
 inbound call reveals nothing before the PIN; and an unclear answer is asked
-once more, then reported as `unclear`. Version 2 (HL-14) puts a persona section
+once more, then (since version 4) left to the text fallback. Version 2 (HL-14) puts a persona section
 from plan section 6 before those rules and says the persona cannot bend them.
 Version 3 (HL-14b) adds, in the outbound steps, that each ask is read on its own
 turn in the ask's own words (key words, nickname, tool), never two asks in one
 turn, that asking again re-reads the same ask rather than a paraphrase, and that
 a `text` decision carries the owner's words verbatim (the `text` tool parameter
-says so too), which is what the daemon's voice confirmation matches against;
+says so too), which is what the daemon's voice confirmation matches against.
+Version 4 (HL-14c, the owner's decision on #44) makes approval
+conversational in the outbound steps: any clear phrasing counts; every allow is
+read back in one short sentence with the ask's key words and submitted only
+after the owner's yes to it, with that reply as `owner_words`; a no is
+submitted at once, never read back; when unsure the agent asks once ("Sorry, is
+that a yes or a no?" with the read-back for a permission request); after a
+second unclear reply it says it will text, submits nothing for that ask and
+moves on, replacing the HL-08 sentence that submitted `unclear`; it asks for
+the PIN at most once per call and never goes quiet. These are prompt rules:
+the daemon does not require the read-back exchange in the transcript until
+HL-09c. `submit_answer` no longer
+offers the model `unclear`; the daemon still parses it from an agent on an
+older definition, and it still ends the ask as no answer.
 `SAFETY_RULES` in the providers tests checks each rule word for word, and a
 snapshot covers the whole prompt, first message and agent body. See
 [voice.md](voice.md#the-persona). `hotlineAgentConfig` refuses a voice id that
@@ -518,8 +541,11 @@ Rules:
   expiry.
 - **No pickup.** A call that is not picked up or fails is retried once after
   `DEFAULT_RETRY_DELAY_SECONDS` (120); then the ask is texted. After a dropped
-  call, or a call that ended with the ask still open, it is texted at once. An
-  unclear answer ends the ask; it is not retried by text.
+  call, or a call that ended with the ask still open, it is texted at once. That
+  is also how an ask ends that the voice agent left without a decision after
+  two unclear replies (definition v4): the call is `dropped` and the ask is
+  texted. An `unclear` report (from an agent on an older definition) ends the
+  ask; it is not retried by text.
 - **Notifications** (`notify`) only ever go by text and need no answer. They end
   with `delivered` once the daemon reports `text-sent`, or as `no-answer`
   (`failed` or `timeout`) when the text fails or never goes out.

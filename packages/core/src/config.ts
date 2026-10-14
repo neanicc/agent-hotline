@@ -132,6 +132,10 @@ export const Config = z.strictObject({
       voiceId: z.string().min(1).max(100).optional(),
       agentId: z.string().min(1).max(100).optional(),
       agentPhoneNumberId: z.string().min(1).max(100).optional(),
+      /** Id (not the value) of the ElevenLabs workspace secret holding `elevenlabs.toolSecret`. Set by `hotline voice apply`. */
+      toolSecretId: z.string().min(1).max(128).optional(),
+      /** ElevenLabs ids of the server tools, keyed by tool name. Set by `hotline voice apply`. */
+      toolIds: z.record(z.string().regex(/^[a-z_]{1,40}$/), z.string().min(1).max(128)).optional(),
     })
     .prefault({}),
   sms: z

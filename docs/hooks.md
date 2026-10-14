@@ -317,9 +317,11 @@ older one, whose hook was killed before it could cancel it.
 
 ## Config snippets
 
-`hotline install claude|codex` (HL-11) will write these with a backup and a
-diff. Until then, add them by hand. Until packaging (HL-15) puts `hotline` on
-your `PATH`, use `node /absolute/path/to/apps/cli/dist/main.js` as the command.
+`hotline install claude|codex` writes these with a backup and a diff, and
+`hotline doctor` checks that each `--wait-seconds` is below its `timeout`; see
+[install.md](install.md). To add them by hand before packaging (HL-15) puts
+`hotline` on your `PATH`, use `node /absolute/path/to/apps/cli/dist/main.js` as
+the command.
 
 ### Claude Code
 

@@ -23,6 +23,13 @@ Never fabricate an entry; "not tested" is a valid result.
   each one on its own turn in the ask's own words and waits for your answer
   before the next; your answers count (no `voice.answer-unconfirmed` in the
   daemon log for answers you gave clearly).
+- Conversational approval (definition v4): say "yeah, go for it" to a
+  permission request; it reads the request back in one short sentence and asks
+  for a yes; say "yes" and the agent runs it. Say "nope" to another: it is
+  denied at once with no read-back. Mumble twice to a third: it asks "is that a
+  yes or a no?", then says it will text you, and the text arrives when the call
+  ends. Check the daemon log has no `voice.answer-unconfirmed` for the
+  confirmed yes.
 - Claude Code: ask it to "use ask_human to ask me which color to use, then
   continue". Answer by voice; check the session continues with your answer.
 - Codex: `hotline away on`, give it a task that needs a command approval. Approve

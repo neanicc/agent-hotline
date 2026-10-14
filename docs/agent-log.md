@@ -1438,6 +1438,264 @@ Template:
   Today's daemon check would also refuse some of these flows, for example a
   "hmm" before the confirmed yes, until that separate ticket lands.
 
+## 2026-10-14 — HL-11 Installer and doctor
+
+- Decision / change: `hotline init`, `install`, `doctor`, `voice list|set|apply`
+  and `test-call` in `apps/cli` (setup guide: `docs/install.md`); `away on|off`
+  from HL-06 is listed in the usage and the guide.
+  - `init` writes the 0700 home, the 0600 config with the PIN's scrypt hash
+    (`hashPin`), and credentials in the secret store. Settings come from flags
+    or prompts; the PIN and credentials only from no-echo prompts or
+    `HOTLINE_*` environment variables, never flags, because process arguments
+    are visible to other users. A PIN shorter than 6 digits warns. `init`
+    generates `elevenlabs.toolSecret`. It makes no network call.
+  - ElevenLabs provisioning is a separate `hotline voice apply` (carry-over
+    from HL-08): workspace secret, four tools and the agent from
+    `hotlineToolConfigs` and `hotlineAgentConfig`, created once and updated
+    (PATCH) afterwards. The ids are saved in the config as each is created
+    (new optional `voice.toolSecretId` and `voice.toolIds` in core's config
+    schema), so a failure part way never orphans one. `voice set` validates
+    with `isVoiceId` before saving or sending, then re-applies. The client
+    lives in `apps/cli/src/elevenlabs-admin.ts`, not `packages/providers`,
+    to stay clear of HL-14b's files; moving it is a follow-up.
+  - `install` edits only Hotline's entries (identified by the
+    `hook <agent> <event>` command or the `hotline` server name), with a
+    timestamped 0600 backup and a printed diff, `--dry-run` and `--uninstall`.
+    Idempotent: an entry that is already right stays in place. Codex's MCP
+    table sits in a marked TOML block (no TOML dependency); a hand-written
+    `[mcp_servers.hotline]` is refused, never edited. Symlinked configs are
+    refused. Under the test runner or `HOTLINE_TEST_MODE=1`, `--home` is
+    required and `--project` must sit inside it; the Keychain needs an
+    injected exec and HTTP an injected fetch, otherwise the command fails.
+  - `doctor` checks the config, secret presence (never values), the daemon's
+    `/v1/health` with the token on 127.0.0.1, away mode, hook waits against
+    hook timeouts, Codex `tool_timeout_sec` and Claude's per-server timeout
+    and `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` against `policy.askTimeoutMinutes`,
+    the deployed agent's `definition-v<n>` tag against
+    `AGENT_DEFINITION_VERSION`, its voice and tools, and `tunnel.publicUrl`.
+    Exit 1 on any FAIL. A stopped daemon is a WARN.
+  - `test-call` refuses without config, agent id, phone number id and API
+    key, prints that it will ring the owner's phone (last four digits), and
+    asks for `yes` unless `--yes`. With `voice.provider: fake` it uses the
+    fake provider and nothing rings.
+- Evidence (worktree, Node 24.11.0):
+  - `scripts/ci/run.sh build` and `test` pass: 1277 tests in 51 files. New:
+    agent-config (14), install (11), init (9), voice and test-call (11),
+    doctor (6), text-diff (3), core config (1).
+  - The scenario suite does not exist yet (HL-12); the eval stage prints
+    NOT RUN.
+  - Real agent integration, temporary home only (`HOME` / `CODEX_HOME`
+    pointed at a scratch directory): after `hotline install` from the built
+    CLI, `codex mcp get hotline` (Codex 0.146.0) shows the server with
+    `tool_timeout_sec: 2100`, and `claude mcp get hotline` (Claude Code
+    2.1.299) shows it at user scope and connected. A second install reported
+    both Codex files unchanged. The built CLI ran `init`, `away on`, `doctor`
+    (12 pass, 2 warn for the not-yet-started daemon, exit 0), `test-call` on
+    the fake provider and `install codex --uninstall`. No model calls, no
+    Codex `/hooks` trust step, no real ElevenLabs or Twilio request.
+  - Live call: not done (human, docs/live-check.md).
+- Greptile review fixes on PR #45:
+  - `voice apply` now PATCHes the existing workspace secret with the current
+    local tool secret on every run (`PATCH /v1/convai/secrets/{id}`), so
+    changing stores or re-running `init` cannot strand a stale secret.
+  - Hook ownership no longer depends on the launcher: any command shaped
+    exactly `<program> hook <agent> <event>` plus Hotline's own options is
+    Hotline's, for install, uninstall and doctor alike.
+  - The Codex check recognises `mcp_servers.hotline` in every TOML form
+    (quoted names, `hotline = {...}` under `[mcp_servers]`, dotted and inline
+    keys) and refuses to edit; doctor reads `tool_timeout_sec` from them.
+  - `doctor` fails when the agent lacks any of the four tools or their ids
+    are not recorded; `voice list` follows `next_page_token` (10 pages at
+    most, then says so); a cancelled prompt rejects instead of hanging; the
+    diff falls back to a block replacement past 1,000,000 table cells.
+  - Each fix has a test; `scripts/ci/run.sh build` and `test` pass after
+    catching up with main (HL-14b, definition v3): 1297 tests in 53 files.
+- Staff review fixes on PR #45 (heads 517d927 and a4ddf9a):
+  - `doctor` reads each tool (`GET /v1/convai/tools/{id}`) and fails when its
+    URL is not `<tunnel.publicUrl>/hooks/el/tools/<name>` or its header uses
+    another secret id than `voice.toolSecretId`.
+  - `test-call` bypasses the daemon's call policy by design, so it keeps a
+    two-minute cooldown (`test-call.json`); the bypass is documented. The
+    daemon already ignores and audits a post-call for an unknown conversation
+    (`voice.post-call-ignored`, covered in `orchestration.test.ts`).
+  - Hook ownership needs `hook` after a launcher that is `hotline`, an
+    absolute path or `node <file>.js`; a bare `myguard hook ...` is never
+    Hotline's.
+  - `init --force` refuses an unreadable config instead of dropping its ids;
+    `voice set` says "saved, but not applied" when the re-apply fails;
+    backups are created 0600 with `wx` instead of copy-then-chmod.
+  - Not changed: `doctor` still sends the token to whatever holds the
+    daemon's port on 127.0.0.1, the same trust the MCP server and hooks
+    already place in that port (docs/mcp.md).
+- Staff review fixes on PR #45 (head 0c7d791):
+  - The printed install diff masks credential-looking values (JSON and TOML
+    keys like `token`, `secret`, `key`, `auth`; anything after `Bearer`), so
+    a reformatted `~/.claude.json` never shows other servers' tokens.
+  - `install` re-reads each file just before replacing it and aborts that
+    file if it changed (Claude Code rewrites `~/.claude.json` while running).
+    No automated test covers the race itself: there is no seam between the
+    two reads, and adding one only for a test was not worth it.
+  - An absolute-path launcher is Hotline's only when its file name contains
+    `hotline` or it is this run's `--command`.
+  - The test-call cooldown fails closed on an untrusted or unreadable stamp.
+  - 1304 tests in 53 files pass (`scripts/ci/run.sh build` and `test`).
+- Staff review fixes on PR #45 (head 7182d3c):
+  - Hook ownership is exact: `hotline`, this run's `--command`, an absolute
+    path to a file named `hotline`, or `node .../apps/cli/dist/main.js`.
+    Other wrappers need the same `--command` again; `doctor` takes it too.
+  - `install` checks for a concurrent write before writing the backup, so
+    an aborted run leaves no stray backup.
+  - `init --force` names the old store when `--secret-store` changes, and
+    the docs say the `HOTLINE_*` variables are for scripted setup only.
+- Staff review fixes on PR #45 (head 7558af3): `init` tells the owner to
+  run `hotline voice apply` when it generates a new tool secret for an
+  already deployed agent (doctor can compare only the secret id, not its
+  value); `deployAgent` names an id it created but could not record. Left as
+  is: a failed real test call still starts the 2-minute cooldown (safe).
+- Open issues or follow-ups:
+  - `doctor` does not show the monthly cost estimate from plan section 8 yet.
+  - Move the ElevenLabs management client into `packages/providers` once
+    HL-14b has landed.
+  - Importing the Twilio number into ElevenLabs is manual
+    (`--agent-phone-number-id`); `voice apply` could do it.
+  - Clearing `voice.voiceId` does not reset the deployed agent's voice: the
+    agent body omits `tts` when no voice is set.
+
+## 2026-10-14 — HL-14c Conversational approval in the voice persona (#49)
+
+- Owner direction (autopilot session, quoted on #44): approving should be "as
+  natural as possible"; when the voice agent thinks it heard a yes it confirms
+  ("is that a yes?"), when it thinks it may be a no it asks, it "should never
+  stay quiet", it "should text u after two unclear replies", and "the reason for
+  this change is I want the least friction/irritation for user", confirming
+  "any chill way possible that isn't ambiguous". On #44 the owner chose option
+  (b): after two unclear replies submit nothing and let the ask fall back to a
+  text. HL-14b (#40) had been refused this prompt edit twice by the local
+  permission system before that decision existed; this time the edit went
+  through.
+- Decision / change: `AGENT_DEFINITION_VERSION` is 4. In the outbound steps,
+  with step numbers kept: step 2 takes any clear phrasing, requires a one-sentence
+  read-back with the ask's key words before any allow ("Allow pnpm test in
+  demo-app? Yes?"), submits the allow only on the owner's yes to it with that
+  reply as `owner_words`, and submits a no at once without a read-back; step 5
+  asks for the PIN at most once per call; step 6 asks once ("Sorry, is that a
+  yes or a no?" plus the read-back for a permission request), then after a
+  second unclear reply says out loud it will text, submits nothing and moves on,
+  and never goes quiet. Only one HL-08 sentence changed (the `unclear`
+  submission), and `SAFETY_RULES` was updated for that sentence only; the
+  snapshot diff is the three step edits and the `definition-v4` tag.
+- Decisions (no human available):
+  - `submit_answer` no longer offers `unclear` to the model (the tool enum and
+    description), so the tool and the prompt agree; the daemon still parses
+    `unclear` from an agent on an older definition and still ends the ask as no
+    answer. Both paths are safe; neither approves.
+  - A clear yes to the yes-or-no question counts as the reply to the read-back,
+    since that question carries the read-back; this avoids asking for two yeses.
+  - No daemon code changed: an ask left without a decision when the owner spoke
+    already ends the call as `dropped` and texts the ask at once (queue
+    `textOnly: "after-call"`). An unanswered text expires as no answer
+    (reason `dropped`), which denies a permission request.
+  - The fake voice provider gets `read-back` and `unsure` steps and the
+    `confirms()` and `unsureTwice()` scripts; `answer`, `allows()` and
+    `unclear()` are unchanged so existing daemon tests (HL-09b's area) keep
+    their meaning. `unclear` now documents itself as definition v3 behaviour.
+- Evidence (automated, worktree, Node 24 locally): `scripts/ci/run.sh build`
+  passes; `CI=true scripts/ci/run.sh test` passes (1325 tests in 54 files). New:
+  prompt tests for the read-back, the immediate no, the yes-or-no question, the
+  PIN-once rule, the text-fallback sentence and the trimmed tool enum
+  (`elevenlabs-agent.test.ts`); fake flows for read-back, a no to the
+  read-back, a plain no, and unsure twice for a permission and a question
+  (`fake-voice.test.ts`); `readings()` recognising the read-back and the
+  yes-or-no question as the same ask, with the reply confirming the allow
+  (`persona-readings.test.ts`); end to end through the daemon, a confirmed
+  read-back allows (low risk, and high risk after one PIN), a no to it denies,
+  and unsure twice texts the ask at once and expires to a deny, or is answered
+  by the text reply (`conversational-approval.test.ts`). Scenario suite: not
+  built yet (HL-12). No ElevenLabs request was made and no real call was
+  placed; whether the real model follows the protocol is a live-check item
+  (added to `docs/live-check.md`).
+- Open issues or follow-ups:
+  - HL-09c (#42): require the read-back exchange in the transcript, and accept
+    a natural yes after the read-back even when an earlier turn was a hedge.
+    Today `voice-confirm.ts` refuses an allow when any earlier owner turn about
+    the ask sounds doubtful, so "hmm" then "is that a yes or a no?" then "yes"
+    is not confirmed and the ask is texted (fails closed).
+  - A read-back too short to share half of a long ask's key words is not
+    recognised as a reading, so the yes after it is not counted and the ask is
+    texted. HL-09c may want to match read-backs on fewer key words.
+  - The call log records an undecided call as `dropped` and the expired ask's
+    reason as `dropped`; a distinct reason would read better in the log.
+- Bot staff review on #49 (no P0 or P1). The P3 on the fake's read-back depending on the `asks` line layout is answered
+  with a comment naming `describeAsk`'s fence order; the fake-voice tests pin
+  the read-back's exact words. The P2s go to follow-ups, not this PR:
+  enforcing that the read-back names the request (its command or tool words)
+  and that the allow's words come from the reply to it is HL-09c's
+  `voice-confirm.ts` change. Until then the daemon still confirms an allow
+  from the owner's yes in the original reading's window. Real-model
+  behaviour stays a live-check item. Unconfirmed allows are already audited
+  as `voice.answer-unconfirmed` with their reason. The docs say plainly
+  that the read-back is a prompt rule, not a daemon control, until HL-09c
+  (which should also bind the confirming yes to a turn naming the request).
+- Greptile P2 on #49 fixed: the fake's read-back dropped the tool, so two asks
+  differing only by tool (`Read` and `Write` on the same text) read back
+  identically and tied in `readings()`. It now says "Allow <tool> to <text>
+  for <session>? Yes?", with a two-ask test that both read-backs are
+  recognised and both allows confirm. The prompt's read-back rule is
+  unchanged (what it wants to do and the session name); step 1 already
+  lists the tool among an ask's key words. 1326 tests in 54 files pass.
+
+## 2026-10-14 — HL-09b Split the call orchestrator (#41)
+
+- Decision / change: pure refactor of `packages/daemon/src/orchestrator.ts`
+  (950 lines) before HL-10 adds the inbound line, as the HL-09 staff reviews
+  asked. Each part is now well under 400 lines. The coordinator
+  (`orchestrator.ts`) keeps
+  `CallOrchestrator`: step serialization, the queue, the timer, start/stop and
+  resolving asks. `orchestrator-state.ts` holds the saved state schema,
+  the fail-closed restore of state and rate windows, crash recovery
+  (`recoverPending`) and the before-send checks (`notReachable`, `dropEvent`).
+  `orchestrator-voice.ts` holds placing calls, holding `submit_answer`
+  answers and post-call confirmation. `orchestrator-texts.ts` holds
+  sending texts with codes and applying the owner's replies; `owner-texts.ts`
+  is unchanged.
+- Decision: a fourth file for the text side, beyond the issue's three. Keeping
+  text sending and reply handling in the coordinator would have left it near
+  520 lines; `owner-texts.ts` stays pure (planning and wording only) rather
+  than gaining store and provider effects.
+- Decision: the public API is unchanged. `index.ts` is untouched and still
+  exports `./orchestrator.js`, which re-exports `ORCHESTRATOR_STATE_KEY`,
+  `RATE_STATE_KEY`, `CALL_CENTS_PER_MINUTE` and `OrchestratorLog`; the new
+  classes are internal. The parts share one `OrchestratorState` holder and read
+  the logger through a getter, so `attachLog` still reaches them. Statement
+  order (saves, audit entries, provider calls) is the same as before.
+- Evidence: no test file changed. `pnpm run lint`, `pnpm run typecheck` pass;
+  `pnpm run test` 41 files, 907 tests, passed three times in a row. After
+  catching up with main (HL-06, HL-14b, HL-11, which did not touch the
+  orchestrator), `scripts/ci/run.sh build` passes and `test` passed 53 files,
+  1308 tests, three times in a row, including HL-14b's
+  `persona-readings.test.ts`. After a second catch-up (HL-14c, #49, which
+  added daemon tests but no daemon source), build passes and `test` passed 54
+  files, 1326 tests, three times in a row. Mutation
+  checks on moved code, each reverted: high-risk allow without the PIN
+  accepted (1 test fails), a maybe-placed call not failed on recovery (1),
+  a wrong code not burning the waiting codes (1). Scenario suite not built yet
+  (HL-12).
+- Reviews: bot staff review on b7d0d01 approved (93, one P3), and on 0f82134
+  approved with nits (90, two P3s). Greptile P2, fixed: `docs/daemon.md` now
+  lists every exported name, `OrchestratorLog` included. P3s, fixed: `VoiceCalls`
+  takes the queue step through its constructor like `OwnerTexts`, and
+  `OrchestratorState.data` documents that it is mutated in place and never
+  kept across steps. P3 left as is: the coordinator's header keeps the
+  subsystem's safety rules, as a pointer for the files it now names.
+- Open issues or follow-ups: hosted CI on 0f82134 (a docs-only commit) failed
+  once on Ubuntu in `packages/core/test/queue.property.test.ts` ("silence never
+  yields approval", fast-check seed -763136370): `expected 1767225600011 to be
+  less than or equal to 1767225600010`. It reproduces deterministically with that
+  seed and path on this branch, which does not touch `packages/core`, so it is a
+  pre-existing queue or test bug that random seeds rarely hit, not this refactor.
+  It is not fixed here (out of lane); the rerun passed. Tracked in #50
+  (`lane:core`), after the staff review on ff58e6a (P2) asked for an issue.
+
 ## 2026-10-14 — HL-06b Classify the action the agent will actually run (#46)
 
 - Decision / change: `classifyPermission` now judges what runs, not only the
