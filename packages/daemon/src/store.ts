@@ -98,7 +98,8 @@ export const MIGRATIONS: readonly string[] = [
   ) STRICT;
   CREATE TABLE inbound_messages (
     message_sid TEXT PRIMARY KEY,
-    handled_at TEXT NOT NULL
+    handled_at TEXT NOT NULL,
+    finished INTEGER NOT NULL DEFAULT 0
   ) STRICT;
   `,
 ];
@@ -520,6 +521,19 @@ export class HotlineStore {
     this.db
       .prepare("INSERT OR IGNORE INTO inbound_messages (message_sid, handled_at) VALUES (?, ?)")
       .run(messageSid, at.toISOString());
+  }
+
+  /** Records that a claimed text was handled to the end, whatever its outcome. */
+  finishInboundMessage(messageSid: string): void {
+    this.db.prepare("UPDATE inbound_messages SET finished = 1 WHERE message_sid = ?").run(messageSid);
+  }
+
+  /** Texts that were claimed but never finished: the daemon stopped part way through them. */
+  unfinishedInboundMessages(): string[] {
+    return this.db
+      .prepare("SELECT message_sid FROM inbound_messages WHERE finished = 0 ORDER BY handled_at, message_sid")
+      .all()
+      .map((row) => String(row.message_sid));
   }
 
   // Audit ------------------------------------------------------------------

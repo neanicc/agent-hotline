@@ -178,12 +178,42 @@ describe("owner texts", () => {
 
     const sms = new FakeSmsProvider({ ownerNumber: OWNER });
     const restarted = await orchestrator({ sms });
-    // B's text goes out on recovery; Twilio redelivers the old "yes", which changes nothing.
-    expect(sms.sent).toHaveLength(1);
+    // The owner is told the interrupted text may not have counted, and B's text goes
+    // out on recovery. Twilio then redelivers the old "yes", which changes nothing.
+    expect(sms.sent.map((s) => s.text)).toEqual([
+      expect.stringContaining("restarted while handling a text from you"),
+      expect.stringContaining(b.text),
+    ]);
+    expect(store.unfinishedInboundMessages()).toEqual([]);
     expect(
       await restarted.ownerText({ messageSid: sid(7), body: "yes", receivedAt: clock.now }),
     ).toBeUndefined();
     expect(store.getAnswer(b.id)).toBeUndefined();
+  });
+});
+
+describe("owner texts that fail", () => {
+  it("tells the owner when handling a text failed, and ignores Twilio's retry", async () => {
+    const target = await orchestrator({ sms: new FakeSmsProvider({ ownerNumber: OWNER }) });
+    const ask = addAsk();
+    await advance(target, 20_000);
+    const append = store.appendAudit.bind(store);
+    store.appendAudit = (event, ...rest) => {
+      if (event === "sms.received") throw new Error("disk full");
+      return append(event, ...rest);
+    };
+    const reply = await target.ownerText({ messageSid: sid(9), body: "yes", receivedAt: clock.now });
+    store.appendAudit = append;
+    expect(reply).toBe("Hotline: something went wrong and your text was not recorded. Please send it again.");
+    expect(store.getAnswer(ask.id)).toBeUndefined();
+    expect(store.unfinishedInboundMessages()).toEqual([]);
+    expect(
+      await target.ownerText({ messageSid: sid(9), body: "yes", receivedAt: clock.now }),
+    ).toBeUndefined();
+    // A fresh text works.
+    expect(await target.ownerText({ messageSid: sid(10), body: "yes", receivedAt: clock.now })).toBe(
+      "Hotline: got it.",
+    );
   });
 });
 

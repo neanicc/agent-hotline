@@ -263,6 +263,7 @@ export class CallOrchestrator {
    * policy applies); a text is sent again (at least once); the rest is idempotent.
    */
   async #recover(): Promise<void> {
+    await this.#reportInterruptedTexts(this.#options.clock());
     const pending = this.#state.pending;
     if (pending.length === 0) return;
     this.#state.pending = [];
@@ -555,10 +556,32 @@ export class CallOrchestrator {
       if (this.#store.inboundMessageHandled(message.messageSid)) return undefined;
       // Claimed before any effect, so a redelivery after a crash part way through
       // can never apply the same words again, say to a different waiting ask. A
-      // failure after this point loses the text (no answer); the owner can resend.
+      // failure after this point loses the text (no answer), and the owner is told
+      // so: in the reply here, or by text on the next start after a crash.
       this.#store.markInboundMessage(message.messageSid, message.receivedAt);
-      return this.#handleText(message);
+      try {
+        return await this.#handleText(message);
+      } catch (error) {
+        this.#log.error({ err: error, messageSid: message.messageSid }, "owner text failed");
+        this.#store.appendAudit("sms.failed", { messageSid: message.messageSid }, message.receivedAt);
+        return TEXT_REPLIES.notHandled;
+      } finally {
+        this.#store.finishInboundMessage(message.messageSid);
+      }
     });
+  }
+
+  /** Tells the owner, once, about texts a crash interrupted: they may not have counted. */
+  async #reportInterruptedTexts(now: Date): Promise<void> {
+    const interrupted = this.#store.unfinishedInboundMessages();
+    if (interrupted.length === 0) return;
+    for (const messageSid of interrupted) this.#store.finishInboundMessage(messageSid);
+    this.#store.appendAudit("sms.interrupted", { count: interrupted.length }, now);
+    try {
+      await this.#options.sms?.sendToOwner(TEXT_REPLIES.interrupted);
+    } catch (error) {
+      this.#log.warn({ err: error }, "could not tell the owner about interrupted texts");
+    }
   }
 
   async #handleText({ messageSid, body, receivedAt, optOutType }: OwnerSms): Promise<string | undefined> {

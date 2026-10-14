@@ -376,8 +376,11 @@ store, the providers and the webhooks through core's pure queue
   owner text is handled once per message SID, also across restarts
   (`inbound_messages`). The SID is recorded before the text has any effect, so a
   redelivery after a crash part way through can never apply the same words
-  again, say to a different waiting ask; a failure after that loses the text
-  (no answer) and the owner can resend. `call me` becomes the queue's `call-me`
+  again, say to a different waiting ask. A failure after that loses the text
+  (no answer), and the owner is told: a step that fails replies "your text was
+  not recorded, please send it again", and texts a crash interrupted (claimed
+  but never finished) get one text on the next start saying a text may not
+  have been recorded. `call me` becomes the queue's `call-me`
   event and gets "calling you now" or the queue's reason for not calling.
   `status` waits for HL-10; `stop` and Twilio's keywords get no reply of
   Hotline's own. Any other text answers only an ask Hotline texted that is
@@ -412,7 +415,7 @@ and `audit`. Each table keeps the record as JSON validated by the HL-02 schemas,
 on write and on read, next to the columns the daemon queries by. Migration 3
 (HL-09) adds `asks.end_reason` (why an ask ended without an answer, set by
 `closeAsk`), `daemon_state` (call orchestration's saved state, as JSON) and
-`inbound_messages` (the owner's texts already handled, by message SID).
+`inbound_messages` (the owner's texts claimed, by message SID, and whether each was finished).
 `onAskAdded` tells listeners about each new ask, as `onAskChange` does about
 status changes.
 

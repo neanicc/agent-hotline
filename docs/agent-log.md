@@ -1106,3 +1106,22 @@ Template:
     after handling (1 test fails), no pending actions saved (3), no expiry
     check before sending (1), no `settle` before reads (1), no hedge words (5),
     options not checked (6), done not checked (1).
+- Bot staff review on 1aa5dd7 (approve with nits, score 90, two P2s, two P3s):
+  - P2, fixed: a claimed text that failed or was cut off by a crash was lost
+    silently. `inbound_messages` now records whether a claimed text finished
+    (migration 3, unreleased, gains a `finished` column). A failed step replies
+    "your text was not recorded, please send it again"; on start, texts a crash
+    interrupted get one text telling the owner a text may not have been
+    recorded. Tests in `orchestrator.test.ts`; mutants dropping either message
+    fail 1 test each.
+  - P2, addressed: more tests for the reading heuristic (a paraphrase that
+    keeps most key words is recognised; a vague one is not and confirms
+    nothing; one turn reading two different asks equally reads neither). The
+    thresholds stay, since misses fail closed. Real-call evidence belongs in the
+    live check (HL-16): count unconfirmed answers (`voice.answer-unconfirmed`)
+    on real calls before tuning.
+  - P3, fixed: `outbound texts off` logs a plain reason string.
+  - P3, not changed: splitting voice holding out of the orchestrator. The SMS
+    half already moved to `owner-texts.ts`; a further split is a follow-up.
+  - Evidence: `scripts/ci/run.sh build` and `test` pass (see the PR's Validation
+    for the count at this head).

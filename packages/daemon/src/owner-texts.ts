@@ -96,6 +96,9 @@ export const TEXT_REPLIES = {
     "Hotline: that code does not match a waiting request, so nothing was approved. Text CALL ME to answer by phone.",
   answered: "Hotline: got it.",
   notRecorded: "Hotline: that answer could not be recorded.",
+  notHandled: "Hotline: something went wrong and your text was not recorded. Please send it again.",
+  interrupted:
+    "Hotline: it restarted while handling a text from you, which may not have been recorded. If it still matters, please send it again.",
   ambiguous: (waiting: number) =>
     `Hotline: ${waiting} requests are waiting, so a reply cannot say which one it answers. Nothing was recorded. Text CALL ME to go through them by phone.`,
   notCalling: (reason: string) => `Hotline: not calling, ${reason}.`,

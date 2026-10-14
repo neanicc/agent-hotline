@@ -41,6 +41,35 @@ describe("readings", () => {
     expect(readings([GREETING, both], [PUSH, same])).toEqual([undefined, undefined]);
   });
 
+  it("recognises a paraphrased reading that keeps most key words", () => {
+    const paraphrase = agent("Codex in api-server wants to add left-pad with npm install. Okay?");
+    expect(readings([GREETING, paraphrase], [PUSH, INSTALL])).toEqual([undefined, 1]);
+  });
+
+  it("recognises no ask in a reading that drops most key words, so nothing confirms", () => {
+    const vague = agent("The other one is about a package. Okay?");
+    const transcript = [GREETING, vague, owner("yes")];
+    expect(readings(transcript, [PUSH, INSTALL])).toEqual([undefined, undefined, undefined]);
+    for (const index of [0, 1]) {
+      expect(
+        confirmVoiceDecision({ transcript, asks: [PUSH, INSTALL], index, decision: allow, ownerWords: "yes" })
+          .confirmed,
+      ).toBe(false);
+    }
+  });
+
+  it("reads none when one turn reads two different asks equally, so a yes confirms neither", () => {
+    const both = agent("Two things: git push origin main, and npm install left-pad.");
+    const transcript = [GREETING, both, owner("yes")];
+    expect(readings(transcript, [PUSH, INSTALL])[1]).toBeUndefined();
+    for (const index of [0, 1]) {
+      expect(
+        confirmVoiceDecision({ transcript, asks: [PUSH, INSTALL], index, decision: allow, ownerWords: "yes" })
+          .confirmed,
+      ).toBe(false);
+    }
+  });
+
   it("needs most of an ask's key words", () => {
     expect(readings([GREETING, agent("Claude has a question.")], [QUESTION])).toEqual([undefined, undefined]);
   });

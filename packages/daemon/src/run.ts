@@ -327,7 +327,10 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
     if (sms.off !== undefined) daemon.log.info({ reason: sms.off }, "sms webhook off");
     if (voice.off !== undefined) daemon.log.info({ reason: voice.off }, "voice webhooks off");
     if (typeof caller === "string") daemon.log.info({ reason: caller }, "outbound calls off");
-    if (texter === undefined) daemon.log.info({ reason: twilio }, "outbound texts off");
+    if (texter === undefined) {
+      const reason = typeof twilio === "string" ? twilio : "no SMS provider was given";
+      daemon.log.info({ reason }, "outbound texts off");
+    }
     orchestrator.attachLog(daemon.log);
     await orchestrator.start();
     store.appendAudit(
