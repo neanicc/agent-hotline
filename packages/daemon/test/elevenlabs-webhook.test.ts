@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import {
   type ConversationRecord,
   FakeVoiceProvider,
@@ -19,6 +20,8 @@ import {
   createRedactor,
   type ElevenLabsRoutesOptions,
   elevenLabsRoutes,
+  type HotlineStore,
+  InboundLine,
   type LogOptions,
   MAX_POST_CALLS_IN_FLIGHT,
   MAX_STATUS_LENGTH,
@@ -569,6 +572,8 @@ describe("get_status and send_instruction", () => {
         sessionNumber: 2,
         instruction: "now write the tests",
         ownerWords: "tell Codex to now write the tests",
+        // When this call passed the PIN, saved with the held instruction (HL-13b).
+        pinVerifiedAt: now,
       },
     ]);
   });
@@ -1596,5 +1601,182 @@ describe("every server tool is checked against ElevenLabs' record (HL-13a)", () 
       });
     }
     nothingHappened();
+  });
+});
+
+describe("a daemon restart in the middle of things (HL-13b)", () => {
+  let dir: string;
+  let path: string;
+  let store: HotlineStore;
+  let line: InboundLine;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "hotline-hl13b-routes-"));
+    path = join(dir, "hotline.db");
+    await start();
+  });
+
+  afterEach(async () => {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  /** One run: the store on `path`, a fresh PinGate and inbound line, and the routes wired as `runDaemon` wires them. */
+  async function start() {
+    await app.close();
+    store = await openStore(path);
+    pins = new PinGate({
+      check: async (pin) => pin === PIN,
+      clock: () => now,
+      failures: storedPinFailures(store),
+    });
+    line = new InboundLine({ store, clock: () => now, redact: (text) => text });
+    await line.recover();
+    app = server({
+      deliveries: storedToolDeliveries(store),
+      savedPinVerifiedAt: (conversationId) => line.pinVerifiedAt(conversationId),
+      handlers: {
+        submitAnswer: (answer) => {
+          answers.push(answer);
+          return "recorded";
+        },
+        getStatus: (call) => line.getStatus(call),
+        sendInstruction: (instruction) => line.sendInstruction(instruction),
+        postCall: (event, receivedAt) => line.postCall(event, receivedAt, false),
+      },
+    });
+  }
+
+  async function restart() {
+    store.close();
+    await start();
+  }
+
+  const inbound = (conversation: string) => ({
+    ...binding(conversation),
+    caller_id: OWNER,
+    called_number: AGENT_NUMBER,
+  });
+
+  it("confirms an instruction held before the restart from the real post-call event", async () => {
+    store.putSession({
+      id: "s-1",
+      agent: "claude-code",
+      cwd: "/work/demo-app",
+      nickname: "Claude in demo-app",
+      state: "working",
+      registeredAt: now.toISOString(),
+      lastSeenAt: now.toISOString(),
+    });
+    unplaced.add("conv_r");
+    const verifiedAt = now.getTime() / 1000;
+    expect((await tool("verify_pin", { ...inbound("conv_r"), pin: PIN })).json()).toMatchObject({
+      verified: true,
+    });
+    expect((await tool("get_status", inbound("conv_r"))).json()).toMatchObject({ result: "ok" });
+    const held = await tool("send_instruction", {
+      ...inbound("conv_r"),
+      session_number: 1,
+      instruction: "run the tests",
+      owner_words: "session 1, run the tests",
+    });
+    expect(held.json()).toEqual({ result: "queued" });
+    await restart();
+    now = new Date(now.getTime() + 60_000);
+    // ElevenLabs' record of the finished call: it began 60 s before the PIN.
+    const turn = (role: "agent" | "user", message: string, at: number) => ({
+      role,
+      message,
+      time_in_call_secs: at,
+    });
+    const response = await postCall({
+      type: "post_call_transcription",
+      event_timestamp: now.getTime() / 1000,
+      data: {
+        agent_id: AGENT_ID,
+        conversation_id: "conv_r",
+        status: "done",
+        transcript: [
+          turn("agent", "Hey, it's your hotline.", 0),
+          turn("user", "4821", 55),
+          turn("agent", "One live session. Session 1, Claude in demo-app: working.", 62),
+          turn("user", "session 1, run the tests", 70),
+          turn("agent", "For session 1: run the tests. Send it?", 75),
+          turn("user", "Yes.", 80),
+          turn("agent", "Sent.", 85),
+        ],
+        metadata: {
+          start_time_unix_secs: verifiedAt - 60,
+          call_duration_secs: 90,
+          phone_call: {
+            direction: "inbound",
+            external_number: OWNER,
+            agent_number: AGENT_NUMBER,
+            phone_number_id: PHONE_ID,
+            call_sid: `CA${"0".repeat(31)}1`,
+          },
+        },
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(store.listInstructions().map((i) => [i.sessionId, i.text, i.status])).toEqual([
+      ["s-1", "run the tests", "queued"],
+    ]);
+  });
+
+  it("never lets the saved PIN time serve a live tool after a restart", async () => {
+    store.putSession({
+      id: "s-1",
+      agent: "claude-code",
+      cwd: "/work/demo-app",
+      nickname: "Claude in demo-app",
+      state: "working",
+      registeredAt: now.toISOString(),
+      lastSeenAt: now.toISOString(),
+    });
+    unplaced.add("conv_l");
+    await tool("verify_pin", { ...inbound("conv_l"), pin: PIN });
+    await tool("get_status", inbound("conv_l"));
+    await tool("send_instruction", {
+      ...inbound("conv_l"),
+      session_number: 1,
+      instruction: "run the tests",
+      owner_words: "session 1, run the tests",
+    });
+    await restart();
+    expect(line.pinVerifiedAt("conv_l")).toEqual(now);
+    expect((await tool("get_status", inbound("conv_l"))).json()).toMatchObject({ result: "pin-required" });
+  });
+
+  it("checks the same right PIN again on the same call after a restart", async () => {
+    unplaced.add("conv_p");
+    const say = () => tool("verify_pin", { ...inbound("conv_p"), pin: PIN });
+    expect((await say()).json()).toMatchObject({ verified: true });
+    await restart();
+    expect(pins.isVerified("conv_p")).toBe(false);
+    expect((await say()).json()).toMatchObject({ verified: true });
+    expect(pins.isVerified("conv_p")).toBe(true);
+    expect((await tool("get_status", inbound("conv_p"))).json()).toMatchObject({ result: "ok" });
+  });
+
+  it("still answers a wrong guess from before the restart from memory, spending nothing", async () => {
+    unplaced.add("conv_g");
+    const guess = () => tool("verify_pin", { ...inbound("conv_g"), pin: "1111" });
+    expect((await guess()).json()).toMatchObject({ verified: false, attempts_left: 1 });
+    await restart();
+    expect((await guess()).json()).toMatchObject({ verified: false, attempts_left: 1 });
+    expect(store.pinFailureTimes("inbound")).toHaveLength(1);
+  });
+
+  it("refuses a delivery whose saved response is damaged, rather than run it again", async () => {
+    await answer();
+    expect(answers).toHaveLength(1);
+    store.close();
+    const raw = new DatabaseSync(path);
+    raw.exec("UPDATE tool_deliveries SET response = 'not json'");
+    raw.close();
+    await start();
+    expect((await answer()).json()).toEqual({ result: "busy" });
+    expect(answers).toHaveLength(1);
   });
 });

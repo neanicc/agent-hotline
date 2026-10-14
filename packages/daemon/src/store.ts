@@ -828,20 +828,26 @@ export class HotlineStore {
 
   // Server-tool deliveries ----------------------------------------------------
 
-  /** The response a remembered tool delivery got, while it has not expired. */
+  /**
+   * The response a remembered tool delivery got, while it has not expired.
+   * Throws StoreError when the row is there but unreadable.
+   */
   toolDelivery(key: string, nowMs: number): Record<string, unknown> | undefined {
     const row = this.db
       .prepare("SELECT response FROM tool_deliveries WHERE key = ? AND expires_at_ms > ?")
       .get(key, Math.trunc(nowMs));
     if (row === undefined) return undefined;
+    let response: unknown;
     try {
-      const response = JSON.parse(String(row.response)) as unknown;
-      return typeof response === "object" && response !== null && !Array.isArray(response)
-        ? (response as Record<string, unknown>)
-        : undefined;
+      response = JSON.parse(String(row.response)) as unknown;
     } catch {
-      return undefined;
+      response = undefined;
     }
+    // A damaged row must not read as "never delivered", or the delivery would run again.
+    if (typeof response !== "object" || response === null || Array.isArray(response)) {
+      throw new StoreError("A stored tool delivery is unreadable");
+    }
+    return response as Record<string, unknown>;
   }
 
   /** Remembers a tool delivery that changed state, with the response it got. */

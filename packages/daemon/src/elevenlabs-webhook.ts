@@ -143,6 +143,12 @@ export interface VoiceInstruction extends ToolCall {
   sessionNumber: number;
   instruction: string;
   ownerWords: string;
+  /**
+   * When this call passed the PIN (the PinGate's time). Saved with the held
+   * instruction so that after a restart the post-call transcript can still
+   * tell the owner's turns from the caller's (`savedPinVerifiedAt`).
+   */
+  pinVerifiedAt?: Date;
 }
 
 export type SubmitAnswerResult = "recorded" | "needs-pin" | "not-recorded";
@@ -202,6 +208,14 @@ export interface ElevenLabsRoutesOptions {
    * first response instead of running again (HL-13b). Defaults to memory.
    */
   deliveries?: ToolDeliveryMemory;
+  /**
+   * When a previous run's PinGate verified this conversation, as the inbound
+   * line saved it with the call's held instructions (HL-13b). Used only to
+   * tell the owner's turns from the caller's in the finished call's
+   * transcript, never to serve a tool: after a restart the live tools still
+   * need the PIN again.
+   */
+  savedPinVerifiedAt?: (conversationId: string) => Date | undefined;
 }
 
 /**
@@ -286,6 +300,12 @@ function parseJson(text: string | undefined): unknown {
   }
 }
 
+/** The `conversation_id` a raw tool body names, or "" when it names none. */
+function conversationOf(raw: string): string {
+  const id = (parseJson(raw) as { conversation_id?: unknown } | null | undefined)?.conversation_id;
+  return typeof id === "string" ? id : "";
+}
+
 function cut(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
@@ -367,7 +387,13 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
         fallback.prune(now);
         remembered.prune(now);
         const seen = fallback.get(key, now) ?? remembered.get(key, now);
-        if (seen !== undefined) return { response: Promise.resolve(seen), repeat: true };
+        // A right PIN remembered from before a restart, on a call this run's
+        // PinGate has not verified: the owner said the same PIN again on the
+        // same call, so it is checked again (a right PIN spends no budget).
+        // A remembered wrong guess is still answered from memory.
+        const recheck =
+          seen?.verified === true && name === "verify_pin" && !pins.isVerified(conversationOf(raw));
+        if (seen !== undefined && !recheck) return { response: Promise.resolve(seen), repeat: true };
         full = running.size + fallback.size(now) + remembered.size(now) >= MAX_TOOL_DELIVERIES;
       } catch {
         // The memory cannot be read: refuse rather than risk running a delivery twice.
@@ -436,7 +462,15 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
   };
   const ownerContext: OwnerContext = {
     ownerNumber: options.ownerNumber,
-    pinVerifiedAt: (conversationId) => pins.verifiedAt(conversationId),
+    // The earlier of this run's PIN and one a previous run saved with held
+    // instructions: both are this call passing the PIN. The saved one only
+    // labels a finished call's transcript; it never serves a tool.
+    pinVerifiedAt: (conversationId) => {
+      const times = [pins.verifiedAt(conversationId), options.savedPinVerifiedAt?.(conversationId)].filter(
+        (at): at is Date => at !== undefined && !Number.isNaN(at.getTime()),
+      );
+      return times.length === 0 ? undefined : new Date(Math.min(...times.map((at) => at.getTime())));
+    },
     placedCall: options.placedCall,
   };
   const report = async (what: ToolName | "post-call", failure: Unverified) => {
@@ -567,11 +601,13 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
     }),
     toolRoute("send_instruction", async (body, call) => {
       if (!pins.isVerified(call.conversationId)) return pinRequired;
+      const verifiedAt = pins.verifiedAt(call.conversationId);
       const result = await handlers.sendInstruction({
         ...call,
         sessionNumber: body.session_number,
         instruction: body.instruction,
         ownerWords: body.owner_words,
+        ...(verifiedAt === undefined ? {} : { pinVerifiedAt: verifiedAt }),
       });
       return { result };
     }),

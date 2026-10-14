@@ -3221,6 +3221,32 @@ Template:
   1001-call cap test went from 1.3 s to past its 5 s timeout. Such calls are
   no longer saved; after a restart they get `unknown-session` until the
   status is read again (fails closed). The timeout was not changed.
+- Review fixes (Greptile and staff review of 2096831):
+  - Greptile P1, held instructions lose PIN proof: on an inbound call the
+    post-call transcript counts the person's turns as the owner's only after
+    the PinGate's verification time, which a fresh PinGate does not have, so a
+    restored instruction could never be confirmed through the real route (the
+    unit test had passed an owner-labelled transcript straight to `postCall`).
+    `send_instruction` now passes the PIN time with the instruction. The inbound
+    line saves it with the call (earliest wins), and the route's owner context
+    uses the earlier of it and this run's PinGate time
+    (`savedPinVerifiedAt`). It only labels the finished transcript; live tools
+    still need the PIN again. New route-level test: PIN, status and
+    instruction, restart, then the real signed post-call webhook queues the
+    instruction (fails with the saved time ignored).
+  - Greptile P1, same right PIN after a restart stays unverified: the
+    byte-identical `verify_pin` was answered from the stored delivery without
+    touching the new PinGate. A remembered `verified: true` on a call this
+    run has not verified is now checked again; remembered wrong guesses are
+    still answered from memory.
+  - Greptile P2: a damaged `tool_deliveries` row now throws instead of
+    reading as "never delivered", so the tool answers `busy` and does not
+    run again.
+  - Staff review P2s: `#restore` no longer throws from the constructor (a bad
+    table counts as unreadable and the owner is texted), and deleting a saved
+    call cannot throw past the audit and text about lost instructions.
+  - Staff review P3s (SMS slots can delay a genuine text; two prunes and a
+    count per tool call) are documented and left as they are.
 - Open issues or follow-ups: security.md update after #77; count out-of-queue
   texts against the text rate limits; HL-13c (#80) retries processing records
   and normalises the SMS body comparison in the same files.

@@ -194,12 +194,21 @@ allows no early second text. Two things stay in memory on purpose, both
 failing closed: which calls proved the PIN (after a restart a call is asked
 for it again; until then `get_status` and `send_instruction` answer
 `pin-required`), and each call's own two attempts (a call that was
-mid-guess gets them back, still inside the stored budgets). The post-call
-replay memory stays in memory too; why a replay after a restart is harmless
-is under "Once per event" below. If the PIN budgets cannot be read or written,
-the attempt is refused without checking the PIN; if the delivery memory
-cannot be read, the tool answers `busy`; if it cannot be written, the delivery
-is remembered for this run only.
+mid-guess gets them back, still inside the stored budgets). The owner saying
+the same right PIN again on the same call sends a byte-identical
+`verify_pin`; a remembered `verified: true` is therefore checked again when
+this run's PinGate has not verified the call (a right PIN spends no budget),
+while a remembered wrong guess is still answered from memory. When a call
+holds an instruction, the time it passed the PIN is saved with it, and the
+post-call check uses the earlier of that and this run's PinGate time to tell
+the owner's turns from the caller's; it never serves a live tool. The
+post-call replay memory stays in memory too; why a replay after a restart is
+harmless is under "Once per event" below. If the PIN budgets cannot be read
+or written, the attempt is refused without checking the PIN; if the delivery
+memory cannot be read, or a saved response is damaged, the tool answers
+`busy`; if it cannot be written, the delivery is remembered for this run
+only. If the saved calls cannot be read at start, the daemon still starts and
+the owner is texted that instructions may not have been passed on.
 
 **Verified by pull (HL-13a).** The tool secret and the post-call HMAC secret
 can be read by any process running as the owner, so neither proves a request
@@ -932,9 +941,10 @@ anyone else's text the generic SMS reply.
   the status is read again. Past that without a post-call event they are dropped, audited
   (`no post-call event`) and the owner gets the same "not passed on" text.
   A restart keeps them: the next run loads them before any route serves, and
-  the post-call event confirms them against the pulled transcript as usual
-  (after a restart, against the redacted copy, so an instruction with a
-  secret in it fails closed). On start, calls past their hour are dropped as
+  the post-call event confirms them against the pulled transcript as usual,
+  with the owner's turns told apart by the PIN time saved with them (after a
+  restart, against the redacted copy, so an instruction with a secret in it
+  fails closed). On start, calls past their hour are dropped as
   above, and a saved call that does not read back is deleted, audited
   (`unreadable`) and texted about. A run before HL-13b saved only counts
   (`daemon_state` `inbound.held`); the first start after upgrading audits

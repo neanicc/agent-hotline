@@ -309,6 +309,9 @@ async function voiceWebhook(
     onUnverified: (what, failure) => alarm.report("voice", what, failure),
     // In SQLite, so a replayed tool call after a restart does not run again.
     deliveries: storedToolDeliveries(store),
+    // When a previous run's PinGate verified a call holding instructions, so
+    // its post-call transcript still shows the owner's turns after a restart.
+    savedPinVerifiedAt: (conversationId) => inbound.pinVerifiedAt(conversationId),
     handlers: {
       submitAnswer: (answer) => orchestrator.submitAnswer(answer),
       getStatus: (call) => inbound.getStatus(call),

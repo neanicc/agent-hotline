@@ -435,6 +435,19 @@ describe("send_instruction", () => {
     expect(sms.sent).toHaveLength(1);
   });
 
+  it("starts even when the saved calls cannot be read, and tells the owner they may be lost", async () => {
+    store.close();
+    // A store that cannot be read must not keep the daemon from starting.
+    expect(() => new InboundLine({ store, clock: () => now, redact: (text) => text, sms })).not.toThrow();
+    store = await openStore(join(dir, "hotline.db"));
+    const broken = Object.create(store) as HotlineStore;
+    broken.listInboundCalls = () => {
+      throw new Error("database disk image is malformed");
+    };
+    await new InboundLine({ store: broken, clock: () => now, redact: (text) => text, sms }).recover();
+    expect(sms.sent.map((s) => s.text)).toEqual([expect.stringContaining("was not passed on")]);
+  });
+
   it("tells the owner about a saved call that does not read back, and forgets it", async () => {
     store.putInboundCall("conv-bad", now.getTime() + 60_000, { held: [{ id: "x" }, { id: "y" }] });
     await restart();
