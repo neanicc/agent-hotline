@@ -1,4 +1,7 @@
+import { mkdtemp, rm } from "node:fs/promises";
 import { request } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   type ConversationRecord,
   FakeVoiceProvider,
@@ -19,10 +22,14 @@ import {
   type LogOptions,
   MAX_POST_CALLS_IN_FLIGHT,
   MAX_STATUS_LENGTH,
+  MAX_TOOL_CALLS_IN_FLIGHT,
   MAX_TOOL_DELIVERIES,
+  openStore,
   PinGate,
   POST_CALL_BODY_LIMIT,
   type SubmitAnswerResult,
+  storedPinFailures,
+  storedToolDeliveries,
   type ToolCall,
   type VoiceAnswer,
   type VoiceHandlers,
@@ -411,6 +418,92 @@ describe("repeated tool calls", () => {
     expect(answers).toHaveLength(MAX_TOOL_DELIVERIES);
     now = new Date(now.getTime() + 2 * 60 * 60 * 1000 + 1);
     expect((await answer({ owner_words: "one too many" })).json()).toEqual({ result: "recorded" });
+  });
+
+  it("answer a replay from the store after a restart, without running the tool again", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "hotline-hl13b-tools-"));
+    const path = join(dir, "hotline.db");
+    let store = await openStore(path);
+    try {
+      const restart = async () => {
+        await app.close();
+        store.close();
+        store = await openStore(path);
+        // A new run: a fresh PinGate, with the stored budgets.
+        pins = new PinGate({
+          check: async (pin) => pin === PIN,
+          clock: () => now,
+          failures: storedPinFailures(store),
+        });
+        app = server({ deliveries: storedToolDeliveries(store) });
+      };
+      await restart();
+      await tool("verify_pin", {
+        ...binding("conv_in"),
+        caller_id: OWNER,
+        called_number: AGENT_NUMBER,
+        pin: PIN,
+      });
+      const instruction = () =>
+        tool("send_instruction", {
+          ...binding("conv_in"),
+          caller_id: OWNER,
+          called_number: AGENT_NUMBER,
+          session_number: 1,
+          instruction: "run the tests",
+          owner_words: "session 1, run the tests",
+        });
+      const guess = () => tool("verify_pin", { ...binding(), pin: "1111" });
+      expect((await instruction()).json()).toEqual({ result: "queued" });
+      expect((await guess()).json()).toMatchObject({ verified: false, attempts_left: 1 });
+      expect(instructions).toHaveLength(1);
+      await restart();
+      // The replays get the first responses: no second instruction, no second guess counted.
+      expect((await instruction()).json()).toEqual({ result: "queued" });
+      expect((await guess()).json()).toMatchObject({ verified: false, attempts_left: 1 });
+      expect(instructions).toHaveLength(1);
+      expect(store.pinFailureTimes("outbound")).toHaveLength(1);
+      // Past the memory window the replayed instruction runs again, and now needs the PIN.
+      now = new Date(now.getTime() + 2 * 60 * 60 * 1000 + 1);
+      expect((await instruction()).json()).toMatchObject({ result: "pin-required" });
+      expect(instructions).toHaveLength(1);
+    } finally {
+      store.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuse a delivery, rather than risk running it twice, when the memory cannot be read", async () => {
+    await app.close();
+    app = server({
+      deliveries: {
+        get: () => {
+          throw new Error("database is locked");
+        },
+        put: () => {},
+        size: () => 0,
+        prune: () => {},
+      },
+    });
+    expect((await answer()).json()).toEqual({ result: "busy" });
+    expect(answers).toEqual([]);
+  });
+
+  it("still remember a delivery for this run when the store cannot keep it", async () => {
+    await app.close();
+    app = server({
+      deliveries: {
+        get: () => undefined,
+        put: () => {
+          throw new Error("disk full");
+        },
+        size: () => 0,
+        prune: () => {},
+      },
+    });
+    await answer();
+    await answer();
+    expect(answers).toHaveLength(1);
   });
 
   it("keep reading the status on every request", async () => {
@@ -852,6 +945,74 @@ describe("post-call webhook under load", () => {
     });
     expect(accepted.status).toBe(200);
     expect(closed).toHaveLength(MAX_POST_CALLS_IN_FLIGHT);
+    for (const req of stalled) req.destroy();
+  });
+});
+
+describe("server tools under load", () => {
+  let listening: FastifyInstance | undefined;
+
+  afterEach(async () => {
+    await listening?.close();
+  });
+
+  /** Senders with the tool secret that start a `verify_pin` body and never finish it. */
+  function stall(port: number, closed: boolean[] = []) {
+    return Array.from({ length: MAX_TOOL_CALLS_IN_FLIGHT }, () => {
+      const req = request({
+        host: "127.0.0.1",
+        port,
+        path: "/hooks/el/tools/verify_pin",
+        method: "POST",
+        agent: false,
+        headers: {
+          "content-type": "application/json",
+          "x-hotline-tool-secret": TOOL_SECRET,
+          "content-length": "1000",
+        },
+      });
+      req.on("error", () => closed.push(true));
+      req.write("{");
+      return req;
+    });
+  }
+
+  async function verify(port: number) {
+    const body = { ...binding(), pin: PIN };
+    conversations.set(body.conversation_id, liveRecord(body));
+    return send({
+      port,
+      method: "POST",
+      path: "/hooks/el/tools/verify_pin",
+      headers: { "content-type": "application/json", "x-hotline-tool-secret": TOOL_SECRET },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it(`reads at most ${MAX_TOOL_CALLS_IN_FLIGHT} calls of one tool at once`, async () => {
+    listening = server();
+    await listening.listen({ host: "127.0.0.1", port: 0 });
+    const port = listening.addresses()[0]?.port ?? 0;
+    const stalled = stall(port);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const refused = await verify(port);
+    expect([refused.status, refused.body]).toEqual([403, ""]);
+    expect(pins.isVerified("conv_1")).toBe(false);
+    for (const req of stalled) req.destroy();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect((await verify(port)).status).toBe(200);
+    expect(pins.isVerified("conv_1")).toBe(true);
+  });
+
+  it("cuts off tool senders that do not finish their body in time, freeing their slots", async () => {
+    listening = server({ toolBodyTimeoutMs: 200 });
+    await listening.listen({ host: "127.0.0.1", port: 0 });
+    const port = listening.addresses()[0]?.port ?? 0;
+    const closed: boolean[] = [];
+    const stalled = stall(port, closed);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect((await verify(port)).status).toBe(200);
+    expect(closed).toHaveLength(MAX_TOOL_CALLS_IN_FLIGHT);
     for (const req of stalled) req.destroy();
   });
 });

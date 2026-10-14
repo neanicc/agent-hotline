@@ -115,7 +115,33 @@ export const MIGRATIONS: readonly string[] = [
   ) STRICT;
   CREATE INDEX instructions_by_session ON instructions (session_id, status, received_at);
   `,
+  // Limits and memories that must survive a restart (HL-13b): wrong PINs per
+  // call direction, the inbound line's calls with the instructions they hold
+  // until the post-call event, and the server-tool deliveries that changed
+  // state. Times are epoch milliseconds from the daemon's clock.
+  `
+  CREATE TABLE pin_failures (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    direction TEXT NOT NULL CHECK (direction IN ('inbound', 'outbound')),
+    at_ms INTEGER NOT NULL
+  ) STRICT;
+  CREATE INDEX pin_failures_by_direction ON pin_failures (direction, at_ms);
+  CREATE TABLE inbound_calls (
+    conversation_id TEXT PRIMARY KEY,
+    expires_at_ms INTEGER NOT NULL,
+    record TEXT NOT NULL
+  ) STRICT;
+  CREATE TABLE tool_deliveries (
+    key TEXT PRIMARY KEY,
+    expires_at_ms INTEGER NOT NULL,
+    response TEXT NOT NULL
+  ) STRICT;
+  CREATE INDEX tool_deliveries_by_expiry ON tool_deliveries (expires_at_ms);
+  `,
 ];
+
+/** The two PIN failure budgets: calls to the Hotline number, and calls Hotline placed. */
+export type PinFailureDirection = "inbound" | "outbound";
 
 /** Where an owner instruction is in its life: waiting for its session, handed over, or dropped undelivered. */
 export const InstructionStatus = z.enum(["queued", "delivered", "dropped"]);
@@ -725,6 +751,120 @@ export class HotlineStore {
       }
       return dropped;
     });
+  }
+
+  // PIN failures ------------------------------------------------------------
+
+  /** Counts one wrong-PIN attempt on `direction`. Returns its handle, for `removePinFailure`. */
+  addPinFailure(direction: PinFailureDirection, atMs: number): number {
+    const result = this.db
+      .prepare("INSERT INTO pin_failures (direction, at_ms) VALUES (?, ?)")
+      .run(direction, Math.trunc(atMs));
+    return Number(result.lastInsertRowid);
+  }
+
+  /** Takes back an attempt that was counted before its PIN turned out right. */
+  removePinFailure(handle: number): void {
+    this.db.prepare("DELETE FROM pin_failures WHERE seq = ?").run(handle);
+  }
+
+  /** When each kept wrong-PIN attempt on `direction` was made, oldest first. */
+  pinFailureTimes(direction: PinFailureDirection): number[] {
+    return this.db
+      .prepare("SELECT at_ms FROM pin_failures WHERE direction = ? ORDER BY at_ms, seq")
+      .all(direction)
+      .map((row) => Number(row.at_ms));
+  }
+
+  /** Forgets wrong-PIN attempts made at or before `beforeMs`. */
+  prunePinFailures(beforeMs: number): void {
+    this.db.prepare("DELETE FROM pin_failures WHERE at_ms <= ?").run(Math.trunc(beforeMs));
+  }
+
+  // Inbound calls -------------------------------------------------------------
+
+  /**
+   * Saves one call's inbound-line memory (the session numbers its status read
+   * out and the instructions it holds), as the inbound line validated it.
+   */
+  putInboundCall(conversationId: string, expiresAtMs: number, record: unknown): void {
+    this.db
+      .prepare(
+        `INSERT INTO inbound_calls (conversation_id, expires_at_ms, record) VALUES (?, ?, ?)
+         ON CONFLICT (conversation_id) DO UPDATE SET expires_at_ms = excluded.expires_at_ms,
+           record = excluded.record`,
+      )
+      .run(conversationId, Math.trunc(expiresAtMs), JSON.stringify(record));
+  }
+
+  deleteInboundCall(conversationId: string): void {
+    this.db.prepare("DELETE FROM inbound_calls WHERE conversation_id = ?").run(conversationId);
+  }
+
+  /**
+   * Every saved call memory, oldest expiry first. `record` is the parsed JSON,
+   * or undefined when it is not JSON; the inbound line validates it.
+   */
+  listInboundCalls(): { conversationId: string; expiresAtMs: number; record: unknown }[] {
+    return this.db
+      .prepare(
+        "SELECT conversation_id, expires_at_ms, record FROM inbound_calls ORDER BY expires_at_ms, conversation_id",
+      )
+      .all()
+      .map((row) => {
+        let record: unknown;
+        try {
+          record = JSON.parse(String(row.record)) as unknown;
+        } catch {
+          record = undefined;
+        }
+        return {
+          conversationId: String(row.conversation_id),
+          expiresAtMs: Number(row.expires_at_ms),
+          record,
+        };
+      });
+  }
+
+  // Server-tool deliveries ----------------------------------------------------
+
+  /** The response a remembered tool delivery got, while it has not expired. */
+  toolDelivery(key: string, nowMs: number): Record<string, unknown> | undefined {
+    const row = this.db
+      .prepare("SELECT response FROM tool_deliveries WHERE key = ? AND expires_at_ms > ?")
+      .get(key, Math.trunc(nowMs));
+    if (row === undefined) return undefined;
+    try {
+      const response = JSON.parse(String(row.response)) as unknown;
+      return typeof response === "object" && response !== null && !Array.isArray(response)
+        ? (response as Record<string, unknown>)
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Remembers a tool delivery that changed state, with the response it got. */
+  putToolDelivery(key: string, expiresAtMs: number, response: Record<string, unknown>): void {
+    this.db
+      .prepare(
+        `INSERT INTO tool_deliveries (key, expires_at_ms, response) VALUES (?, ?, ?)
+         ON CONFLICT (key) DO UPDATE SET expires_at_ms = excluded.expires_at_ms, response = excluded.response`,
+      )
+      .run(key, Math.trunc(expiresAtMs), JSON.stringify(response));
+  }
+
+  /** How many remembered tool deliveries have not expired. */
+  countToolDeliveries(nowMs: number): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS kept FROM tool_deliveries WHERE expires_at_ms > ?")
+      .get(Math.trunc(nowMs));
+    return Number(row?.kept ?? 0);
+  }
+
+  /** Forgets tool deliveries that expired at or before `nowMs`. */
+  pruneToolDeliveries(nowMs: number): void {
+    this.db.prepare("DELETE FROM tool_deliveries WHERE expires_at_ms <= ?").run(Math.trunc(nowMs));
   }
 
   // Audit ------------------------------------------------------------------

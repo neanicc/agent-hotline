@@ -14,13 +14,13 @@ import {
 } from "@hotline/providers";
 import { ensureApiToken } from "./api-token.js";
 import { hotlinePaths, loadConfig } from "./config-file.js";
-import { elevenLabsRoutes } from "./elevenlabs-webhook.js";
+import { elevenLabsRoutes, storedToolDeliveries } from "./elevenlabs-webhook.js";
 import { InboundLine } from "./inbound-line.js";
 import { acquireDaemonLock } from "./lock.js";
 import type { LogDestination, LogLevel } from "./logger.js";
 import { CallOrchestrator, type OrchestratorLog } from "./orchestrator.js";
 import { silentLog } from "./orchestrator-state.js";
-import { PinGate, verifyPin } from "./pin.js";
+import { PinGate, storedPinFailures, verifyPin } from "./pin.js";
 import { ForgeryAlarm } from "./provider-pull.js";
 import { createRedactor, type Redactor } from "./redact.js";
 import { type JudgeHost, nodeJudgeHost, selectReplyJudge } from "./reply-judge.js";
@@ -284,6 +284,8 @@ async function voiceWebhook(
     check: (pin) => verifyPin(pin, pinHash),
     clock,
     onVerified: (pin) => redactor.addShortSecret(pin),
+    // In SQLite, so a restart never resets the hourly or daily guess budget.
+    failures: storedPinFailures(store),
     // Audited and texted to the owner by the inbound line.
     onLockout: (direction) => {
       // Only defensive: pinLockout audits first and its text already catches provider errors.
@@ -305,6 +307,8 @@ async function voiceWebhook(
     conversation: lookup,
     agentPhoneNumberId,
     onUnverified: (what, failure) => alarm.report("voice", what, failure),
+    // In SQLite, so a replayed tool call after a restart does not run again.
+    deliveries: storedToolDeliveries(store),
     handlers: {
       submitAnswer: (answer) => orchestrator.submitAnswer(answer),
       getStatus: (call) => inbound.getStatus(call),

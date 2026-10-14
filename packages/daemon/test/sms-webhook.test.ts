@@ -1,3 +1,4 @@
+import { request } from "node:http";
 import {
   type FormParams,
   MAX_SMS_LENGTH,
@@ -12,6 +13,7 @@ import {
   createRedactor,
   GENERIC_SMS_REPLY,
   type LogOptions,
+  MAX_SMS_IN_FLIGHT,
   OTHER_SENDER_REPLIES_PER_HOUR,
   type OwnerSms,
   parseFormBody,
@@ -19,6 +21,7 @@ import {
   twilioSmsRoute,
   UNCONFIRMED_SMS_REPLY,
 } from "../src/index.js";
+import { send } from "./http.js";
 
 const OWNER = "+15555550100";
 const SMS_NUMBER = "+15555550101";
@@ -593,6 +596,78 @@ describe("verify by pull (HL-13a)", () => {
       GENERIC_SMS_REPLY,
     );
     expect(unverified).toEqual([]);
+  });
+});
+
+describe("POST /hooks/twilio/sms under load", () => {
+  let listening: FastifyInstance | undefined;
+
+  afterEach(async () => {
+    await listening?.close();
+  });
+
+  /** Senders with a signature header that start a body and never finish it. */
+  function stall(port: number, closed: boolean[] = []) {
+    return Array.from({ length: MAX_SMS_IN_FLIGHT }, () => {
+      const req = request({
+        host: "127.0.0.1",
+        port,
+        path: PATH,
+        method: "POST",
+        agent: false,
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          "x-twilio-signature": "forged",
+          "content-length": "1000",
+        },
+      });
+      req.on("error", () => closed.push(true));
+      req.write("Body=");
+      return req;
+    });
+  }
+
+  /** A genuine owner text over the network; its status. */
+  async function genuine(port: number): Promise<number> {
+    const params = message();
+    recordAtTwilio(params);
+    const response = await send({
+      port,
+      method: "POST",
+      path: PATH,
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        "x-twilio-signature": twilioSignature(AUTH_TOKEN, `${PUBLIC_URL}${PATH}`, params),
+      },
+      body: encode(params),
+    });
+    return response.status;
+  }
+
+  it(`reads at most ${MAX_SMS_IN_FLIGHT} unverified bodies at once`, async () => {
+    listening = server();
+    await listening.listen({ host: "127.0.0.1", port: 0 });
+    const port = listening.addresses()[0]?.port ?? 0;
+    const stalled = stall(port);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(await genuine(port)).toBe(403);
+    expect(received).toEqual([]);
+    for (const req of stalled) req.destroy();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(await genuine(port)).toBe(200);
+    expect(received).toHaveLength(1);
+  });
+
+  it("cuts off senders that do not finish their body in time, freeing their slots", async () => {
+    listening = server({ bodyTimeoutMs: 200 });
+    await listening.listen({ host: "127.0.0.1", port: 0 });
+    const port = listening.addresses()[0]?.port ?? 0;
+    const closed: boolean[] = [];
+    const stalled = stall(port, closed);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(await genuine(port)).toBe(200);
+    expect(closed).toHaveLength(MAX_SMS_IN_FLIGHT);
+    for (const req of stalled) req.destroy();
   });
 });
 
