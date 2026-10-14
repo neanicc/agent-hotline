@@ -146,7 +146,7 @@ hotline away on
 
 Ask Codex (or Claude Code) for a task that needs a command approval, such as
 running the tests. When the phone rings, say "yeah, go for it". The voice reads
-the request back in one short sentence ("Allow pnpm test in demo-app? Yes?");
+the request back in one short sentence ("Allow Bash: pnpm test, for Claude in demo-app? Yes?");
 say "yes", and the command runs. For a second request, say "nope": it is denied
 at once, with no read-back.
 
@@ -184,4 +184,4 @@ rm -rf "$DEMO"; unset DEMO HOTLINE_HOME
 
 Check the recording for real phone numbers, tokens or file contents before you
 share it. Record what the phone scenes showed (date, commit, what happened) in
-[live-check.md](live-check.md#record).
+[live-check.md](live-check.md#5-results-template).

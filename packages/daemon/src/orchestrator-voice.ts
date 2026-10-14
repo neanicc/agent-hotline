@@ -20,7 +20,17 @@ import {
   type PendingVoiceAnswer,
 } from "./orchestrator-state.js";
 import type { HotlineStore } from "./store.js";
-import { answerWindows, judgeVoiceDecision, type ReadAsk, type ReplyJudge } from "./voice-confirm.js";
+import {
+  answerWindows,
+  FailClosedJudge,
+  judgeVoiceDecision,
+  type ReadAsk,
+  type ReplyJudge,
+  type VoiceConfirmation,
+} from "./voice-confirm.js";
+
+/** `VoiceCalls.judgeHeld`'s checks, by ask id, with the held answer each one checked. */
+export type HeldChecks = ReadonlyMap<string, { held: PendingVoiceAnswer; check: VoiceConfirmation }>;
 
 /** Rough cost of a call minute in US cents (Twilio voice plus ElevenLabs Agents), for `hotline doctor`. */
 export const CALL_CENTS_PER_MINUTE = 12;
@@ -218,12 +228,57 @@ export class VoiceCalls {
   }
 
   /**
+   * Checks a transcription's held decisions against the transcript, asking
+   * the judge about replies the fast path cannot decide, for `postCall`. It
+   * reads the held answers once, at the start, and changes nothing, so call
+   * orchestration runs it outside its steps: a slow judge (up to
+   * `judgeTimeoutMs`) never holds a tool call, a text or a tick. Every held
+   * decision is checked at once, so a slow judge costs one timeout per call.
+   */
+  async judgeHeld(event: Exclude<PostCallEvent, { type: "other" }>): Promise<HeldChecks> {
+    const call = event.type === "transcription" ? this.#callFor(event.conversationId) : undefined;
+    if (call === undefined) return new Map();
+    return new Map(
+      await Promise.all(
+        this.#heldInputs(call, event).map(({ askId, held, input }) =>
+          judgeVoiceDecision(input, this.#options.judge, this.#options.judgeTimeoutMs).then(
+            (check) => [askId, { held, check }] as const,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /** The held decisions of `call` that the transcript must confirm, with what to check them against. */
+  #heldInputs(call: LiveCall, event: Exclude<PostCallEvent, { type: "other" }>) {
+    if (event.type !== "transcription") return [];
+    const asks = call.askIds.map((askId) => this.#readAsk(askId));
+    return call.askIds.flatMap((askId, index) => {
+      const held = call.answers[askId];
+      if (held === undefined || held.conflict || held.decision === "unclear") return [];
+      const input = {
+        transcript: event.transcript,
+        asks,
+        index,
+        decision: held.decision,
+        ownerWords: held.ownerWords,
+      };
+      return [{ askId, held, input }];
+    });
+  }
+
+  /**
    * A verified post-call webhook. The held answers that the transcript confirms
    * reach the queue (through `process`) before the call's end, as the queue
    * requires. Idempotent: an event for a call that is no longer live (a replay,
-   * a call given up on) changes nothing.
+   * a call given up on) changes nothing. `judged` holds `judgeHeld`'s checks
+   * for this event.
    */
-  async postCall(event: Exclude<PostCallEvent, { type: "other" }>, receivedAt: Date): Promise<void> {
+  async postCall(
+    event: Exclude<PostCallEvent, { type: "other" }>,
+    receivedAt: Date,
+    judged: HeldChecks = new Map(),
+  ): Promise<void> {
     const call = this.#callFor(event.conversationId);
     if (call === undefined) {
       this.#store.appendAudit("voice.post-call-ignored", { kind: event.type }, receivedAt);
@@ -238,25 +293,16 @@ export class VoiceCalls {
     } else {
       const asks = call.askIds.map((askId) => this.#readAsk(askId));
       const settledIds = new Set<string>();
-      // Every held decision is checked at once, so a slow judge costs one
-      // timeout per call, not one per ask.
+      // The judge already ran (`judgeHeld`, outside call orchestration's
+      // steps). A held answer that changed since is checked again by the fast
+      // path alone (`FailClosedJudge`), so nothing here waits for a model.
       const checks = new Map(
         await Promise.all(
-          call.askIds.flatMap((askId, index) => {
-            const held = call.answers[askId];
-            if (held === undefined || held.conflict || held.decision === "unclear") return [];
-            const input = {
-              transcript: event.transcript,
-              asks,
-              index,
-              decision: held.decision,
-              ownerWords: held.ownerWords,
-            };
-            return [
-              judgeVoiceDecision(input, this.#options.judge, this.#options.judgeTimeoutMs).then(
-                (check) => [askId, check] as const,
-              ),
-            ];
+          this.#heldInputs(call, event).map(({ askId, held, input }) => {
+            const earlier = judged.get(askId);
+            if (earlier !== undefined && earlier.held === held)
+              return Promise.resolve([askId, earlier.check] as const);
+            return judgeVoiceDecision(input, new FailClosedJudge()).then((check) => [askId, check] as const);
           }),
         ),
       );

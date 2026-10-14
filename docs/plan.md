@@ -61,7 +61,9 @@ and your own voice.
 - `packages/core` holds the logic that decides who to call, when, and what an
   answer means. Pure, injected clock, fully unit-tested.
 - `packages/daemon` is the only long-running process. Agents talk to it on
-  localhost with a token; phone providers talk to it through the tunnel.
+  localhost with a token; phone providers talk to it through the tunnel. To
+  judge an unclear spoken approval it may run the owner's own `claude` or
+  `codex` CLI once, isolated (section 8, HL-09d).
 - `packages/providers` hides vendors behind interfaces. Fakes implement the same
   interfaces for tests and the scenario suite.
 - `packages/agents` holds the MCP server and the hook adapters, which are thin
@@ -161,6 +163,27 @@ diff, user-level or `--project`. Tests run it against temporary home directories
   rejected by id and timestamp.
 - Redact secrets and long code before anything leaves the machine; numbers in logs
   show the last four digits only.
+- **Reply judge (plan change, HL-09d, owner direction).** Approvals are
+  interpreted naturally, not by phrase matching, with the least friction and the
+  lowest cost, on the owner's existing plan rather than a new API key. When the
+  owner answers an approval read-back with something the quick yes/no check
+  cannot decide ("yeah, let's ship that one"), the owner's short reply, and only
+  that (redacted, never the request or anything an agent wrote), goes to the
+  owner's own agent provider for one narrow question: did they clearly agree?
+  The daemon uses the first available of the Claude Code CLI on the owner's
+  login (`claude -p`, a small model), the Codex CLI on the owner's login
+  (`codex exec`), and an optional Anthropic API key. Each CLI run is isolated
+  (empty temporary directory, no hooks, no MCP servers, nothing saved, and
+  only the CLI's own login variables from the environment). Claude Code runs
+  with no tools. Codex keeps its shell tool, limited to its read-only sandbox
+  without network, so it is read-only rather than tool-less, and `auto` tries
+  Claude Code first. A yes
+  with a condition ("yes if the tests pass") or taken back is never an
+  approval; errors and timeouts are "unclear". Nothing is sent until the owner
+  chooses the judge: `hotline init` asks once (Enter is yes) or takes
+  `--judge`, and an unset `judge.backend` sends nothing. With no backend, no
+  choice, or `judge.backend: "off"`, such replies are texted instead. High-risk
+  approvals still need the PIN or a confirming text.
 - Rate limits (calls per hour and per day), quiet hours, batching, and a monthly
   cost estimate shown by `hotline doctor`.
 - Expected cost for about 60 minutes of calls and 200 texts a month: roughly

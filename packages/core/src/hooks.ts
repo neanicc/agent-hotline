@@ -124,3 +124,12 @@ export const StopBlockOutput = z.strictObject({
     .refine((reason) => reason.trim().length > 0, "must not be blank"),
 });
 export type StopBlockOutput = z.infer<typeof StopBlockOutput>;
+
+/**
+ * Set to "1" in the environment of the agent CLI the reply judge runs
+ * (`claude -p`, `codex exec`, HL-09d). Hotline's own hook command and MCP
+ * server do nothing under it: a second guard, after hooks and MCP servers are
+ * switched off for that run, so the judge can never phone the owner or reach
+ * the daemon.
+ */
+export const JUDGE_ENV = "HOTLINE_JUDGE";

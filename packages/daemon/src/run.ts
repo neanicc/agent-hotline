@@ -23,6 +23,7 @@ import { silentLog } from "./orchestrator-state.js";
 import { PinGate, verifyPin } from "./pin.js";
 import { ForgeryAlarm } from "./provider-pull.js";
 import { createRedactor, type Redactor } from "./redact.js";
+import { type JudgeHost, nodeJudgeHost, selectReplyJudge } from "./reply-judge.js";
 import { type Exec, openSecretStore } from "./secret-store.js";
 import { type Daemon, startDaemon, type WebhookRoute } from "./server.js";
 import { twilioSmsRoute } from "./sms-webhook.js";
@@ -105,6 +106,12 @@ export interface RunDaemonOptions {
   // or a stopped timer would bypass the configured, owner-bound providers.
   /** For tests and the scenario suite: providers to use instead of the configured ones. */
   providers?: { voice?: VoiceProvider; sms?: SmsProvider };
+  /**
+   * Finds and runs the agent CLI the reply judge uses (HL-09d). Defaults to
+   * `nodeJudgeHost`, which under test mode finds and runs nothing, so tests
+   * inject a fake one to exercise a model-backed judge.
+   */
+  judgeHost?: JudgeHost;
   /** Whether call orchestration ticks on its own timer (default true). */
   autoTick?: boolean;
 }
@@ -349,6 +356,22 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
     if (typeof twilio !== "string") redactor.addSecret(twilio.authToken);
     const caller = options.providers?.voice ?? (await voiceProvider(config, secrets, redactor, fetch));
     const texter = options.providers?.sms ?? smsProvider(config, twilio, redactor, fetch);
+    // The reply judge: the owner's own Claude Code or Codex login, else the
+    // optional API key, else none (such replies are texted). None, too, until
+    // the owner has chosen (`judge.backend` unset).
+    const choice = config.judge.backend;
+    const anthropicKey =
+      choice === undefined || choice === "off" ? undefined : await secrets.get("anthropic.apiKey");
+    if (anthropicKey !== undefined) redactor.addSecret(anthropicKey);
+    const searchPath = options.env.PATH;
+    const judge = await selectReplyJudge({
+      choice,
+      host: options.judgeHost ?? nodeJudgeHost(options.env),
+      ...(searchPath === undefined ? {} : { searchPath }),
+      ...(anthropicKey === undefined ? {} : { apiKey: anthropicKey }),
+      fetch,
+      redact: (text) => redactor.text(text),
+    });
     let daemonLog: OrchestratorLog | undefined;
     const inbound = new InboundLine({
       store,
@@ -366,6 +389,7 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
       ...(texter === undefined ? {} : { sms: texter }),
       redact: (text) => redactor.text(text),
       ...(options.autoTick === undefined ? {} : { autoTick: options.autoTick }),
+      judge: judge.judge,
     });
     orchestrator = calls;
     const alarm = new ForgeryAlarm({ store, clock, ...(texter === undefined ? {} : { sms: texter }) });
@@ -400,6 +424,7 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
       const reason = typeof twilio === "string" ? twilio : "no SMS provider was given";
       daemon.log.info({ reason }, "outbound texts off");
     }
+    daemon.log.info({ backend: judge.backend, detail: judge.detail }, "reply judge");
     orchestrator.attachLog(daemon.log);
     daemonLog = daemon.log;
     await orchestrator.start();
@@ -407,7 +432,12 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
     await inbound.recover();
     store.appendAudit(
       "daemon.started",
-      { version: options.version, apiPort: daemon.apiPort, hooksPort: daemon.hooksPort },
+      {
+        version: options.version,
+        apiPort: daemon.apiPort,
+        hooksPort: daemon.hooksPort,
+        judge: judge.backend,
+      },
       clock(),
     );
     // Listen for signals before announcing readiness, so a stop request is never missed.

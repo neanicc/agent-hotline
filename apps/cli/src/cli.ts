@@ -1,8 +1,8 @@
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import type { Readable, Writable } from "node:stream";
-import { type AgentKind, productName } from "@hotline/core";
-import type { Exec, LogDestination, SignalSource } from "@hotline/daemon";
+import { type AgentKind, JUDGE_ENV, productName } from "@hotline/core";
+import type { Exec, JudgeHost, LogDestination, SignalSource } from "@hotline/daemon";
 import { awayCommand, hookCommand } from "./hook.js";
 import { type Prompter, terminalPrompter } from "./prompt.js";
 import { type CliFetch, loadDaemonSetup } from "./setup.js";
@@ -33,6 +33,12 @@ export interface CliContext {
   fetch?: CliFetch;
   /** Current time, for backup names. */
   now?: () => Date;
+  /**
+   * Finds and runs the agent CLI behind the reply judge (`hotline doctor`,
+   * `hotline daemon`). Default `nodeJudgeHost`, which in test mode finds and
+   * runs nothing.
+   */
+  judgeHost?: JudgeHost;
 }
 
 export function processContext(): CliContext {
@@ -153,6 +159,11 @@ export function mcpUsage(): string {
 const AGENT_FLAGS: Readonly<Record<string, AgentKind>> = { claude: "claude-code", codex: "codex" };
 
 async function mcpCommand(args: readonly string[], out: Output, context: CliContext): Promise<number> {
+  // The reply judge's own agent CLI run (HL-09d): serve nothing, reach no daemon.
+  if (context.env[JUDGE_ENV] === "1") {
+    out.stderr("hotline mcp: inside the reply judge; not serving");
+    return 0;
+  }
   let agent: AgentKind | undefined;
   let port: number | undefined;
   for (let index = 0; index < args.length; index++) {

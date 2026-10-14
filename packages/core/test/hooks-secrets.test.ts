@@ -104,6 +104,7 @@ describe("hook outputs", () => {
 describe("secrets", () => {
   it("names every secret Hotline stores", () => {
     expect(SecretName.options).toEqual([
+      "anthropic.apiKey",
       "daemon.apiToken",
       "elevenlabs.apiKey",
       "elevenlabs.toolSecret",
