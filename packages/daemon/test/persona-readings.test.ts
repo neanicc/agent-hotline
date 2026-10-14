@@ -85,6 +85,16 @@ const step = (ask: number, { words, decision }: (typeof ANSWERS)[number]): Human
   ...(decision.type === "text" ? { text: decision.text } : {}),
 });
 
+/**
+ * As `step`, but an allow is played the definition v4 way (HL-14c): the owner
+ * says yes, the agent reads the request back, and the owner's `words` are the
+ * reply to it. HL-09c confirms an allow only from that reply.
+ */
+const v4Step = (ask: number, answer: (typeof ANSWERS)[number]): HumanStep =>
+  answer.decision.type === "allow"
+    ? { kind: "read-back", ask, words: "sure", reply: answer.words, decision: "allow" }
+    : step(ask, answer);
+
 /** Plays one call with the fake voice agent and returns the transcript as the daemon parses it. */
 async function playCall(asks: readonly VoiceAsk[], steps: readonly HumanStep[]): Promise<TranscriptTurn[]> {
   const postCalls: Record<string, unknown>[] = [];
@@ -114,12 +124,13 @@ describe("the fake voice agent's readings follow the persona and are recognised"
     const asks = ASKS.slice(0, count);
     const transcript = await playCall(
       asks,
-      asks.map((_, i) => step(i + 1, ANSWERS[i] as (typeof ANSWERS)[number])),
+      asks.map((_, i) => v4Step(i + 1, ANSWERS[i] as (typeof ANSWERS)[number])),
     );
     const read = readings(transcript, asks.map(readAsk));
-    // Every ask is read exactly once, by an agent turn, in call order.
+    // Every ask is read by an agent turn, in call order; the allow (ask 1) is
+    // read a second time, by its read-back, right after its first reading.
     const readTurns = read.flatMap((ask, at) => (ask === undefined ? [] : [{ ask, at }]));
-    expect(readTurns.map((turn) => turn.ask)).toEqual(asks.map((_, i) => i));
+    expect(readTurns.map((turn) => turn.ask)).toEqual([0, 0, ...asks.slice(1).map((_, i) => i + 1)]);
     for (const { at } of readTurns) expect(transcript[at]?.role).toBe("agent");
     // And each answer the owner gave right after its reading confirms.
     asks.forEach((_, index) => {
@@ -197,6 +208,23 @@ describe("the fake voice agent's readings follow the persona and are recognised"
         ownerWords: "the second one, skip Windows",
       }).confirmed,
     ).toBe(true);
+  });
+
+  it("confirms an allow read back after the owner answered a later ask first (HL-09c)", async () => {
+    const asks = ASKS.slice(0, 2);
+    const transcript = await playCall(asks, [
+      step(2, ANSWERS[1] as (typeof ANSWERS)[number]),
+      { kind: "read-back", ask: 1, words: "and the first one, sure", reply: "of course", decision: "allow" },
+    ]);
+    expect(
+      confirmVoiceDecision({
+        transcript,
+        asks: asks.map(readAsk),
+        index: 0,
+        decision: { type: "allow" },
+        ownerWords: "of course",
+      }),
+    ).toEqual({ confirmed: true, excerpt: "of course" });
   });
 
   it("tells apart read-backs of two asks that differ only by tool", async () => {

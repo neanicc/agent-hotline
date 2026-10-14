@@ -1970,6 +1970,296 @@ Template:
     confirmation texts if they use another event), so the estimate counts
     them exactly instead of by upper bound.
 
+## 2026-10-14 — HL-09c Voice approvals confirmed by read-back (#42)
+
+- Owner direction (autopilot session, on #42): approving by voice must be as
+  natural as a conversation, with the least friction for the owner: "u can
+  confirm any chill way possible that isn't ambiguous". No keyword list may
+  reject a natural yes. When the voice agent is unsure it asks "is that a yes
+  or a no?" and never goes quiet; after two unclear replies it texts instead.
+- Decision / change (`packages/daemon/src/voice-confirm.ts`): `YES_WORDS` is
+  gone. An `allow` is confirmed by the read-back exchange: the ask's reading,
+  a later agent turn recognised as reading the same ask that asks for a yes (a
+  `?`, "yes" or "confirm"; "Sorry, is that a yes or a no?" plus the read-back
+  counts), and the owner's reply in the window right after it. The reply and
+  every later owner turn about the ask must not sound doubtful (refusal,
+  hedge, doubt, any `n't`, a question back). Doubt before the read-back does
+  not block a clear reply after it. No read-back, a read-back of another ask,
+  the first reading on its own, or a statement repeating the request is not
+  confirmed (the ask is texted). Deny, options, free text, `done` and the
+  high-risk PIN rule are unchanged.
+- Decisions (no human available):
+  - A read-back needs an earlier reading of the same ask anywhere on the call,
+    not necessarily the last ask read. Going back to ask 1 after answering
+    ask 2 with "And the first one: allow ...? Yes?" is natural and still binds
+    to ask 1, since the turn must be recognised as reading that ask and no
+    other. Stricter ordering would text these asks for no safety gain.
+  - Long asks: a turn also reads an ask whose text has more than 8 key words
+    when it names at least 4 of them that no other ask on the call has
+    (`LONG_ASK_KEY_WORDS`); the session name and tool alone never do. (The
+    first version counted any text words and broke ties by subset and share;
+    the security review below replaced that.)
+  - Doubt words added, all fail closed: `hm`, `hmmm`, `kinda`, `sorta`,
+    `whatever`, `meh`, `suppose`, `nuh`, `huh`, `pardon`, `hello`, `repeat`,
+    and the phrases "uh uh" and "uh oh". "Mm-hmm" and "uh-huh" are treated as
+    a yes. Not added: fillers "um" and "uh" (they precede many natural
+    yeses). Not allowed: idioms with a negation word ("no problem", "why
+    not"), since a transcript without commas cannot tell "no problem" from
+    "no, problem is ...".
+  - "Owner stayed unclear" without a contract break: when the queue's result
+    is `dropped` and every ask left open was read and replied to, the
+    `call.ended` audit `result` is `owner-unclear` and each such ask gets a
+    `voice.ask-unclear` entry. The queue still gets `dropped` (so the ask is
+    texted at once), the stored `CallRecord.outcome` stays `answered`, and the
+    agent's no-answer reason stays `dropped`. A distinct agent-facing reason
+    needs `CallEnd` and `NoAnswerReason` in `packages/core`: follow-up.
+- Changed test expectations, each following the owner-directed rule only:
+  - `voice-confirm.test.ts`: approvals that passed on a yes right after the
+    reading ("confirms the owner's words ...", "joins consecutive owner
+    turns", ask 2 in "never takes a yes said after a different ask") now say
+    the yes after a read-back, with the same excerpts. "Never takes an early
+    yes" now expects the reason "the request was not read back for a yes".
+    "Needs a yes word for an approval" became "needs no yes word after a
+    read-back, but a hedge still blocks" (same results). The doubt, hedge,
+    retraction and question tests now put the doubtful words after a
+    read-back so they test doubt, not the missing read-back; all still fail.
+    One expectation flipped: "no", a read-back, then "okay yes" now approves
+    (it was "is strict about a change of mind"), because doubt before the
+    read-back no longer blocks; without the read-back, or with doubt after
+    it, it still does not.
+  - `persona-readings.test.ts`: the 1/2/4-ask test plays the allow with the
+    v4 read-back, so ask 1 is read twice (reading, then read-back).
+  - `orchestration.test.ts`: four voice allows ("covers several agents'
+    asks", "a low-risk request is allowed and denied", the PIN call in
+    "refuses a high-risk allow without the PIN", ask 2 in "a yes said after a
+    different ask") are played as read-back steps; their results are
+    unchanged.
+- Evidence: see the PR's Validation section. Mutation checks on a245577,
+  each reverted: no read-back required (76 tests fail), the first reading
+  counted as a read-back (9), no ask-for-yes cue (1), no doubt check after
+  the read-back (67), doubt before the read-back counted (5), no long-ask
+  rule (3), no subset rule (9, since replaced), no "mm-hmm" handling (4).
+  After the security fixes: the first reading counted (9), no ask-for-yes
+  cue (1), no doubt check after the read-back (65), doubt before the
+  read-back counted (5), no long-ask rule (2).
+- Risk in the first version (closed by owner direction 2 below, which needs
+  a positive verdict): with no yes word, a voice model
+  that reads the request back and then submits allow on a neutral reply
+  ("I'm driving") would be confirmed; so would a refusal in another language
+  ("nein"). The read-back, the doubt markers and the model's own judgement
+  are what remain; high-risk requests still need the PIN. Real transcripts
+  are a live-check item (`docs/live-check.md`).
+- Open issues or follow-ups:
+  - Add an "owner stayed unclear" `CallEnd` and `NoAnswerReason` in
+    `packages/core` so the agent sees it (lane:core).
+  - The fake voice provider's `allows()` still plays a v3 model (no
+    read-back), which the daemon now refuses; tests that want an approval use
+    `confirms()` or a `read-back` step.
+- Security review of a245577 (relayed by the autopilot coordinator), both
+  fixed before the PR was reviewed:
+  - Ask attribution hijack: the long-ask relaxation let an agent-written ask
+    sharing another's words ("pnpm test" and "pnpm test; also git push
+    --force") take over its reading or read-back. Attribution is now strict
+    and unique (`readingOf`). With other asks on the call, a turn reads an
+    ask only if it names every key word no other ask has and, for a
+    permission request, every command and tool token no other ask has
+    (short ones such as `rm` and `f` included). A candidate with no word of
+    its own (identical asks, or containment) makes the turn read nothing, as
+    does more than one match. The long-ask rule counts only words no other
+    ask has, and excuses only the key-word rule, never the command-token
+    rule. Decision: alone on a call, the share rule alone applies, since
+    nothing can be hijacked, so the persona's own short read-back ("Allow
+    pnpm test in demo-app? Yes?") still works. Cost: with several asks, a
+    read-back must name the full session name when sessions differ and every
+    differing command token, so a short read-back of a long command next to
+    another ask fails closed and is texted.
+  - Noise approval: with no yes word, filler or noise after a read-back
+    would have approved. The reply to the read-back is now refused when it is
+    empty, only fillers (`um`, `uh`, `er`, `mm`, `hmm`, `oh`, ...), has a
+    transcriber marker (any bracket: `[inaudible]`, `(noise)`, `<unk>`), is
+    longer than `MAX_REPLY_WORDS` (8), or only repeats the read-back's words.
+    "Mm-hmm", "uh-huh" and "mhm" count as a yes only as one hyphenated sound.
+  - Open decision at the time: whether a reply must also hold a casual yes,
+    behind an `isAffirmative(reply)` switch. The owner's next direction
+    (below) replaced that switch with a judge.
+  - Changed expectations: the four "Just to confirm: git push origin main via
+    Bash?" re-readings in `voice-confirm.test.ts` now name the session ("...
+    for Claude in demo-app?"), since PUSH and INSTALL come from different
+    sessions. The long-ask tests that had PUSH next to the long permission
+    request now expect nothing to be read from the short read-back, and the
+    long-ask approval runs with the long ask alone.
+  - Mutation checks, each reverted: no containment rule (2 tests fail), no
+    distinct-word rule (1), no command-token rule (2), no marker rule (5), no
+    filler rule (6), no length rule (1), no echo rule (4), casual yes
+    required (5).
+- Bot staff review of 01952d1 (request changes, 62) and Greptile on a245577:
+  - Fixed: read-backs are matched newest first, so an earlier conditional
+    reply no longer blocks a later clear one (staff P2, Greptile P2). The
+    read-back's template words (`yes`, `confirm`, `allow`, `sorry`) are no
+    longer key words, so an ask that contains them ("yes | pnpm test", or one
+    made only of them) cannot be told apart, or claim a read-back, by the
+    words the agent adds (Greptile P1; containment already blocked the exact
+    case, and a new test covers the case only this rule blocks). Repeated
+    yes sounds ("yes, uh-huh, uh-huh") are tested (Greptile P2; the
+    lookaround regex already handled them). Common refusals in other
+    languages (`nein`, `nee`, `nej`, `niet`, `nie`, `non`, `não`, `nada`)
+    sound doubtful (staff P2, partial).
+  - The staff review's two P1s ask for a positive affirmative and for a
+    human to confirm the consent change against AGENTS.md and plan section
+    5B ("anything other than a clear yes is a deny"). Both were answered by
+    the owner's next direction (below): a positive verdict, from the fast
+    path or a judge, is now required, and the default judge fails closed.
+    AGENTS.md and the plan are human-owned and unchanged; a human still
+    needs to confirm the direction and approve any real judge.
+- Owner direction 2 (relayed by the autopilot coordinator): "let Claude
+  decide what they mean... if Claude thinks he said yes Claude asks 'that's a
+  yes right?'... phrase matching is fine so it's quicker on common phrases
+  but it should definitely not be limited like a regex".
+  - Change: the allow check is built around a pluggable `ReplyJudge`
+    (`agreed | declined | unclear`) that is given only the owner's reply
+    turns to the read-back, never agent text. A fast path (`replyVerdict`)
+    decides first. A reply made only of clear-yes phrases with no doubt or
+    negation marker agrees, and one made only of clear-no phrases declines.
+    Noise (empty, fillers, a transcriber marker, more than 8 words, the
+    read-back echoed) is unclear. Everything else goes to the judge, with an
+    8-second timeout (`judgeVoiceDecision`). Doubt markers no longer reject
+    on their own; they keep the fast path from agreeing. A judge error,
+    timeout or anything but `agreed` is not confirmed.
+  - Decisions: the default judge is `FailClosedJudge` (always unclear), so
+    nothing outside the fast path approves today. `FakeJudge` scripts
+    verdicts, errors and hangs for tests. No network client was written: a
+    model-backed judge needs the owner's OK to add the API and a plan
+    change. `VoiceCalls` takes `judge` and `judgeTimeoutMs` options, but
+    `orchestrator.ts` (shared with HL-10) does not pass them yet, so the
+    daemon always uses the fail-closed judge. `isAffirmative`, `hasCasualYes`
+    and `REQUIRE_CASUAL_YES` are removed.
+  - Changed expectation: "does not approve when the owner takes the reply to
+    the read-back back" now expects "needs a judge" with the whole reply
+    (`["of course", "wait"]`), not a doubt rejection. The noise and
+    `isAffirmative` tests became fast-path and judge tests.
+  - Mutation checks, each reverted: fast yes ignoring doubt markers (3
+    tests fail), fast path agreeing with anything (87), no noise rules (5), a
+    judge `declined` confirming (1), a judge error confirming (1), no judge
+    timeout (1), the judge also seeing agent text (2), the fail-closed judge
+    agreeing (4); review fixes: oldest read-back first (1), template words as
+    key words (1), no non-English refusals (6), no read-back required (95).
+- Bot staff review of 47e49df (approve with nits, 84; no P0 or P1):
+  - P2 fixed: acknowledgements are no longer fast yeses. "Thanks", "thank
+    you", "please", "great", "cool", "fine", "perfect", "go", "go on" and
+    "that's fine" go to the judge (today: not confirmed, texted); "yes please"
+    stays a fast yes.
+  - P2 fixed: the PR body and stale test names ("no yes word needed")
+    describe the head; evidence was rerun on the new head.
+  - P3: `FakeJudge` moved to test support (`packages/daemon/test/fake-judge.ts`).
+    `ReplyJudge` and `FailClosedJudge` stay in production as the owner
+    directed; `FailClosedJudge`'s comment says a real judge needs the owner's
+    approval and a plan change. P3 on table size: noted; table changes
+    should be treated as security-reviewed.
+  - The "no ask-for-yes cue" mutation survived once the acknowledgement
+    "great" left the fast path; its test now replies "yes" and checks the
+    reason, and the mutation fails 1 test again.
+- Bot staff review of 85549a4 (request changes, 81; P1 1, P2 2, P3 2):
+  - P2 fixed: the read-back's "asks for a yes" cue could come from agent
+    text (an ask "Run the migration?" or "Please confirm: deploy" made any
+    re-reading of itself a read-back). A "yes" or "confirm" that the ask text
+    holds no longer counts. A `?` is looked for only outside the ask text
+    said verbatim, and an ask whose text has a `?` needs the voice agent's
+    own "yes" or "confirm" when its text was not said verbatim. Tests cover
+    both asks, re-read verbatim and paraphrased, and the agent's own question
+    still counts. Mutation checks: cue words from the ask counted (2 tests
+    fail), ask text not taken out (1), paraphrased `?` asks allowed (1), no
+    cue at all (6).
+  - P3 fixed: post-call decisions are checked concurrently, so a slow judge
+    costs one timeout per call.
+  - Not changed, and reported to the coordinator:
+    - P1: a human must confirm the consent change and apply `human-approved`.
+      Agents cannot do that.
+    - P2: drop the judge abstraction until a real judge lands. That
+      conflicts with the owner's direction, relayed by the coordinator, to
+      build the pluggable judge now with a fail-closed default.
+    - P3: the fast yes table keeps "ok", "okay", "alright", "sure" and
+      "sounds good". The fast path only runs on a reply to a read-back that
+      asked for a yes, which is the condition the review suggested.
+- Bot staff review of 0fd09ba (approve with nits, 84; no P0 or P1):
+  - P2 fixed: with one ask on the call, a loose read-back ("git push origin
+    main, yes?") could confirm `git push --force origin main`. A permission
+    read-back must now name every command and tool token, short ones
+    included, whether or not other asks share the call. Decision: the tool
+    counts too, so "Allow Read ..." never confirms a `Write`. Cost: the
+    persona's example read-back ("Allow pnpm test in demo-app? Yes?") leaves
+    out the tool, so a model that follows it literally fails closed and the
+    ask is texted. Follow-up for the providers lane: make the example name the
+    tool. A long permission request needs its whole command read back, so the
+    long-ask rule now helps only readings and non-permission asks. "please"
+    joins the filler words.
+  - P3 taken: a clear no to the read-back of a submitted allow (the fast
+    path's no, or a judge's `declined`) ends the request at once as no answer
+    (`unclear`), which denies it, as an unconfirmed deny does. It is not
+    texted for approval.
+  - P2 on module size and the unwired judge: noted. The real judge is a
+    follow-up that needs the owner's approval and a plan change.
+  - P3 on "mm-hmm" for high-risk asks: high-risk allows still need the PIN.
+  - Mutation checks: no full-command rule (3 tests fail), a fast no not
+    flagged (2), a decline not ending the request (1).
+- Bot staff review of 7b68833 (approve with nits, 88; P2 1, P3 1), both taken:
+  - P2: `owner-unclear` now needs the owner to have replied after at least
+    two readings of an ask (a read-back, the yes-or-no question, or a
+    re-reading), so one reply to one reading followed by a hang-up stays
+    `dropped`. New end-to-end test; the mutation back to one reply fails 2
+    tests.
+  - P3: `ReplyJudge` documents that `agreed` is final and not re-screened
+    for doubt markers, so a judge owns that call and must agree only to a
+    clear yes.
+- Bot staff review of 7034164 (approve with nits, 84; P2 2, P3 2):
+  - P2 fixed: a permission request longer than the read-out length
+    (`MAX_SPOKEN_ASK_LENGTH`, 300 characters, now the source of
+    `READ_TEXT_LENGTH`) is never approved by voice. Its tail was never read
+    out, so it is texted; a deny of it still counts. Tests cover an over-long
+    command and one of exactly the read-out length. The mutation dropping the
+    rule fails 1 test.
+  - P2 recorded in docs/daemon.md: the constraints before any real judge is
+    wired in. They are the plan change and the owner's approval; `agreed` is
+    final, so a judge must agree only to a clear yes; and a high-risk request
+    never takes a judge's `agreed` without the PIN or a confirming text,
+    which `needs-pin` and the queue already enforce for every voice allow.
+  - P3 stated consistently in code and docs: words that answer a yes-or-no
+    question ("ok", "okay", "alright", "sure", "sounds good") are fast yeses,
+    because the fast path only hears replies to a read-back that asked for a
+    yes. Words that only acknowledge or thank go to the judge.
+  - P3 (split the module): follow-up.
+- Bot staff review of c155997 (approve with nits, 86; P2 2, P3 2), answered
+  in docs and comments:
+  - P2: a judge's `agreed` is not re-screened for negation. Not vetoed in
+    code, because the owner's direction is that doubt markers no longer
+    reject on their own. Recorded as a requirement in docs/daemon.md: the
+    ticket that wires a judge adds conditional-yes and negation scenarios
+    before enabling it.
+  - P2: module size. Keep it from growing, and retire the doubt tables once
+    a judge lands (follow-up, with the module split).
+  - P3: the reading-window boundary (a retraction after the agent's
+    acknowledgement is outside the judged reply) is now commented in
+    `readingWindows`.
+  - P3: `owner-unclear` calls are stored with `CallRecord.outcome`
+    `answered`. A distinct outcome is a `packages/core` contract change and
+    joins the lane:core follow-up for an "owner stayed unclear" reason.
+- Bot staff review of eb2f553 (approve with nits, 86; P2 1, P3 2):
+  - P2 fixed: an approval the owner takes back after the agent's
+    acknowledgement ("Got it." then "wait, no, don't") is no longer
+    confirmed. Owner turns after the reply are scanned until another ask is
+    read or the call ends. Decision: the scan uses stricter retraction
+    markers ("wait", "stop", "cancel", "hold on", "actually", "never mind",
+    any "n't", ...), not the whole doubt list. A bare "no" or "nope" there
+    usually answers "anything else?", and counting it would cancel nearly
+    every last approval on a call. Tests cover the retractions, closing
+    replies that leave the approval standing, and a "wait" about the next
+    ask. Mutation checks: no retraction (7 tests fail), the scan not stopping
+    at the next ask (3), a bare no retracting (3).
+  - P3: docs say the running daemon always uses `FailClosedJudge`, and any
+    other judge runs only in tests.
+  - P3 (entry length and relayed quotes): kept. The dispatcher required this
+    entry to record the owner's direction, and the quotes are what the
+    decisions rest on.
+
 ## 2026-10-14 — HL-22 Keychain self-test in hotline doctor (#22)
 
 - Decision / change: `hotline doctor` adds a `keychain` check when
