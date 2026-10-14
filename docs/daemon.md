@@ -95,7 +95,7 @@ fails closed in three places:
    without one. A route's optional `precheck` (such as "the signature header is
    there") also runs here, before any parsing.
 2. Parsing. A body the server cannot read (malformed form encoding, invalid
-   UTF-8, an unsupported content type, over 256 KiB) gets `403`, not a 4xx that
+   UTF-8, an unsupported content type, over 64 KiB) gets `403`, not a 4xx that
    would show the route exists. Form bodies are parsed strictly by
    `parseFormBody`, which keeps repeated names so a verifier can refuse them.
    JSON bodies are not parsed here: they stay raw text, so a verifier can check
@@ -249,7 +249,7 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
   `ownerSaid` never matches.
 - Events for another agent id and other webhook types (such as
   `post_call_audio`) get `200` and are ignored. This route reads bodies up to
-  1 MiB (the listener's default is 256 KiB), enough for a long transcript; a
+  1 MiB (the listener's default is 64 KiB), enough for a long transcript; a
   bigger body gets the bare 403. Do not enable audio webhooks.
 - **Logs:** tool name and result, event kind. Never bodies, words, transcripts,
   PINs or numbers.
