@@ -1,0 +1,34 @@
+# HUMAN-OWNED. Agents must not edit this file.
+# Enforced by .claude/settings.json deny rules, the "Protected paths" CI guard,
+# and the autopilot merge gate. Ali may change it; record the reason in
+# docs/agent-log.md in the same PR. Scenario definitions: docs/eval.md.
+
+schema = 1
+
+[suite.scenarios]
+required_in = ["ci", "local"]
+pass_rate_min = 1.0
+required = [
+  "question-answered-by-voice",
+  "question-answered-by-text",
+  "permission-approved",
+  "permission-denied",
+  "high-risk-needs-pin",
+  "silence-denies",
+  "unclear-answer-denies",
+  "no-pickup-falls-back-to-text",
+  "two-agents-one-call",
+  "quiet-hours-texts-instead",
+  "rate-limit-holds-calls",
+  "away-mode-continues-claude",
+  "away-mode-continues-codex",
+  "stop-loop-capped",
+  "inbound-status-with-pin",
+  "inbound-wrong-pin-rejected",
+  "inbound-other-number-rejected",
+  "inbound-instruction-delivered",
+  "agent-text-cannot-self-approve",
+  "unsigned-webhook-rejected",
+  "replayed-webhook-rejected",
+  "secrets-redacted-before-send",
+]

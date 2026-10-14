@@ -1,0 +1,19 @@
+{
+  "strictness": 2,
+  "commentTypes": ["logic", "syntax", "style"],
+  "autoReview": ["open"],
+  "statusCheck": true,
+  "confidenceScoreSection": { "included": true, "collapsible": false, "defaultOpen": true },
+  "summarySection": { "included": true, "collapsible": true, "defaultOpen": false },
+  "ignorePatterns": "docs/agent-log.md\npnpm-lock.yaml\n**/*.lock\n",
+  "instructions": "Agent Hotline lets coding agents (Claude Code, Codex) phone and text their owner and turns the owner's spoken or texted answer into agent input, including permission approvals. A phone line that steers agents is a remote control for the developer's machine. Read AGENTS.md and docs/plan.md for invariants. Prioritize: anything that could approve without the owner's explicit words, unverified webhooks, non-owner callers getting information, secrets leaving the machine, agent-supplied text influencing decisions, loops that call repeatedly, and hook output that does not match the agent's documented format. Most PRs are written by autonomous agents: be specific, cite the line, and skip praise.",
+  "rules": [
+    { "id": "silence-is-not-consent", "rule": "No answer, a failed call, a timeout, an error or an unclear reply must never produce an approval or a fabricated answer. Flag any default-allow path.", "scope": ["packages/**", "apps/**"], "severity": "high" },
+    { "id": "owner-only", "rule": "Calls and texts may only go to the configured owner number; inbound calls and texts from other numbers must be rejected without disclosing anything; inbound calls must check the PIN before reading status or accepting instructions.", "scope": ["packages/**", "apps/**"], "severity": "high" },
+    { "id": "verify-webhooks", "rule": "Every public route must verify the Twilio signature or the ElevenLabs secret/HMAC before reading the body, and reject replays. Flag any public route without verification.", "scope": ["packages/daemon/**"], "severity": "high" },
+    { "id": "untrusted-agent-text", "rule": "Text written by agents (questions, command previews, summaries) is untrusted. It must never be able to approve itself or change who is called. Flag code that derives a decision from agent-supplied text.", "scope": ["packages/**"], "severity": "high" },
+    { "id": "redact-before-send", "rule": "Anything sent to Twilio or ElevenLabs must pass through the redaction function; secrets, tokens, private keys and .env values must never leave the machine. Phone numbers in logs show the last four digits only.", "scope": ["packages/**", "apps/**"], "severity": "high" },
+    { "id": "no-weakened-checks", "rule": "Flag any change that loosens a test assertion, timeout, scenario, or makes scripts/ci/run.sh or the scenario runner succeed without exercising the system.", "scope": ["**/*.test.ts", "eval/**", "scripts/**"], "severity": "high" },
+    { "id": "no-real-network-in-tests", "rule": "Tests and the scenario suite must not call real Twilio, ElevenLabs or any network service, or touch the real ~/.claude or ~/.codex.", "scope": ["**/*.test.ts", "eval/**"], "severity": "medium" }
+  ]
+}

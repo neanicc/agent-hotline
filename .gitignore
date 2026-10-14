@@ -1,0 +1,41 @@
+# Dependencies and build output
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+.turbo/
+
+# Eval output
+eval-out/
+
+# Secrets and local state: never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+/.hotline/
+*.sqlite
+*.sqlite-journal
+*.db
+
+# Call audio, transcripts and voice samples stay local
+*.wav
+*.mp3
+*.m4a
+/recordings/
+/transcripts/
+
+# Local agent state
+.claude/settings.local.json
+.claude/worktrees/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+
+# Python caches from scripts/
+__pycache__/
+*.pyc

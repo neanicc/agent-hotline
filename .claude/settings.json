@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(python3 scripts/agent/pr_status.py *)",
+      "Bash(python3 scripts/agent/review_threads.py *)",
+      "Bash(gh pr merge * --squash --delete-branch --match-head-commit *)",
+      "Bash(gh auth status)",
+      "Bash(gh secret list)",
+      "Bash(sleep *)"
+    ],
+    "deny": [
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(git push * --force*)",
+      "Bash(git push * -f*)",
+      "Bash(git push * +*)",
+      "Bash(git push * main*)",
+      "Bash(git push * HEAD:main*)",
+      "Bash(git push * *:main*)",
+      "Bash(gh pr merge * --admin*)",
+      "Bash(gh pr merge * --auto*)",
+      "Bash(gh pr edit *human-approved*)",
+      "Bash(gh pr create *human-approved*)",
+      "Bash(gh issue edit *human-approved*)",
+      "Bash(gh issue create *human-approved*)",
+      "Bash(gh api *human-approved*)",
+      "Bash(gh api *rulesets*)",
+      "Bash(gh api *protection*)",
+      "Bash(gh api *pulls/*/merge*)",
+      "Bash(gh label *)",
+      "Bash(gh repo edit*)",
+      "Bash(gh repo delete*)",
+      "Bash(gh secret set*)",
+      "Bash(gh secret delete*)",
+      "Bash(gh variable *)",
+      "Bash(gh auth token*)",
+      "Bash(gh auth refresh*)",
+      "Bash(gh auth login*)",
+      "Bash(gh auth logout*)",
+      "Edit(**/eval/thresholds.toml)",
+      "Edit(**/.github/**)",
+      "Edit(**/.greptile/**)",
+      "Edit(**/.claude/settings.json)",
+      "Edit(**/.claude/hooks/**)",
+      "Edit(**/.claude/agents/**)",
+      "Edit(**/.agents/**)",
+      "Edit(**/scripts/agent/**)",
+      "Edit(**/scripts/bootstrap/**)",
+      "Edit(**/AGENTS.md)",
+      "Edit(**/CLAUDE.md)",
+      "Edit(**/LICENSE)",
+      "Bash(gh auth status *-t*)",
+      "Bash(gh auth status *--show-token*)",
+      "Bash(gh alias *)",
+      "Bash(gh api graphql*erge*)",
+      "Bash(git remote add*)",
+      "Bash(git remote set-url*)",
+      "Bash(git remote remove*)",
+      "Bash(git remote rename*)",
+      "Bash(git config *remote.*)",
+      "Bash(git -c *)",
+      "Bash(git * --upload-pack*)",
+      "Bash(git * --receive-pack*)",
+      "Bash(git * --exec=*)",
+      "Edit(**/.claude/skills/**)",
+      "Edit(**/CLAUDE.local.md)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR}/.claude/hooks/guard_merge.py\"",
+            "timeout": 180,
+            "onFailure": "block"
+          }
+        ]
+      }
+    ]
+  },
+  "env": {
+    "BASH_DEFAULT_TIMEOUT_MS": "600000",
+    "BASH_MAX_TIMEOUT_MS": "3600000"
+  },
+  "worktree": {
+    "baseRef": "fresh"
+  }
+}
