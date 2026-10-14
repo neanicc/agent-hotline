@@ -1207,3 +1207,34 @@ Template:
     texts no longer work.
   - P2 (split the orchestrator before HL-10) and P3 (measure false "no answer"
     in the live check) stay follow-ups.
+
+## 2026-10-14 — HL-09b Split the call orchestrator (#37)
+
+- Decision / change: pure refactor of `packages/daemon/src/orchestrator.ts`
+  (950 lines) before HL-10 adds the inbound line, as the HL-09 staff reviews
+  asked. The coordinator (`orchestrator.ts`, 362 lines) keeps
+  `CallOrchestrator`: step serialization, the queue, the timer, start/stop and
+  resolving asks. `orchestrator-state.ts` (254) holds the saved state schema,
+  the fail-closed restore of state and rate windows, crash recovery
+  (`recoverPending`) and the before-send checks (`notReachable`, `dropEvent`).
+  `orchestrator-voice.ts` (331) holds placing calls, holding `submit_answer`
+  answers and post-call confirmation. `orchestrator-texts.ts` (216) holds
+  sending texts with codes and applying the owner's replies; `owner-texts.ts`
+  is unchanged.
+- Decision: a fourth file for the text side, beyond the issue's three. Keeping
+  text sending and reply handling in the coordinator would have left it near
+  520 lines; `owner-texts.ts` stays pure (planning and wording only) rather
+  than gaining store and provider effects.
+- Decision: the public API is unchanged. `index.ts` is untouched and still
+  exports `./orchestrator.js`, which re-exports `ORCHESTRATOR_STATE_KEY`,
+  `RATE_STATE_KEY`, `CALL_CENTS_PER_MINUTE` and `OrchestratorLog`; the new
+  classes are internal. The parts share one `OrchestratorState` holder and read
+  the logger through a getter, so `attachLog` still reaches them. Statement
+  order (saves, audit entries, provider calls) is the same as before.
+- Evidence: no test file changed. `pnpm run lint`, `pnpm run typecheck` pass;
+  `pnpm run test` 41 files, 907 tests, passed three times in a row. Mutation
+  checks on moved code, each reverted: high-risk allow without the PIN
+  accepted (1 test fails), a maybe-placed call not failed on recovery (1),
+  a wrong code not burning the waiting codes (1). Scenario suite not built yet
+  (HL-12).
+- Open issues or follow-ups: none.
