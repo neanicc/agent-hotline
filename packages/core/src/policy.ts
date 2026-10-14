@@ -118,7 +118,8 @@ export function nextRateSlot(times: readonly number[], limit: RateLimit, now: nu
     [HOUR_MS, limit.perHour],
     [DAY_MS, limit.perDay],
   ] as const) {
-    const inWindow = times.filter((t) => t > now - window && t <= now).sort((a, b) => a - b);
+    // A send stamped after `now` (the clock moved back) still counts until it ages out.
+    const inWindow = times.filter((t) => t > now - window).sort((a, b) => a - b);
     if (inWindow.length >= max) {
       // Once the oldest (inWindow.length - max + 1) events age out, one more fits.
       const freeing = inWindow[inWindow.length - max];

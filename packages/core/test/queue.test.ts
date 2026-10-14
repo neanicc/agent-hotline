@@ -55,20 +55,51 @@ describe("batching and priority", () => {
 });
 
 describe("dedupe", () => {
-  it("joins an identical ask from the same session to the first and answers both", () => {
+  it("joins an identical question from the same session to the first and answers both", () => {
     const h = new Harness(settings);
-    h.ask({ id: "p1", kind: "permission", text: "Run: rm -rf build" });
-    h.ask({ id: "p2", kind: "permission", text: "Run: rm -rf build" });
-    expect(h.state.open.find((q) => q.ask.id === "p2")?.duplicateOf).toBe("p1");
-    expect(ofType(h.advance(20 * SECOND), "place-call")[0]?.askIds).toEqual(["p1"]);
-    const actions = h.send({ type: "answer", answer: makeAnswer("p1", { type: "allow" }, h.now) });
-    const resolved = ofType(actions, "resolve");
+    h.ask({ id: "q1", text: "Pin the older version?" });
+    h.ask({ id: "q2", text: "Pin the older version?" });
+    expect(h.state.open.find((q) => q.ask.id === "q2")?.duplicateOf).toBe("q1");
+    expect(ofType(h.advance(20 * SECOND), "place-call")[0]?.askIds).toEqual(["q1"]);
+    const given = makeAnswer("q1", { type: "option", option: 2 }, h.now, { confirmation: "pin" });
+    const resolved = ofType(h.send({ type: "answer", answer: given }), "resolve");
     expect(resolved.map((r) => [r.askId, r.outcome.outcome, r.status])).toEqual([
-      ["p1", "answered", "answered"],
-      ["p2", "answered", "answered"],
+      ["q1", "answered", "answered"],
+      ["q2", "answered", "answered"],
     ]);
-    const shared = resolved[1]?.outcome;
-    expect(shared?.outcome === "answered" && shared.answer.askId).toBe("p2");
+    // The shared answer is the owner's decision for q2, but never carries q1's confirmation.
+    expect(resolved[1]?.outcome).toEqual({
+      outcome: "answered",
+      answer: { ...given, askId: "q2", confirmation: "none" },
+    });
+  });
+
+  it("never joins permission requests: each needs its own answer", () => {
+    const h = new Harness(settings);
+    const spec = { kind: "permission", text: "Run: rm -rf [redacted]", risk: "high" } as const;
+    const p1 = makeAsk({ id: "p1", ...spec, createdAt: h.now });
+    const p2 = makeAsk({ id: "p2", ...spec, createdAt: h.now });
+    h.send({ type: "ask", ask: p1 });
+    h.send({ type: "ask", ask: p2 });
+    expect(h.state.open.every((q) => q.duplicateOf === undefined)).toBe(true);
+    // Batched into one call, but read out and decided separately.
+    expect(ofType(h.advance(20 * SECOND), "place-call")[0]?.askIds).toEqual(["p1", "p2"]);
+    const allow = makeAnswer("p1", { type: "allow" }, h.now, { confirmation: "pin" });
+    const resolved = ofType(h.send({ type: "answer", answer: allow }), "resolve");
+    expect(resolved.map((r) => r.askId)).toEqual(["p1"]);
+    expect(resolved[0] && permissionVerdict(p1, resolved[0].outcome)).toBe("allow");
+    expect(h.state.open.map((q) => q.ask.id)).toEqual(["p2"]);
+    h.send({ type: "call-ended", callId: h.callId, result: "answered" });
+    const [p2End] = ofType(h.advance(30 * MINUTE), "resolve");
+    expect(p2End?.outcome).toEqual({ outcome: "no-answer", askId: "p2", reason: "timeout" });
+    expect(p2End && permissionVerdict(p2, p2End.outcome)).toBe("deny");
+  });
+
+  it("never joins stop prompts", () => {
+    const h = new Harness(settings);
+    h.ask({ id: "s1", kind: "stop", text: "Done. What next?" });
+    h.ask({ id: "s2", kind: "stop", text: "Done. What next?" });
+    expect(h.state.open.every((q) => q.duplicateOf === undefined)).toBe(true);
   });
 
   it("does not join asks from different sessions or with different text", () => {
@@ -150,16 +181,34 @@ describe("quiet hours", () => {
 });
 
 describe("notifications", () => {
-  it("go out by text once, duplicates included, and need no answer", () => {
+  it("go out by text once, duplicates included, and are delivered when the text is sent", () => {
     const h = new Harness(settings);
     h.ask({ id: "n1", kind: "notify", text: "Tests pass." });
     h.ask({ id: "n2", kind: "notify", text: "Tests pass." });
-    expect(h.advance(20 * SECOND)).toEqual([
-      { type: "send-text", askId: "n1", reason: "notify" },
+    expect(h.advance(20 * SECOND)).toEqual([{ type: "send-text", askId: "n1", reason: "notify" }]);
+    expect(h.state.open).toHaveLength(2);
+    expect(h.send({ type: "text-sent", askId: "n1" })).toEqual([
       { type: "delivered", askId: "n1" },
       { type: "delivered", askId: "n2" },
     ]);
     expect(h.state.open).toEqual([]);
+  });
+
+  it("are not delivered when the text fails; the duplicate is tried next", () => {
+    const h = new Harness(settings);
+    h.ask({ id: "n1", kind: "notify", text: "Tests pass." });
+    h.ask({ id: "n2", kind: "notify", text: "Tests pass." });
+    h.advance(20 * SECOND);
+    expect(h.send({ type: "text-failed", askId: "n1" })).toEqual([
+      {
+        type: "resolve",
+        askId: "n1",
+        outcome: { outcome: "no-answer", askId: "n1", reason: "failed" },
+        status: "expired",
+      },
+      { type: "send-text", askId: "n2", reason: "notify" },
+    ]);
+    expect(ofType(h.allActions, "delivered")).toEqual([]);
   });
 });
 
@@ -252,8 +301,25 @@ describe("no pickup, dropped and stuck calls", () => {
     h.ask({ id: "q1", ttlMs: HOUR });
     h.advance(20 * SECOND);
     expect(nextWakeAt(h.state, new Date(h.now), settings)?.getTime()).toBe(h.now + 15 * MINUTE);
-    expect(h.advance(15 * MINUTE)).toEqual([{ type: "send-text", askId: "q1", reason: "after-call" }]);
+    expect(h.advance(15 * MINUTE)).toEqual([
+      { type: "end-call", callId: "test-1" },
+      { type: "send-text", askId: "q1", reason: "after-call" },
+    ]);
     expect(h.state.call).toBeUndefined();
+  });
+
+  it("keeps a retry waiting out its delay when another ask starts a call", () => {
+    const h = new Harness(settings);
+    h.ask({ id: "a", kind: "permission", text: "Run: make" });
+    h.advance(20 * SECOND);
+    h.send({ type: "call-ended", callId: "test-1", result: "no-pickup" });
+    h.ask({ id: "b" });
+    expect(h.advance(20 * SECOND)).toEqual([{ type: "place-call", callId: "test-2", askIds: ["b"] }]);
+    h.send({ type: "call-ended", callId: "test-2", result: "answered" });
+    h.now = NOON + 20 * SECOND + 2 * MINUTE;
+    expect(ofType(h.send({ type: "tick" }), "place-call")).toEqual([
+      { type: "place-call", callId: "test-3", askIds: ["a"] },
+    ]);
   });
 
   it("ignores the end of a call that is not in progress", () => {
@@ -317,7 +383,7 @@ describe("answers", () => {
     expect(
       h.send({ type: "answer", answer: makeAnswer("q1", { type: "option", option: 1 }, h.now) }),
     ).toEqual([
-      { type: "ignored", event: "answer", askId: "q1", reason: "the ask was never read out on a call" },
+      { type: "ignored", event: "answer", askId: "q1", reason: "the ask is not on the call in progress" },
     ]);
     h.advance(20 * SECOND);
     const sms = makeAnswer("q1", { type: "option", option: 1 }, h.now, { channel: "sms" });
@@ -446,5 +512,37 @@ describe("permissionVerdict", () => {
     const { confirmation: _dropped, ...answer } = makeAnswer("p1", { type: "allow" }, NOON);
     expect(permissionVerdict(high, { outcome: "answered", answer } as unknown as AskOutcome)).toBe("deny");
     expect(permissionVerdict(low, { outcome: "answered" } as unknown as AskOutcome)).toBe("deny");
+  });
+});
+
+describe("review fixes", () => {
+  it("ignores a voice answer that arrives after its call ended", () => {
+    const h = new Harness(settings);
+    h.ask({ id: "q1" });
+    h.advance(20 * SECOND);
+    h.send({ type: "call-ended", callId: h.callId, result: "dropped" });
+    const late = makeAnswer("q1", { type: "option", option: 1 }, h.now);
+    expect(h.send({ type: "answer", answer: late })).toEqual([
+      { type: "ignored", event: "answer", askId: "q1", reason: "the ask is not on the call in progress" },
+    ]);
+  });
+
+  it("wakes at once for overdue work, and never earlier than now", () => {
+    const h = new Harness(settings);
+    h.ask({ id: "q1" });
+    // The daemon asks 21 s later instead of right after the step: the batch window is over.
+    const late = new Date(h.now + 21 * SECOND);
+    expect(nextWakeAt(h.state, late, settings)).toEqual(late);
+    expect(nextWakeAt(h.state, new Date(h.now), settings)?.getTime()).toBe(h.now + 20 * SECOND);
+  });
+
+  it("keeps counting a send stamped in the future after the clock moves back", () => {
+    const h = new Harness(makeSettings({ rateLimits: { textsPerHour: 1 } }), NIGHT);
+    h.ask({ id: "q1" });
+    h.advance(20 * SECOND);
+    h.now = NIGHT - MINUTE; // the Mac's clock moved back
+    h.ask({ id: "q2" });
+    expect(ofType(h.advance(20 * SECOND), "send-text")).toEqual([]);
+    expect(nextWakeAt(h.state, new Date(h.now), h.settings)?.getTime()).toBe(NIGHT + 29 * MINUTE); // q2 expires before a text slot frees
   });
 });

@@ -76,6 +76,12 @@ describe("rate limits", () => {
     expect(nextRateSlot(three, limit, NOON)).toBe(NOON + 4 * HOUR);
   });
 
+  it("counts sends stamped after now, as after the clock moved back", () => {
+    const ahead = [NOON + MINUTE];
+    expect(rateLimitAllows(ahead, { perHour: 1, perDay: 5 }, NOON)).toBe(false);
+    expect(nextRateSlot(ahead, { perHour: 1, perDay: 5 }, NOON)).toBe(NOON + MINUTE + HOUR);
+  });
+
   it("waits for whichever limit frees last", () => {
     const times = [NOON - 23 * HOUR, NOON - 30 * MINUTE, NOON - 20 * MINUTE];
     expect(nextRateSlot(times, limit, NOON)).toBe(NOON + HOUR);

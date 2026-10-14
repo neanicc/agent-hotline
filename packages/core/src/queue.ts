@@ -79,6 +79,8 @@ export type QueueEvent =
   /** The owner was asked but the answer stayed unclear (the voice agent asked twice). */
   | { type: "unclear"; askId: string }
   | { type: "call-ended"; callId: string; result: CallEnd }
+  /** The text for this ask went out. Ends a notification as `delivered`. */
+  | { type: "text-sent"; askId: string }
   /** The text for this ask could not be sent. */
   | { type: "text-failed"; askId: string }
   /** The agent stopped waiting (session ended, hook killed). */
@@ -87,6 +89,8 @@ export type QueueEvent =
 export type QueueAction =
   /** Place one call to the owner covering these asks, in this order. */
   | { type: "place-call"; callId: string; askIds: string[] }
+  /** Hang up this call if it is still live: it was never reported as ended and has been given up on. */
+  | { type: "end-call"; callId: string }
   /** Text the owner this ask. */
   | { type: "send-text"; askId: string; reason: TextReason }
   /** Final: return `outcome` to the agent and store the ask with `status`. */
@@ -96,7 +100,7 @@ export type QueueAction =
       outcome: AskOutcome;
       status: Extract<AskStatus, "answered" | "expired" | "cancelled">;
     }
-  /** Final for a notification: its text went out, nothing comes back. */
+  /** Final for a notification: the daemon reported its text sent; nothing comes back. */
   | { type: "delivered"; askId: string }
   /** The event changed nothing. Log `reason`; never treat it as an answer. */
   | { type: "ignored"; event: QueueEvent["type"]; askId?: string; callId?: string; reason: string };
@@ -133,7 +137,10 @@ export function step(state: QueueState, event: QueueEvent, now: Date, settings: 
   s.textTimes = s.textTimes.filter((time) => time > t - DAY_MS);
 
   apply(ctx, event);
-  if (s.call !== undefined && t - s.call.placedAt >= settings.callStuckAfterMs) endCall(ctx, "dropped");
+  if (s.call !== undefined && t - s.call.placedAt >= settings.callStuckAfterMs) {
+    ctx.actions.push({ type: "end-call", callId: s.call.id });
+    endCall(ctx, "dropped");
+  }
   expire(ctx);
   dispatch(ctx);
   return { state: s, actions: ctx.actions };
@@ -146,21 +153,34 @@ export function step(state: QueueState, event: QueueEvent, now: Date, settings: 
  */
 export function nextWakeAt(state: QueueState, now: Date, settings: PolicySettings): Date | undefined {
   const t = now.getTime();
+  const quiet = inQuietHours(settings.quietHours, now);
   const times: number[] = [];
-  let held = false;
   for (const q of state.open) {
     times.push(Date.parse(q.ask.expiresAt));
     if (q.duplicateOf !== undefined || q.phase !== "waiting") continue;
-    if (q.readyAt > t) times.push(q.readyAt);
-    else held = true;
+    times.push(q.readyAt > t ? q.readyAt : earliestSend(state, q, quiet, t, settings));
   }
   if (state.call !== undefined) times.push(state.call.placedAt + settings.callStuckAfterMs);
-  if (held) {
-    times.push(nextRateSlot(state.textTimes, textLimit(settings), t));
-    if (state.call === undefined) times.push(nextRateSlot(state.callTimes, callLimit(settings), t));
-  }
-  const future = times.filter((time) => time > t);
-  return future.length > 0 ? new Date(Math.min(...future)) : undefined;
+  // Anything already overdue (say the daemon asks late, or restored saved state) means "now".
+  return times.length > 0 ? new Date(Math.max(t, Math.min(...times))) : undefined;
+}
+
+/** When a due, waiting ask can next go out: now, or when the call or rate limit holding it frees. */
+function earliestSend(state: QueueState, q: QueuedAsk, quiet: boolean, t: number, settings: PolicySettings) {
+  const textSlot = () => nextRateSlot(state.textTimes, textLimit(settings), t);
+  if (!mayCall(q, quiet, settings)) return textSlot();
+  if (state.call !== undefined) return state.call.placedAt + settings.callStuckAfterMs;
+  // Over the call limit, a due ask is texted instead.
+  return rateLimitAllows(state.callTimes, callLimit(settings), t) ? t : textSlot();
+}
+
+/** Whether this ask may go out by call now rather than by text. */
+function mayCall(q: QueuedAsk, quiet: boolean, settings: PolicySettings): boolean {
+  return (
+    q.ask.kind !== "notify" &&
+    q.textOnly === undefined &&
+    (!quiet || (q.ask.urgent && settings.quietHours.allowUrgentCalls))
+  );
 }
 
 /**
@@ -177,7 +197,15 @@ export function permissionVerdict(ask: Ask, outcome: AskOutcome): "allow" | "den
   return "allow";
 }
 
-function dedupeKey(ask: Ask): string {
+/**
+ * Only questions and notifications are deduped. `text` is a redacted, length-capped
+ * summary, so two different permission requests (or stop prompts) can share it; each
+ * of those gets its own decision, even when one call reads them out together.
+ */
+const DEDUPED_KINDS: ReadonlySet<Ask["kind"]> = new Set<Ask["kind"]>(["question", "notify"]);
+
+function dedupeKey(ask: Ask): string | undefined {
+  if (!DEDUPED_KINDS.has(ask.kind)) return undefined;
   return JSON.stringify([ask.sessionId, ask.kind, ask.text, ask.options, ask.toolName ?? null, ask.risk]);
 }
 
@@ -252,6 +280,18 @@ function applyEvent(ctx: Context, event: QueueEvent): string | undefined {
       if (ctx.s.call === undefined || ctx.s.call.id !== event.callId) return "not the call in progress";
       endCall(ctx, event.result);
       return undefined;
+    case "text-sent": {
+      const q = findOpen(ctx.s, event.askId);
+      if (q === undefined || q.phase !== "texted") return "no open texted ask with this id";
+      if (q.ask.kind === "notify") {
+        // The same notification from the same session goes out once.
+        for (const done of [q, ...followersOf(ctx, q.ask.id)]) {
+          ctx.s.open = ctx.s.open.filter((other) => other !== done);
+          ctx.actions.push({ type: "delivered", askId: done.ask.id });
+        }
+      }
+      return undefined;
+    }
     case "text-failed": {
       const q = findOpen(ctx.s, event.askId);
       if (q === undefined || q.phase !== "texted") return "no open texted ask with this id";
@@ -274,7 +314,10 @@ function enqueue(ctx: Context, input: Ask): string | undefined {
   if (ask.status !== "pending") return `a new ask must be pending, not ${ask.status}`;
   if (findOpen(ctx.s, ask.id) !== undefined) return "already queued";
   const key = dedupeKey(ask);
-  const primary = ctx.s.open.find((q) => q.duplicateOf === undefined && dedupeKey(q.ask) === key);
+  const primary =
+    key === undefined
+      ? undefined
+      : ctx.s.open.find((q) => q.duplicateOf === undefined && dedupeKey(q.ask) === key);
   ctx.s.open.push({
     ask,
     phase: "waiting",
@@ -294,17 +337,20 @@ function receiveAnswer(ctx: Context, input: Answer): string | undefined {
   if (q === undefined) return "no open ask with this id";
   if (q.duplicateOf !== undefined) return `the ask shares ${q.duplicateOf}'s answer`;
   // The owner can only answer what was put to them, on the channel it went out on.
-  if (answer.channel === "voice" && q.callAttempts === 0) return "the ask was never read out on a call";
+  // A voice answer counts only while the ask is on the call in progress; the daemon delivers
+  // `submit_answer` before that call's `call-ended`.
+  if (answer.channel === "voice" && q.phase !== "calling") return "the ask is not on the call in progress";
   if (answer.channel === "sms" && !q.texted) return "the ask was never texted";
   const problem = answerProblem(q.ask, answer, ctx.now);
   if (problem !== undefined) return problem;
 
   const followers = followersOf(ctx, q.ask.id);
   resolve(ctx, q, { outcome: "answered", answer });
-  // Identical asks from the same session get the same decision, checked against each one.
+  // Identical questions from the same session get the same decision, checked against each
+  // one. A PIN or confirming text proves something about one ask only, so it is never copied.
   const unresolved: QueuedAsk[] = [];
   for (const f of followers) {
-    const shared: Answer = { ...answer, askId: f.ask.id };
+    const shared: Answer = { ...answer, askId: f.ask.id, confirmation: "none" };
     if (answerProblem(f.ask, shared, ctx.now) === undefined) {
       resolve(ctx, f, { outcome: "answered", answer: shared });
     } else {
@@ -349,18 +395,15 @@ function dispatch(ctx: Context): void {
   const waiting = s.open
     .filter((q) => q.duplicateOf === undefined && q.phase === "waiting")
     .sort((a, b) => comparePriority(a.ask, b.ask));
-  const mayCall = (q: QueuedAsk) =>
-    q.ask.kind !== "notify" &&
-    q.textOnly === undefined &&
-    (!quiet || (q.ask.urgent && settings.quietHours.allowUrgentCalls));
   const due = (q: QueuedAsk) => q.readyAt <= t;
 
-  const callable = waiting.filter(mayCall);
+  const callable = waiting.filter((q) => mayCall(q, quiet, settings));
   let callLimited = false;
   if (s.call === undefined && callable.some(due)) {
     if (rateLimitAllows(s.callTimes, callLimit(settings), t)) {
-      // Batch every callable ask, due or still in its window, highest priority first.
-      const batch = callable.slice(0, settings.maxAsksPerCall);
+      // Batch every due ask and every new one still in its batch window, highest priority
+      // first. An ask waiting out its retry delay keeps waiting.
+      const batch = callable.filter((q) => due(q) || q.callAttempts === 0).slice(0, settings.maxAsksPerCall);
       s.callSeq += 1;
       const callId = `${s.idPrefix}-${s.callSeq}`;
       for (const q of batch) {
@@ -382,23 +425,15 @@ function dispatch(ctx: Context): void {
     let reason: TextReason;
     if (q.ask.kind === "notify") reason = "notify";
     else if (q.textOnly !== undefined) reason = q.textOnly;
-    else if (!mayCall(q)) reason = "quiet-hours";
+    else if (!mayCall(q, quiet, settings)) reason = "quiet-hours";
     else if (callLimited) reason = "call-limit";
     else continue; // waits for the call in progress or the next one
     // Out of texts: hold everything else until a slot frees or it expires.
     if (!rateLimitAllows(s.textTimes, textLimit(settings), t)) break;
     s.textTimes.push(t);
     ctx.actions.push({ type: "send-text", askId: q.ask.id, reason });
-    if (q.ask.kind === "notify") {
-      // The same notification from the same session goes out once.
-      for (const done of [q, ...followersOf(ctx, q.ask.id)]) {
-        s.open = s.open.filter((other) => other !== done);
-        ctx.actions.push({ type: "delivered", askId: done.ask.id });
-      }
-    } else {
-      q.phase = "texted";
-      q.texted = true;
-      q.ask.status = "in-flight";
-    }
+    q.phase = "texted";
+    q.texted = true;
+    q.ask.status = "in-flight";
   }
 }

@@ -12,6 +12,7 @@ import {
   type CallEnd,
   type Decision,
   inQuietHours,
+  nextWakeAt,
   type PolicySettings,
   permissionVerdict,
 } from "../src/index.js";
@@ -53,7 +54,7 @@ type Command =
       ttlMinutes: number;
     }
   | { kind: "call-ended"; result: CallEnd; current: boolean }
-  | { kind: "unclear" | "text-failed" | "cancel"; pick: number }
+  | { kind: "unclear" | "text-sent" | "text-failed" | "cancel"; pick: number }
   | {
       kind: "answer";
       pick: number;
@@ -95,7 +96,12 @@ const silentCommand: fc.Arbitrary<Command> = fc.oneof(
   },
   {
     arbitrary: fc.record({
-      kind: fc.constantFrom("unclear" as const, "text-failed" as const, "cancel" as const),
+      kind: fc.constantFrom(
+        "unclear" as const,
+        "text-sent" as const,
+        "text-failed" as const,
+        "cancel" as const,
+      ),
       pick: fc.nat(),
     }),
     weight: 2,
@@ -178,6 +184,7 @@ function run(settings: PolicySettings, start: number, commands: Command[]): Run 
         });
         break;
       case "unclear":
+      case "text-sent":
       case "text-failed":
       case "cancel":
         h.send({ type: command.kind, askId: pick(command.pick) });
@@ -188,7 +195,7 @@ function run(settings: PolicySettings, start: number, commands: Command[]): Run 
         );
         const target = command.aimed ? contacted[command.pick % Math.max(contacted.length, 1)] : undefined;
         const askId = target?.ask.id ?? pick(command.pick);
-        const channel = target === undefined ? command.channel : target.texted ? "sms" : "voice";
+        const channel = target === undefined ? command.channel : target.phase === "calling" ? "voice" : "sms";
         const decision = target === undefined ? command.decision : fittingDecision(target.ask, command.pick);
         h.send({
           type: "answer",
@@ -226,6 +233,11 @@ function checkInvariants({ h, asks }: Run): void {
       }
       expect(call.askIds.length).toBeGreaterThan(0);
       expect(call.askIds.length).toBeLessThanOrEqual(settings.maxAsksPerCall);
+      // A retry is never called before its delay is over; only new asks join early.
+      for (const askId of call.askIds) {
+        const q = entry.before.open.find((open) => open.ask.id === askId);
+        if (q !== undefined && q.callAttempts > 0) expect(q.readyAt).toBeLessThanOrEqual(entry.at);
+      }
       const quiet = inQuietHours(settings.quietHours, new Date(entry.at));
       for (const askId of call.askIds) {
         const ask = asks.get(askId);
@@ -241,6 +253,12 @@ function checkInvariants({ h, asks }: Run): void {
       finals.set(action.askId, (finals.get(action.askId) ?? 0) + 1);
       if (action.type === "delivered") {
         expect(asks.get(action.askId)?.kind).toBe("notify");
+        // Delivered only once the daemon reported the text sent (for this ask or the one it duplicates).
+        expect(entry.event.type).toBe("text-sent");
+        const delivered = entry.before.open.find((q) => q.ask.id === action.askId);
+        if (entry.event.type === "text-sent") {
+          expect([action.askId, delivered?.duplicateOf]).toContain(entry.event.askId);
+        }
         continue;
       }
       const outcome = AskOutcome.parse(action.outcome);
@@ -255,14 +273,21 @@ function checkInvariants({ h, asks }: Run): void {
       expect(outcome.answer.askId).toBe(action.askId);
       expect(action.status).toBe("answered");
       const given = entry.event.answer;
-      expect({ ...outcome.answer, askId: given.askId }).toEqual(given);
+      const sharedFromAnother = outcome.answer.askId !== given.askId;
+      // The owner's own answer, unchanged, except that a shared copy never carries a confirmation.
+      expect({ ...outcome.answer, askId: given.askId, confirmation: given.confirmation }).toEqual(given);
+      if (sharedFromAnother) expect(outcome.answer.confirmation).toBe("none");
+      // A permission request is only ever decided by an answer the owner addressed to it.
+      if (asks.get(action.askId)?.kind === "permission") {
+        expect(sharedFromAnother).toBe(false);
+      }
       const before = entry.before.open.find((q) => q.ask.id === action.askId);
       expect(before).toBeDefined();
       if (before === undefined) continue;
       expect(answerProblem(before.ask, outcome.answer, new Date(entry.at))).toBeUndefined();
       // The owner answered on a channel this ask (or the one it duplicates) actually went out on.
       const contacted = entry.before.open.find((q) => q.ask.id === (before.duplicateOf ?? before.ask.id));
-      if (given.channel === "voice") expect(contacted?.callAttempts).toBeGreaterThan(0);
+      if (given.channel === "voice") expect(contacted?.phase).toBe("calling");
       else expect(contacted?.texted).toBe(true);
       if (
         before.ask.kind === "permission" &&
@@ -272,6 +297,10 @@ function checkInvariants({ h, asks }: Run): void {
         expect(outcome.answer.confirmation).not.toBe("none");
       }
     }
+
+    // The next wake-up is always in the future: no busy loop, and nothing overdue left behind.
+    const wake = nextWakeAt(entry.after, new Date(entry.at), settings);
+    if (wake !== undefined) expect(wake.getTime()).toBeGreaterThan(entry.at);
 
     // Nothing stays open past its expiry.
     for (const q of entry.after.open) expect(Date.parse(q.ask.expiresAt)).toBeGreaterThan(entry.at);
