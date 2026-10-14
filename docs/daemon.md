@@ -528,11 +528,15 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
     Claude Code settings file is not an environment variable, so it still
     applies to `claude -p`; leaving out user settings (`--setting-sources`)
     is not done until a live run shows the OAuth login still works without
-    them. `hotline doctor` names the credential (`judgeCredentialSource`:
-    `plan login (Claude Code)`, `plan login (Codex)`, `Anthropic API key
-    (judge.backend: anthropic-api)`), never a value, and warns when
-    `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` is set in its environment while
-    a CLI backend is selected, saying the judge ignores it.
+    them; `hotline doctor` warns when that file (under `CLAUDE_CONFIG_DIR`
+    or `~/.claude`) sets `apiKeyHelper` or a withheld name in `env`. The run's
+    own `env` is filtered too, so not even a caller can hand a CLI a key.
+    `hotline doctor` names the credential (`judgeCredentialSource`: `plan
+    login (Claude Code)`, `plan login (Codex)`, `Anthropic API key
+    (judge.backend: anthropic-api)`), never a value, and warns when any
+    withheld variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...) is set in
+    its environment while a CLI backend is selected, saying the judge
+    ignores it.
 
     The prompt asks one narrow question ("did the speaker clearly agree, with
     no condition attached, and without taking it back?") with the reply turns

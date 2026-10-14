@@ -2920,3 +2920,19 @@ Template:
   unchanged.
 - Evidence: see the PR's Validation section. Fakes and injected spawn only; no
   real `claude` or `codex` model call, no credential.
+- Review fixes (staff review and Greptile on #79):
+  - `judgeChildEnv` now filters the run's own `env` through
+    `judgeWithholds` too, so not even a caller can hand a CLI an API key
+    (Greptile P2).
+  - The settings-file gap now has a diagnostic. With Claude Code selected,
+    `hotline doctor` reads the owner's Claude Code user settings file
+    (`$CLAUDE_CONFIG_DIR/settings.json`, else `~/.claude/settings.json`) and
+    warns when it sets `apiKeyHelper` or a withheld name in `env`. It prints
+    names only, never values (staff review P2). The `--setting-sources`
+    change itself is still a follow-up that needs a live run.
+  - Doctor's environment warning now names every set variable the judge
+    withholds, derived from `JUDGE_WITHHELD_ENV`, not only the two API keys
+    (P3).
+  - `docs/install.md` says that whole `ANTHROPIC_*` and `OPENAI_*` prefixes
+    are withheld, so a custom endpoint setting does not reach the judge
+    (P3).

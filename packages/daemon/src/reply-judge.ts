@@ -207,7 +207,11 @@ export function judgeChildEnv(
     const value = daemonEnv[name];
     if (value !== undefined && !name.startsWith("HOTLINE_") && !judgeWithholds(name)) child[name] = value;
   }
-  return { ...child, ...options.env };
+  // The run's own variables are checked too, so not even a caller can hand a CLI an API key.
+  for (const [name, value] of Object.entries(options.env)) {
+    if (!judgeWithholds(name)) child[name] = value;
+  }
+  return child;
 }
 
 /**

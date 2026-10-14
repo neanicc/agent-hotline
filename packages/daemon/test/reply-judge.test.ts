@@ -522,6 +522,10 @@ describe("the agent CLI's environment", () => {
     const names = Object.keys(billingEnv);
     const env = judgeChildEnv(planEnv, { env: {}, inherit: names });
     expect(Object.keys(env).filter((name) => names.includes(name))).toEqual([]);
+    // Nor through the run's own explicit variables.
+    expect(judgeChildEnv({}, { env: { HOTLINE_JUDGE: "1", ...billingEnv }, inherit: [] })).toEqual({
+      HOTLINE_JUDGE: "1",
+    });
     for (const name of names) expect(judgeWithholds(name)).toBe(true);
     for (const name of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]) {
       expect(CLAUDE_CODE_API_BILLING_ENV).toContain(name);

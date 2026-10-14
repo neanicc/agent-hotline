@@ -2,6 +2,7 @@
 // check, then INFO lines with the monthly cost estimate. Exits 1 when anything
 // fails. It never prints a secret's value, only whether it is set, and shows the
 // owner's number as its last four digits.
+import { join } from "node:path";
 import {
   type Config,
   DEFAULT_VOICE_LLM,
@@ -364,8 +365,47 @@ async function elevenLabsChecks(
   return checks;
 }
 
-/** API keys `hotline doctor` names when set, because the plan-login judge backends ignore them (HL-09e). */
-export const PLAN_LOGIN_IGNORED_KEYS = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"] as const;
+/** "A", "A and B", "A, B and C". */
+function listNames(names: readonly string[]): string {
+  return names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+}
+
+/**
+ * HL-09e: what in the owner's own Claude Code user settings file would still
+ * move `claude -p` off the plan login, since a settings file is not part of
+ * the environment the judge withholds from: an `apiKeyHelper`, or an `env`
+ * block naming a withheld variable. A warning naming the file and the keys
+ * (never a value), or undefined when there is none or the file cannot be read.
+ */
+async function claudeSettingsCredential(
+  context: CliContext,
+  withholds: (name: string) => boolean,
+): Promise<string | undefined> {
+  const configDir = context.env.CLAUDE_CONFIG_DIR;
+  const path = join(configDir ? configDir : join(context.homeDir, ".claude"), "settings.json");
+  let settings: unknown;
+  try {
+    const file = await readConfigFile(path);
+    if (file === undefined) return undefined;
+    settings = JSON.parse(file.text);
+  } catch {
+    return undefined;
+  }
+  if (typeof settings !== "object" || settings === null) return undefined;
+  const { apiKeyHelper, env } = settings as { apiKeyHelper?: unknown; env?: unknown };
+  const found: string[] = [];
+  if (typeof apiKeyHelper === "string" && apiKeyHelper.trim() !== "") found.push("apiKeyHelper");
+  if (typeof env === "object" && env !== null) {
+    found.push(
+      ...Object.keys(env)
+        .filter(withholds)
+        .sort()
+        .map((key) => `env.${key}`),
+    );
+  }
+  if (found.length === 0) return undefined;
+  return `${path} sets ${listNames(found)}, which claude -p still applies (a settings file is not the environment the judge withholds), so the judge may bill the API instead of your plan; remove ${found.length === 1 ? "it" : "them"} to keep the judge on your plan login`;
+}
 
 /** The fixed reply `--check-judge` sends: no owner words, a clear yes the judge must agree to. */
 export const JUDGE_CHECK_REPLY = "yes, go ahead";
@@ -382,7 +422,9 @@ async function judgeCheck(
   callJudge: boolean,
 ): Promise<Check[]> {
   const name = "judge";
-  const { judgeCredentialSource, nodeJudgeHost, selectReplyJudge } = await import("@hotline/daemon");
+  const { judgeCredentialSource, judgeWithholds, nodeJudgeHost, selectReplyJudge } = await import(
+    "@hotline/daemon"
+  );
   const searchPath = context.env.PATH;
   const selection = await selectReplyJudge({
     choice: config.judge.backend,
@@ -427,17 +469,24 @@ async function judgeCheck(
       detail: `${selection.backend}: ${selection.detail}; credential: ${credential}; only your short spoken reply is sent to it`,
     },
   ];
-  // HL-09e: an API key in the environment is withheld from the CLI backends,
-  // which run on the plan login. Say so, so the owner is not surprised by it.
+  // HL-09e: API keys, endpoints and provider switches in the environment are
+  // withheld from the CLI backends, which run on the plan login. Say so (names
+  // only), so the owner is not surprised by it.
   if (selection.backend === "claude-code" || selection.backend === "codex") {
-    const ignored = PLAN_LOGIN_IGNORED_KEYS.filter((key) => (context.env[key] ?? "") !== "");
+    const ignored = Object.keys(context.env)
+      .filter((key) => (context.env[key] ?? "") !== "" && judgeWithholds(key))
+      .sort();
     if (ignored.length > 0) {
       checks.push({
         status: "warn",
         name,
-        detail: `${ignored.join(" and ")} ${ignored.length === 1 ? "is" : "are"} set in this environment (a daemon started from it inherits it); the reply judge ignores it and runs ${selection.backend} on your plan login, not API billing (for API billing choose judge.backend: anthropic-api)`,
+        detail: `${listNames(ignored)} ${ignored.length === 1 ? "is" : "are"} set in this environment (a daemon started from it inherits it); the reply judge ignores ${ignored.length === 1 ? "it" : "them"} and runs ${selection.backend} on your plan login, not API billing (for API billing choose judge.backend: anthropic-api)`,
       });
     }
+  }
+  if (selection.backend === "claude-code") {
+    const helper = await claudeSettingsCredential(context, judgeWithholds);
+    if (helper !== undefined) checks.push({ status: "warn", name, detail: helper });
   }
   if (callJudge) {
     const verdict = await selection.judge.judge([JUDGE_CHECK_REPLY]).catch(() => "failed");
