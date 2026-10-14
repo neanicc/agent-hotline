@@ -1594,4 +1594,18 @@ Template:
   accepted (1 test fails), a maybe-placed call not failed on recovery (1),
   a wrong code not burning the waiting codes (1). Scenario suite not built yet
   (HL-12).
-- Open issues or follow-ups: none.
+- Reviews: bot staff review on b7d0d01 approved (93, one P3), and on 0f82134
+  approved with nits (90, two P3s). Greptile P2, fixed: `docs/daemon.md` now
+  lists every exported name, `OrchestratorLog` included. P3s, fixed: `VoiceCalls`
+  takes the queue step through its constructor like `OwnerTexts`, and
+  `OrchestratorState.data` documents that it is mutated in place and never
+  kept across steps. P3 left as is: the coordinator's header keeps the
+  subsystem's safety rules, as a pointer for the files it now names.
+- Open issues or follow-ups: hosted CI on 0f82134 (a docs-only commit) failed
+  once on Ubuntu in `packages/core/test/queue.property.test.ts` ("silence never
+  yields approval", fast-check seed -763136370): `expected 1767225600011 to be
+  less than or equal to 1767225600010`. It reproduces deterministically with that
+  seed and path on this branch, which does not touch `packages/core`, so it is a
+  pre-existing queue or test bug that random seeds rarely hit, not this refactor.
+  It is not fixed here (out of lane); the rerun passed. Follow-up: fix it in
+  `lane:core`.

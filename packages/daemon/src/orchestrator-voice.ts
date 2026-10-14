@@ -31,6 +31,8 @@ export interface VoiceCallsOptions {
   voice?: VoiceProvider;
   /** The orchestrator's current logger (it can be attached after construction). */
   log: () => OrchestratorLog;
+  /** Steps the queue with an event and everything it leads to. */
+  process: (event: QueueEvent) => Promise<QueueAction[]>;
 }
 
 function sameDecision(a: PendingVoiceAnswer["decision"], b: PendingVoiceAnswer["decision"]): boolean {
@@ -204,11 +206,7 @@ export class VoiceCalls {
    * requires. Idempotent: an event for a call that is no longer live (a replay,
    * a call given up on) changes nothing.
    */
-  async postCall(
-    event: Exclude<PostCallEvent, { type: "other" }>,
-    receivedAt: Date,
-    process: (event: QueueEvent) => Promise<QueueAction[]>,
-  ): Promise<void> {
+  async postCall(event: Exclude<PostCallEvent, { type: "other" }>, receivedAt: Date): Promise<void> {
     const call = this.#callFor(event.conversationId);
     if (call === undefined) {
       this.#store.appendAudit("voice.post-call-ignored", { kind: event.type }, receivedAt);
@@ -275,7 +273,7 @@ export class VoiceCalls {
     // The call stays live (with its held answers) until every event is applied:
     // if this fails part way, ElevenLabs' retry applies them again, and events
     // already applied are ignored by the queue.
-    for (const next of events) await process(next);
+    for (const next of events) await this.#options.process(next);
     this.#state.data.calls = this.#state.data.calls.filter((other) => other !== call);
     this.#state.save();
     this.#recordCall(call, event, result, receivedAt);

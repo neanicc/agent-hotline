@@ -133,8 +133,9 @@ const SavedStateSchema = z.strictObject({
 
 /**
  * The orchestrator's state and its copy in the store. Every part of the
- * orchestrator reads `data` afresh (it is replaced on restore) and calls `save`
- * after each change.
+ * orchestrator mutates `data` in place and calls `save` after each change.
+ * `restore` replaces the object, so read `this.data` afresh at the start of
+ * each step and never keep a reference to it across steps.
  */
 export class OrchestratorState {
   data: SavedState;

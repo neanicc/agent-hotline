@@ -105,12 +105,14 @@ export class CallOrchestrator {
     this.#log = options.log ?? silentLog;
     this.#state = new OrchestratorState(options.store, options.settings, options.clock);
     const log = () => this.#log;
+    const processEvent = (event: QueueEvent) => this.#process(event);
     this.#voice = new VoiceCalls({
       store: options.store,
       state: this.#state,
       clock: options.clock,
       ...(options.voice === undefined ? {} : { voice: options.voice }),
       log,
+      process: processEvent,
     });
     this.#texts = new OwnerTexts({
       store: options.store,
@@ -120,7 +122,7 @@ export class CallOrchestrator {
       redact: options.redact,
       ...(options.newCode === undefined ? {} : { newCode: options.newCode }),
       log,
-      process: (event) => this.#process(event),
+      process: processEvent,
     });
     // Webhooks or agent requests that arrive before `start` wait for it.
     this.#chain = new Promise<void>((resolve) => {
@@ -221,7 +223,7 @@ export class CallOrchestrator {
 
   /** A verified post-call webhook; see `VoiceCalls.postCall`. */
   postCall(event: Exclude<PostCallEvent, { type: "other" }>, receivedAt: Date): Promise<void> {
-    return this.#run(() => this.#voice.postCall(event, receivedAt, (next) => this.#process(next)));
+    return this.#run(() => this.#voice.postCall(event, receivedAt));
   }
 
   /**
