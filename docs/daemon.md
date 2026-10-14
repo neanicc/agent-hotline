@@ -387,8 +387,12 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
     it, after an earlier turn that read it (the first reading is never its own
     read-back), that asks for a yes (a `?`, "yes" or "confirm"), such as
     "Allow pnpm test in demo-app? Yes?" or "Sorry, is that a yes or a no?"
-    followed by that read-back. The owner's words must be found in the window
-    right after a read-back, checked newest first. The reply is everything the
+    followed by that read-back. The cue must be the voice agent's, not the
+    ask's: a "yes" or "confirm" that the ask text holds never counts, a `?` is
+    looked for only outside the ask text said verbatim, and an ask whose text
+    has a `?` ("Run the migration?") needs its read-back to say "yes" or
+    "confirm" when the text was not said verbatim. The owner's words must be
+    found in the window right after a read-back, checked newest first. The reply is everything the
     owner said about the ask from that read-back on (its window and any later
     window of the ask). What it means is decided in two steps:
     - the fast path (`replyVerdict`) decides common replies at once. A reply
@@ -413,7 +417,9 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
       (sending only the owner's reply text to a model) needs the owner's
       approval and a plan change, since it adds a hosted service; none is
       built. `VoiceCalls` takes `judge` and `judgeTimeoutMs` options, and the
-      orchestrator does not pass them yet.
+      orchestrator does not pass them yet. A call's held decisions are all
+      checked at once, so a slow judge costs one timeout per call, not one per
+      ask.
 
     Doubt markers no longer reject a reply on their own: they keep the fast
     path from agreeing and send the reply to the judge. A clear-no reply, or a

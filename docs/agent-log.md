@@ -2013,3 +2013,25 @@ Template:
   - The "no ask-for-yes cue" mutation survived once the acknowledgement
     "great" left the fast path; its test now replies "yes" and checks the
     reason, and the mutation fails 1 test again.
+- Bot staff review of 85549a4 (request changes, 81; P1 1, P2 2, P3 2):
+  - P2 fixed: the read-back's "asks for a yes" cue could come from agent
+    text (an ask "Run the migration?" or "Please confirm: deploy" made any
+    re-reading of itself a read-back). A "yes" or "confirm" that the ask text
+    holds no longer counts. A `?` is looked for only outside the ask text
+    said verbatim, and an ask whose text has a `?` needs the voice agent's
+    own "yes" or "confirm" when its text was not said verbatim. Tests cover
+    both asks, re-read verbatim and paraphrased, and the agent's own question
+    still counts. Mutation checks: cue words from the ask counted (2 tests
+    fail), ask text not taken out (1), paraphrased `?` asks allowed (1), no
+    cue at all (6).
+  - P3 fixed: post-call decisions are checked concurrently, so a slow judge
+    costs one timeout per call.
+  - Not changed, and reported to the coordinator:
+    - P1: a human must confirm the consent change and apply `human-approved`.
+      Agents cannot do that.
+    - P2: drop the judge abstraction until a real judge lands. That
+      conflicts with the owner's direction, relayed by the coordinator, to
+      build the pluggable judge now with a fail-closed default.
+    - P3: the fast yes table keeps "ok", "okay", "alright", "sure" and
+      "sounds good". The fast path only runs on a reply to a read-back that
+      asked for a yes, which is the condition the review suggested.

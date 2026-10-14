@@ -238,7 +238,29 @@ export class VoiceCalls {
     } else {
       const asks = call.askIds.map((askId) => this.#readAsk(askId));
       const settledIds = new Set<string>();
-      for (const [index, askId] of call.askIds.entries()) {
+      // Every held decision is checked at once, so a slow judge costs one
+      // timeout per call, not one per ask.
+      const checks = new Map(
+        await Promise.all(
+          call.askIds.flatMap((askId, index) => {
+            const held = call.answers[askId];
+            if (held === undefined || held.conflict || held.decision === "unclear") return [];
+            const input = {
+              transcript: event.transcript,
+              asks,
+              index,
+              decision: held.decision,
+              ownerWords: held.ownerWords,
+            };
+            return [
+              judgeVoiceDecision(input, this.#options.judge, this.#options.judgeTimeoutMs).then(
+                (check) => [askId, check] as const,
+              ),
+            ];
+          }),
+        ),
+      );
+      for (const askId of call.askIds) {
         const held = call.answers[askId];
         if (held === undefined) continue;
         if (held.conflict) {
@@ -250,17 +272,8 @@ export class VoiceCalls {
           settledIds.add(askId);
           continue;
         }
-        const check = await judgeVoiceDecision(
-          {
-            transcript: event.transcript,
-            asks,
-            index,
-            decision: held.decision,
-            ownerWords: held.ownerWords,
-          },
-          this.#options.judge,
-          this.#options.judgeTimeoutMs,
-        );
+        const check = checks.get(askId);
+        if (check === undefined) continue;
         if (!check.confirmed) {
           this.#store.appendAudit("voice.answer-unconfirmed", { reason: check.reason }, receivedAt, {
             askId,

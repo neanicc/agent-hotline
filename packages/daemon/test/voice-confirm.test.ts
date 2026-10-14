@@ -985,3 +985,51 @@ describe("review fixes on #54", () => {
     expect(soundsDoubtful(said)).toBe(true);
   });
 });
+
+describe("the read-back's cue must be the voice agent's, not the ask's", () => {
+  const MIGRATE: ReadAsk = {
+    text: "Run the database migration?",
+    nickname: "Claude in demo-app",
+    toolName: "Bash",
+  };
+  const DEPLOY: ReadAsk = {
+    text: "Please confirm: deploy now",
+    nickname: "Claude in demo-app",
+    toolName: "Bash",
+  };
+  const check = (ask: ReadAsk, second: string, reply = "ok") =>
+    confirmVoiceDecision({
+      transcript: [
+        GREETING,
+        agent(`Claude in demo-app wants to use Bash: ${ask.text}`),
+        owner("sure"),
+        agent(second),
+        owner(reply),
+      ],
+      asks: [ask],
+      index: 0,
+      decision: allow,
+      ownerWords: reply,
+    });
+
+  it.each([
+    [MIGRATE, "Claude in demo-app wants to use Bash: Run the database migration?"],
+    [MIGRATE, "So Claude in demo-app should run the database migration, should it?"],
+    [MIGRATE, "Should Claude in demo-app run the database migration?"],
+    [DEPLOY, "Claude in demo-app says: Please confirm: deploy now"],
+    [DEPLOY, "Claude in demo-app says please confirm deploy now."],
+  ])("a re-reading is not a read-back when its only cue could be the ask's own text (%#)", (ask, second) => {
+    expect(check(ask, second)).toEqual({
+      confirmed: false,
+      reason: "the request was not read back for a yes",
+    });
+  });
+
+  it.each([
+    [MIGRATE, "Allow Bash to run the database migration for Claude in demo-app? Yes?"],
+    [MIGRATE, "Claude in demo-app wants to use Bash: Run the database migration? Is that okay?"],
+    [DEPLOY, "Allow Bash to deploy now for Claude in demo-app? Yes?"],
+  ])("the voice agent's own question still makes a read-back (%#)", (ask, second) => {
+    expect(check(ask, second)).toEqual({ confirmed: true, excerpt: "ok" });
+  });
+});

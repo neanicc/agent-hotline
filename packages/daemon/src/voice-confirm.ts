@@ -387,16 +387,30 @@ export function answerWindows(
  * "confirm"). The ask need not be the last one read: going back to an ask after
  * answering another one is still a read-back of it, since the turn must be
  * recognised as reading this ask and no other.
+ *
+ * The cue must be the voice agent's, not the ask's: the ask text (written by
+ * an agent) is taken out of the turn wherever it is said verbatim before a
+ * `?` is looked for, a "yes" or "confirm" that the ask text holds never
+ * counts, and an ask whose text has a `?` needs its read-back to say "yes" or
+ * "confirm" when the text was not said verbatim. So an ask such as "Run the
+ * migration?" or "Please confirm: deploy" never turns a plain re-reading of
+ * itself into a read-back.
  */
 function isReadBack(
   transcript: readonly TranscriptTurn[],
   read: readonly (number | undefined)[],
   index: number,
   at: number,
+  askText: string,
 ): boolean {
   if (read[at] !== index || !read.slice(0, at).includes(index)) return false;
-  const message = transcript[at]?.message ?? "";
-  return QUESTION_MARK.test(message) || tokens(message).some((word) => ASKS_FOR_YES.has(word));
+  const message = normalized(transcript[at]?.message ?? "");
+  const text = normalized(askText.slice(0, READ_TEXT_LENGTH)).trim();
+  const own = new Set(tokens(text));
+  if (tokens(message).some((word) => ASKS_FOR_YES.has(word) && !own.has(word))) return true;
+  const outside = text.length > 0 ? message.split(text).join(" ") : message;
+  if (QUESTION_MARK.test(text) && outside === message) return false;
+  return QUESTION_MARK.test(outside);
 }
 
 /** Where `excerpt` was said: the shortest run of consecutive owner turns containing it, verbatim. */
@@ -540,11 +554,12 @@ function confirmAllow(
   windows: readonly ReadingWindow[],
   ownerWords: string,
   askWords: ReadonlySet<string>,
+  askText: string,
 ): VoiceConfirmation {
   // Newest first: the reply the model submitted is most likely to the last
   // read-back, and an earlier unclear reply ("yes, if the tests pass") then
   // comes before it and does not count.
-  const backs = windows.filter((window) => isReadBack(transcript, read, index, window.at)).reverse();
+  const backs = windows.filter((window) => isReadBack(transcript, read, index, window.at, askText)).reverse();
   if (backs.length === 0) return { confirmed: false, reason: "the request was not read back for a yes" };
   const match = matchingTurns(
     ownerWords,
@@ -585,7 +600,7 @@ export function confirmVoiceDecision({
   if (opened.length === 0) return { confirmed: false, reason: "the ask's reading is not in the transcript" };
   if (decision.type === "allow") {
     const askWords = keyWords(asks)[index]?.all ?? new Set<string>();
-    return confirmAllow(transcript, read, index, opened, ownerWords, askWords);
+    return confirmAllow(transcript, read, index, opened, ownerWords, askWords, asks[index]?.text ?? "");
   }
   const windows = opened.map((window) => window.turns);
   const match = matchingTurns(ownerWords, windows);
