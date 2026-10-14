@@ -1625,8 +1625,7 @@ Template:
     texted. HL-09c may want to match read-backs on fewer key words.
   - The call log records an undecided call as `dropped` and the expired ask's
     reason as `dropped`; a distinct reason would read better in the log.
-- Bot staff review on #49 (approve with nits, 88 then 90, no P0 or P1). The
-  P3 on the fake's read-back depending on the `asks` line layout is answered
+- Bot staff review on #49 (no P0 or P1). The P3 on the fake's read-back depending on the `asks` line layout is answered
   with a comment naming `describeAsk`'s fence order; the fake-voice tests pin
   the read-back's exact words. The P2s go to follow-ups, not this PR:
   enforcing that the read-back names the request (its command or tool words)
@@ -1634,4 +1633,6 @@ Template:
   `voice-confirm.ts` change. Until then the daemon still confirms an allow
   from the owner's yes in the original reading's window. Real-model
   behaviour stays a live-check item. Unconfirmed allows are already audited
-  as `voice.answer-unconfirmed` with their reason.
+  as `voice.answer-unconfirmed` with their reason. The docs say plainly
+  that the read-back is a prompt rule, not a daemon control, until HL-09c
+  (which should also bind the confirming yes to a turn naming the request).

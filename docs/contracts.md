@@ -342,7 +342,9 @@ submitted at once, never read back; when unsure the agent asks once ("Sorry, is
 that a yes or a no?" with the read-back for a permission request); after a
 second unclear reply it says it will text, submits nothing for that ask and
 moves on, replacing the HL-08 sentence that submitted `unclear`; it asks for
-the PIN at most once per call and never goes quiet. `submit_answer` no longer
+the PIN at most once per call and never goes quiet. These are prompt rules:
+the daemon does not require the read-back exchange in the transcript until
+HL-09c. `submit_answer` no longer
 offers the model `unclear`; the daemon still parses it from an agent on an
 older definition, and it still ends the ask as no answer.
 `SAFETY_RULES` in the providers tests checks each rule word for word, and a
