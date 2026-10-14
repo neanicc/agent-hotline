@@ -20,7 +20,7 @@ import {
   type PendingVoiceAnswer,
 } from "./orchestrator-state.js";
 import type { HotlineStore } from "./store.js";
-import { answerWindows, confirmVoiceDecision, type ReadAsk } from "./voice-confirm.js";
+import { answerWindows, judgeVoiceDecision, type ReadAsk, type ReplyJudge } from "./voice-confirm.js";
 
 /** Rough cost of a call minute in US cents (Twilio voice plus ElevenLabs Agents), for `hotline doctor`. */
 export const CALL_CENTS_PER_MINUTE = 12;
@@ -43,6 +43,13 @@ export interface VoiceCallsOptions {
   log: () => OrchestratorLog;
   /** Steps the queue with an event and everything it leads to. */
   process: (event: QueueEvent) => Promise<QueueAction[]>;
+  /**
+   * Judges an owner's reply to a read-back that the fast path could not
+   * decide. Default `FailClosedJudge`: such a reply is never an approval.
+   */
+  judge?: ReplyJudge;
+  /** How long to wait for `judge`; default `JUDGE_TIMEOUT_MS`. */
+  judgeTimeoutMs?: number;
 }
 
 function sameDecision(a: PendingVoiceAnswer["decision"], b: PendingVoiceAnswer["decision"]): boolean {
@@ -231,25 +238,29 @@ export class VoiceCalls {
     } else {
       const asks = call.askIds.map((askId) => this.#readAsk(askId));
       const settledIds = new Set<string>();
-      call.askIds.forEach((askId, index) => {
+      for (const [index, askId] of call.askIds.entries()) {
         const held = call.answers[askId];
-        if (held === undefined) return;
+        if (held === undefined) continue;
         if (held.conflict) {
           this.#store.appendAudit("voice.answer-conflict", {}, receivedAt, { askId, callId: call.callId });
-          return;
+          continue;
         }
         if (held.decision === "unclear") {
           events.push({ type: "unclear", askId });
           settledIds.add(askId);
-          return;
+          continue;
         }
-        const check = confirmVoiceDecision({
-          transcript: event.transcript,
-          asks,
-          index,
-          decision: held.decision,
-          ownerWords: held.ownerWords,
-        });
+        const check = await judgeVoiceDecision(
+          {
+            transcript: event.transcript,
+            asks,
+            index,
+            decision: held.decision,
+            ownerWords: held.ownerWords,
+          },
+          this.#options.judge,
+          this.#options.judgeTimeoutMs,
+        );
         if (!check.confirmed) {
           this.#store.appendAudit("voice.answer-unconfirmed", { reason: check.reason }, receivedAt, {
             askId,
@@ -262,7 +273,7 @@ export class VoiceCalls {
             events.push({ type: "unclear", askId });
             settledIds.add(askId);
           }
-          return;
+          continue;
         }
         events.push({
           type: "answer",
@@ -277,7 +288,7 @@ export class VoiceCalls {
           },
         });
         settledIds.add(askId);
-      });
+      }
       const ownerSpoke = event.transcript.some((turn) => turn.role === "owner");
       const open = call.askIds.flatMap((askId, index) => (settledIds.has(askId) ? [] : [{ askId, index }]));
       result = !ownerSpoke ? "no-pickup" : open.length === 0 ? "answered" : "dropped";

@@ -30,7 +30,10 @@ Never fabricate an entry; "not tested" is a valid result.
   yes or a no?", then says it will text you, and the text arrives when the call
   ends. Check the daemon log has no `voice.answer-unconfirmed` for the
   confirmed yes, and that the third call's `call.ended` says `owner-unclear`.
-  Then answer a read-back with "of course" (no yes word): it is approved. Say
+  Then answer a read-back with "of course": it is approved. Answer another with
+  "yeah let's ship that one": with no judge switched on it is texted, not
+  approved (`voice.answer-unconfirmed`, "the judge found the owner's reply
+  unclear"). Say
   "hmm" to a fourth, then "yeah go ahead" to "is that a yes or a no?": it is
   approved. If a real read-back of a long request is not recognised
   (`voice.answer-unconfirmed`, "the request was not read back for a yes"),

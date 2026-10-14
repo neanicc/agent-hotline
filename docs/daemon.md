@@ -379,39 +379,54 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
   - an answer is taken back by anything the owner said about the ask after it
     that sounds doubtful (below), such as "no", "wait", "never mind",
     "actually";
-  - an `allow` is confirmed by the read-back exchange, not by a list of yes
-    words (HL-09c, the owner's direction: approving by voice is as natural as
-    a conversation, and no keyword list may reject a natural yes). There must
-    be a read-back of this ask: an agent turn recognised as reading it, after
-    an earlier turn that read it (the first reading is never its own
+  - an `allow` is confirmed by the read-back exchange (HL-09c). The owner's
+    direction: approving by voice is as natural as a conversation, and it is
+    not limited to phrase matching ("phrase matching is fine so it's quicker
+    on common phrases but it should definitely not be limited like a regex").
+    There must be a read-back of this ask: an agent turn recognised as reading
+    it, after an earlier turn that read it (the first reading is never its own
     read-back), that asks for a yes (a `?`, "yes" or "confirm"), such as
     "Allow pnpm test in demo-app? Yes?" or "Sorry, is that a yes or a no?"
     followed by that read-back. The owner's words must be found in the window
-    right after a read-back, and nothing the owner said in that window or any
-    later window of the ask may sound doubtful (below) or ask a question back.
-    No yes word is needed: "of course", "absolutely", "do it", "go for it",
-    "send it", "for sure" and "mm-hmm" all approve after a read-back. Doubt
-    before the read-back does not count against a clear reply after it, so
-    "hmm", then "Sorry, is that a yes or a no? Allow ...? Yes?", then "yeah go
-    ahead" approves, and so does "no", a read-back, then "okay yes" (a deny the
-    voice agent submitted for the "no" still wins, see above). No read-back, a
-    read-back of a different ask, a read-back with no reply, or a statement
-    repeating the request ("Okay, it will run pnpm test.") is no approval: the
-    ask stays open and is texted. The reply to the read-back (the owner's
-    turns in its window) must also be an answer, not noise: not empty, not
-    only fillers (`um`, `uh`, `er`, `mm`, `hmm`, `oh`, ...), with no
-    transcriber marker (`[inaudible]`, `(noise)`, `<unk>`: any bracket), at
-    most `MAX_REPLY_WORDS` (8) words, and not only the read-back's own words
-    said back ("git push origin main", "push"; the read-back's "yes?" does not
-    count as words to echo, so "yes" approves). Last comes `isAffirmative`:
-    today it accepts every reply that passed those checks
-    (`REQUIRE_CASUAL_YES` is off, as the owner directed), so unrelated chatter
-    ("the dog is barking") still approves after a read-back. Whether to
-    require a casual yes (`hasCasualYes`: a generous list, "yeah", "of
-    course", "go ahead", "you bet", "mm-hmm", ...) is an open decision for the
-    owner; switching is that one constant. The voice model's own judgement
-    still decides whether to submit the allow; the daemon only refuses one the
-    transcript does not back.
+    right after a read-back, checked newest first. The reply is everything the
+    owner said about the ask from that read-back on (its window and any later
+    window of the ask). What it means is decided in two steps:
+    - the fast path (`replyVerdict`) decides common replies at once. A reply
+      made only of clear-yes phrases, one after another ("yes", "yeah, go
+      ahead", "of course", "sure, do it", "mm-hmm"), agrees, but never when it
+      holds a doubt or negation marker (below). A reply made only of
+      clear-no phrases ("no", "nope", "no, don't") declines. Noise is unclear:
+      nothing said, only fillers (`um`, `uh`, `er`, `mm`, `hmm`, `oh`, ...), a
+      transcriber marker (any bracket: `[inaudible]`, `(noise)`, `<unk>`),
+      more than `MAX_REPLY_WORDS` (8) words, or only the read-back's words said
+      back ("git push origin main"; the read-back's "yes?" is not a word to
+      echo, so "yes" agrees);
+    - anything else ("yes, if the tests pass", "what does that do?", "yeah
+      let's ship that one", "of course, wait") goes to a `ReplyJudge`. The
+      judge gets only the owner's reply turns, verbatim, never the ask, the
+      read-back or any other agent-written text. Only `agreed` confirms; a
+      `declined` or `unclear` verdict, an error, or no answer within
+      `JUDGE_TIMEOUT_MS` (8 seconds) leaves the allow not confirmed. The
+      default judge is `FailClosedJudge`, which finds every reply unclear, so
+      today such a reply is never an approval and the ask is texted.
+      `FakeJudge` plays scripted verdicts in tests. A model-backed judge
+      (sending only the owner's reply text to a model) needs the owner's
+      approval and a plan change, since it adds a hosted service; none is
+      built. `VoiceCalls` takes `judge` and `judgeTimeoutMs` options, and the
+      orchestrator does not pass them yet.
+
+    Doubt markers no longer reject a reply on their own: they keep the fast
+    path from agreeing and send the reply to the judge. A clear-no reply, or a
+    judge's `declined`, leaves the allow not confirmed (the ask is texted).
+    Only a `deny` the voice agent submitted ends the request at once. Doubt
+    before the read-back does not count, so "hmm", then "Sorry, is that a yes
+    or a no? Allow ...? Yes?", then "yeah go ahead" agrees, and so does "no",
+    a read-back, then "okay yes" (a deny the voice agent submitted for the
+    "no" still wins, see above). No read-back, a read-back of a different ask,
+    a read-back with no reply, or a statement repeating the request ("Okay,
+    it will run pnpm test.") is no approval: the ask stays open and is
+    texted. The voice model's own judgement still decides whether to submit
+    the allow; the daemon only refuses one the transcript does not back.
   "Sounds doubtful" (`soundsDoubtful`) means refusal, negation, hesitation,
   delay or correction: words such as `no`, `not`, `never`, `wait`, `hold`,
   `later`, `maybe`, `but`, `cancel`, `abort`, `negative`, `cannot`, `actually`,
@@ -425,11 +440,13 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
   questions (a `?`, or `what`, `why`, `how`, `which`, ..., since speech
   recognition often drops the question mark). "Mm-hmm", "uh-huh" and "mhm",
   written as one hyphenated sound, are a yes, not a "hmm" or "huh"; "mm,
-  hmm" is a hesitation. A question asked before the owner's answer ("what does
-  it push?") does not count against a later yes; one in the answer itself or
-  after it does. Idioms that carry a negation word ("no problem", "why not")
-  still sound doubtful: a transcript without commas cannot tell "no problem"
-  from "no, problem is ...", so these fail closed and the ask is texted.
+  hmm" is a hesitation. Common refusals in other languages (`nein`, `nee`,
+  `nej`, `niet`, `nie`, `non`, `não`, `nada`) count too. For free text,
+  options and `done`, a question asked before the owner's answer ("what does
+  it push?") does not count against it; one in the answer itself or after it
+  does. For an `allow`, doubt only keeps the fast path from agreeing (above):
+  idioms that carry a negation word ("no problem", "why not") go to the
+  judge.
   A `deny` needs only the owner's words in a window; nothing else can block a
   refusal. The stored `ownerExcerpt` is the matching owner turns, verbatim, not
   the model's `owner_words`. An unconfirmed answer is dropped
@@ -441,18 +458,16 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
   Confirmed answers and `unclear` reports reach the queue before the call's
   `call-ended`.
   Known limits: the word lists are English, so other languages never confirm
-  an option or `done` (fail closed: the ask is texted), and a refusal or hedge
-  in another language ("nein") is not recognised as doubt in a reply to a
-  read-back, so only the voice model's judgement keeps it from being
-  submitted as an allow. A doubtful
+  an option or `done`, and never get a fast yes for an allow (fail closed:
+  the ask is texted). A doubtful
   word in a later turn about the ask also takes back a free-text answer. These
   rules are tested on scripted transcripts only; real ElevenLabs transcripts
   (turn splitting, interruptions, paraphrased readings) need the live check, and
-  some answers will be refused there until the persona is tuned. Without a yes
-  word, the read-back and the doubt markers are what stand between a voice
-  model that submits an allow on its own and an approval: a model that reads
-  the request back and then submits allow on a neutral reply ("I'm driving")
-  would be confirmed. High-risk requests still need the PIN.
+  some answers will be refused there until the persona is tuned. Until a
+  real judge is approved, any natural yes outside the fast path's table is
+  texted rather than approved. With a real judge, its verdict on the owner's
+  words is what stands between a voice model that submits an allow on its
+  own and an approval. High-risk requests still need the PIN.
 - **How a call ended.** `call_initiation_failure` `busy` or `no-answer` is
   `no-pickup`, anything else `failed`. A transcription in which the owner never
   spoke is `no-pickup` (voicemail, silence); one where every ask was settled is

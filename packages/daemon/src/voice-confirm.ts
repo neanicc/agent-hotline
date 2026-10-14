@@ -14,14 +14,18 @@
 //   owner's direction: approving by voice is as natural as a conversation). The
 //   ask is read; later the agent reads it back as a question asking for a yes ("Allow pnpm test in demo-app? Yes?",
 //   or "Sorry, is that a yes or a no?" with the read-back); the owner's words
-//   are their reply to that read-back. No yes word is needed ("of course", "do
-//   it", "send it" all approve), but the reply and everything the owner says
-//   about the ask after the read-back must hold no refusal, hedge or doubt and
-//   no question back. Doubt before the read-back ("hmm") does not count against
-//   a clear reply after it. The reply must be an answer, not noise (fillers, a
-//   transcriber's "[inaudible]", a long ramble, the read-back said back), and
-//   pass `isAffirmative`, which today accepts all such replies. No read-back,
-//   or a read-back of another ask, is no approval.
+//   are their reply to that read-back. What the reply means is decided in two
+//   steps (`replyVerdict`, the owner's direction: approving is not limited to
+//   phrase matching). A fast path decides common clear replies at once ("yes",
+//   "yeah, go ahead", "of course", "no", "nope"), and noise is unclear
+//   (nothing said, fillers, "[inaudible]", a long ramble, the read-back said
+//   back). The fast path never agrees with a reply that holds a doubt or
+//   negation marker. Anything else goes to a `ReplyJudge`, which sees only the
+//   owner's own reply turns, never agent-written text. The default judge
+//   (`FailClosedJudge`) finds everything unclear, so such a reply is not
+//   confirmed and the ask is texted; a judge error or timeout is the same.
+//   Doubt before the read-back ("hmm") does not count against a clear reply
+//   after it. No read-back, or a read-back of another ask, is no approval.
 // - Which ask a turn reads is attributed strictly (`readingOf`): with several
 //   asks on the call, the turn must name every word that tells its ask apart,
 //   and anything ambiguous (identical asks, one contained in another, two
@@ -38,7 +42,10 @@
 //
 // Everything here fails closed: an ask whose reading cannot be found in the
 // transcript, or words found in the wrong place, is not confirmed, and the ask
-// stays unanswered (call policy then texts it). Pure: no I/O, no clock.
+// stays unanswered (call policy then texts it). `confirmVoiceDecision` is pure
+// (no I/O, no clock) and treats every reply the fast path cannot decide as
+// unclear; `judgeVoiceDecision` asks the injected judge about those, with a
+// timeout.
 import type { AskKind, Decision } from "@hotline/core";
 import { ownerSaid, type TranscriptTurn } from "@hotline/providers";
 
@@ -61,15 +68,10 @@ export const READING_MIN_SHARE = 0.5;
  * also reads it, so a one-sentence read-back of a long ask is still recognised.
  */
 export const LONG_ASK_KEY_WORDS = 8;
-/** A reply to a read-back longer than this many words is not taken as a yes. */
+/** A reply to a read-back longer than this many words is unclear, never judged a yes. */
 export const MAX_REPLY_WORDS = 8;
-/**
- * Whether a reply to a read-back must also hold a casual yes (`hasCasualYes`)
- * to approve. Off: the owner directed that no keyword list may reject a
- * natural yes, so only the negative checks apply. Whether to turn it on is an
- * open decision for the owner (HL-09c); switching is this one constant.
- */
-export const REQUIRE_CASUAL_YES = false;
+/** How long `judgeVoiceDecision` waits for the judge; then the reply is not confirmed. */
+export const JUDGE_TIMEOUT_MS = 8_000;
 /** Ask text the voice agent was given is cut to this many characters (`callVariables`). */
 const READ_TEXT_LENGTH = 300;
 /** Owner turns kept as the stored excerpt, at most. The contract allows 2000 characters. */
@@ -77,9 +79,14 @@ const MAX_EXCERPT = 2000;
 
 const wordSet = (words: string): ReadonlySet<string> => new Set(words.split(" "));
 
-/** Words too common to tell asks apart. */
+/**
+ * Words too common to tell asks apart. The last ones are the read-back's own
+ * template words ("Allow ...? Yes?", "Sorry, is that a yes or a no?"), so an
+ * ask that contains them ("yes | pnpm test") is never told apart from another
+ * by the words the voice agent adds to every read-back.
+ */
 const COMMON = wordSet(
-  "the and for you your are can this that with from want wants should would will use run ask agent",
+  "the and for you your are can this that with from want wants should would will use run ask agent yes confirm allow sorry",
 );
 /**
  * Words that make an approval doubtful or take an answer back: refusal,
@@ -89,6 +96,8 @@ const COMMON = wordSet(
 const DOUBT_WORDS = wordSet(
   [
     "no nope nah nuh not never negative deny denied reject refuse stop cancel abort wait hold later maybe",
+    // Common refusals in other languages; others are not recognised (see docs/daemon.md).
+    "nein nee nej niet nie non não nao nada",
     "unless but cannot nevermind scratch forget actually instead",
     // Hedges and conditions: "I'm unsure whether to approve", "yes if the tests pass".
     "unsure uncertain doubt dunno idk whether if perhaps probably possibly might guess suppose think",
@@ -112,17 +121,61 @@ const FILLERS = wordSet("um umm uhm uh uhh er erm ah ahh oh eh mm mmm hmm hm hmm
 /** What a transcriber writes for speech it could not make out: "[inaudible]", "(noise)", "<unk>". */
 const TRANSCRIBER_MARKER = /[[\]()<>{}]/;
 /**
- * A generous list of casual yeses, for `hasCasualYes`. Not required today
- * (`REQUIRE_CASUAL_YES`); "of course", "go ahead", "for sure", "you bet",
- * "sounds good" and "do it" are covered by their words.
+ * The fast path's clear yeses: a reply made only of these phrases, one after
+ * another ("yeah, go ahead", "okay yes", "sure, do it"), agrees. Anything else
+ * goes to the judge. "Mm-hmm", "uh-huh" and "mhm" are read as "yes" first.
  */
-const CASUAL_YES = wordSet(
-  [
-    "yes yeah yep yup yea ya yah yas aye sure ok okay okey alright allright fine affirmative",
-    "approve approved allow allowed go proceed continue absolutely definitely certainly totally course",
-    "do send ship push please correct right bet cool great perfect good indeed agreed deal mhm",
-  ].join(" "),
-);
+const YES_PHRASES = new Set([
+  ..."yes yeah yep yup yea ya yah aye sure ok okay alright absolutely definitely certainly totally".split(
+    " ",
+  ),
+  ..."fine perfect great cool correct affirmative approved proceed please thanks".split(" "),
+  "all right",
+  "of course",
+  "for sure",
+  "sure thing",
+  "you bet",
+  "go",
+  "go ahead",
+  "go on",
+  "go for it",
+  "do it",
+  "please do",
+  "send it",
+  "ship it",
+  "push it",
+  "run it",
+  "start it",
+  "allow it",
+  "approve it",
+  "sounds good",
+  "that s fine",
+  "that s right",
+  "thank you",
+]);
+/**
+ * The fast path's clear refusals: a reply made only of these is a no. "Don't"
+ * is split by the tokeniser into "don" and "t".
+ */
+const NO_PHRASES = new Set([
+  ..."no nope nah nay never deny denied stop cancel reject declined decline nein".split(" "),
+  "no thanks",
+  "no thank you",
+  "no way",
+  "not now",
+  "absolutely not",
+  "hold off",
+  "don t",
+  "do not",
+  "dont",
+  "don t do it",
+  "do not do it",
+  "deny it",
+  "cancel it",
+  "stop it",
+]);
+/** Longest phrase, in words, in the tables above. */
+const MAX_PHRASE_WORDS = 4;
 /** How the owner may name option N (index N - 1). "one" is too common ("the second one") to name option 1 against another. */
 const NUMBER_WORDS = "one two three four five six seven eight nine".split(" ");
 const ORDINALS = "first second third fourth fifth sixth seventh eighth ninth".split(" ");
@@ -388,7 +441,17 @@ function namesOption(
 
 export type VoiceConfirmation =
   /** `excerpt` is the owner's own transcript turns that back the decision, verbatim. */
-  { confirmed: true; excerpt: string } | { confirmed: false; reason: string };
+  | { confirmed: true; excerpt: string }
+  | {
+      confirmed: false;
+      reason: string;
+      /**
+       * Set when the fast path could not decide the owner's reply to a
+       * read-back: what `judgeVoiceDecision` may ask a `ReplyJudge` about.
+       * Without a judge it stays not confirmed.
+       */
+      undecided?: { reply: readonly string[]; excerpt: string };
+    };
 
 export interface ConfirmInput {
   transcript: readonly TranscriptTurn[];
@@ -401,48 +464,95 @@ export interface ConfirmInput {
   ownerWords: string;
 }
 
-/** Whether `reply` holds a casual yes from a generous list ("yeah", "of course", "go ahead", "mm-hmm"). */
-export function hasCasualYes(reply: string): boolean {
-  const plain = normalized(reply);
-  return plain.search(AFFIRMING_SOUND) >= 0 || tokens(plain).some((word) => CASUAL_YES.has(word));
+/** What the owner's reply to a read-back means. */
+export type ReplyVerdict = "agreed" | "declined" | "unclear";
+
+/**
+ * Decides what an owner's reply to a read-back means when the fast path
+ * cannot. It is given only the owner's own reply turns, verbatim: never the
+ * ask, the read-back or any other agent-written text. Anything but `agreed`,
+ * an error or a timeout means not confirmed.
+ */
+export interface ReplyJudge {
+  judge(reply: readonly string[]): Promise<ReplyVerdict>;
 }
 
 /**
- * The affirmative check on a reply to a read-back, run after the negative ones
- * (doubt, a question back, noise). Today it accepts every reply that passed
- * those (`REQUIRE_CASUAL_YES` is off, as the owner directed); with it on, the
- * reply must also hold a casual yes. Pending the owner's decision (HL-09c).
+ * The default judge until a real one is approved: every reply is unclear, so
+ * a reply the fast path cannot decide is never an approval and the ask is
+ * texted.
  */
-export function isAffirmative(reply: string, requireCasualYes = REQUIRE_CASUAL_YES): boolean {
-  return !requireCasualYes || hasCasualYes(reply);
+export class FailClosedJudge implements ReplyJudge {
+  async judge(): Promise<ReplyVerdict> {
+    return "unclear";
+  }
+}
+
+/** A scripted step for `FakeJudge`: a verdict, an error to throw, or `hang` (never answers). */
+export type FakeJudgeStep = ReplyVerdict | Error | "hang";
+
+/** A judge for tests: answers with scripted steps in order (then `unclear`) and records every input. */
+export class FakeJudge implements ReplyJudge {
+  /** Every reply it was asked about, oldest first. */
+  readonly inputs: (readonly string[])[] = [];
+  readonly #steps: FakeJudgeStep[];
+
+  constructor(...steps: FakeJudgeStep[]) {
+    this.#steps = steps;
+  }
+
+  judge(reply: readonly string[]): Promise<ReplyVerdict> {
+    this.inputs.push([...reply]);
+    const step = this.#steps.shift() ?? "unclear";
+    if (step instanceof Error) return Promise.reject(step);
+    if (step === "hang") return new Promise<ReplyVerdict>(() => {});
+    return Promise.resolve(step);
+  }
+}
+
+/** Splits `words` into phrases from `table`, one after another; whether that is possible. */
+function onlyPhrases(words: readonly string[], table: ReadonlySet<string>): boolean {
+  const fits: boolean[] = [true, ...words.map(() => false)];
+  for (let end = 1; end <= words.length; end++) {
+    for (let size = 1; size <= Math.min(MAX_PHRASE_WORDS, end) && !fits[end]; size++) {
+      if (fits[end - size] && table.has(words.slice(end - size, end).join(" "))) fits[end] = true;
+    }
+  }
+  return words.length > 0 && fits[words.length] === true;
 }
 
 /**
- * Why a reply to a read-back is noise, not an answer, or undefined: nothing
- * said, only fillers ("um", "hmm"), a transcriber's marker ("[inaudible]"),
- * more than `MAX_REPLY_WORDS` words, or the request's words said back with
- * nothing else ("pnpm test in demo-app").
+ * The fast path for the owner's reply to a read-back (`reply`, their turns
+ * from the read-back on): `unclear` for noise (nothing said, only fillers, a
+ * transcriber's marker such as "[inaudible]", more than `MAX_REPLY_WORDS`
+ * words, or only the request's words said back), `declined` for a clear no,
+ * `agreed` for a clear yes with no doubt or negation marker anywhere, and
+ * undefined when the judge must decide.
  */
-function replyNoise(reply: string, readBack: string, askWords: ReadonlySet<string>): string | undefined {
-  if (TRANSCRIBER_MARKER.test(reply)) return "the owner's reply to the read-back was not made out";
-  const plain = normalized(reply);
-  const words = tokens(plain.replace(AFFIRMING_SOUND, " yes "));
-  if (words.every((word) => FILLERS.has(word))) return "the owner's reply to the read-back is not an answer";
-  if (words.length > MAX_REPLY_WORDS)
-    return "the owner's reply to the read-back is too long to be a clear yes";
+export function replyVerdict(
+  reply: readonly string[],
+  readBack: string,
+  askWords: ReadonlySet<string>,
+): ReplyVerdict | undefined {
+  const text = reply.join(" ");
+  if (TRANSCRIBER_MARKER.test(text)) return "unclear";
+  const words = tokens(normalized(text).replace(AFFIRMING_SOUND, " yes "));
+  if (words.every((word) => FILLERS.has(word))) return "unclear";
+  if (words.length > MAX_REPLY_WORDS) return "unclear";
   // The read-back's own "yes?" or "confirm" is the agent asking, not words to echo.
   const back = new Set(tokens(readBack).filter((word) => !ASKS_FOR_YES.has(word)));
   const said = words.filter((word) => !FILLERS.has(word));
-  if (said.every((word) => back.has(word)) && said.some((word) => askWords.has(word))) {
-    return "the owner only repeated the read-back";
-  }
+  if (said.every((word) => back.has(word)) && said.some((word) => askWords.has(word))) return "unclear";
+  if (onlyPhrases(said, NO_PHRASES)) return "declined";
+  if (!soundsDoubtful(text) && onlyPhrases(said, YES_PHRASES)) return "agreed";
   return undefined;
 }
 
 /**
- * An `allow`: the owner's words are their reply to a read-back of this ask, the
- * reply is an answer rather than noise, and nothing the owner said about the
- * ask from that read-back on sounds doubtful or asks a question back.
+ * An `allow`: the owner's words are their reply to a read-back of this ask,
+ * and that reply, with everything the owner said about the ask after it, is a
+ * yes: from the fast path here, or, when undecided, from the judge
+ * (`judgeVoiceDecision`).
  */
 function confirmAllow(
   transcript: readonly TranscriptTurn[],
@@ -452,7 +562,10 @@ function confirmAllow(
   ownerWords: string,
   askWords: ReadonlySet<string>,
 ): VoiceConfirmation {
-  const backs = windows.filter((window) => isReadBack(transcript, read, index, window.at));
+  // Newest first: the reply the model submitted is most likely to the last
+  // read-back, and an earlier unclear reply ("yes, if the tests pass") then
+  // comes before it and does not count.
+  const backs = windows.filter((window) => isReadBack(transcript, read, index, window.at)).reverse();
   if (backs.length === 0) return { confirmed: false, reason: "the request was not read back for a yes" };
   const match = matchingTurns(
     ownerWords,
@@ -462,19 +575,22 @@ function confirmAllow(
     return { confirmed: false, reason: "the owner did not say these words in reply to the read-back" };
   }
   const from = backs[match.window]?.at ?? Number.POSITIVE_INFINITY;
-  const after = windows.filter((window) => window.at >= from).flatMap((window) => ownerTurns(window.turns));
-  if (after.some((turn) => soundsDoubtful(turn.message))) {
-    return { confirmed: false, reason: "the owner's reply to the read-back is not a clear yes" };
-  }
-  const back = backs[match.window];
-  const reply = ownerTurns(back?.turns ?? [])
-    .map((turn) => turn.message)
-    .join(" ");
-  const noise = replyNoise(reply, transcript[back?.at ?? -1]?.message ?? "", askWords);
-  if (noise !== undefined) return { confirmed: false, reason: noise };
-  if (!isAffirmative(reply))
-    return { confirmed: false, reason: "the owner's reply to the read-back is not a yes" };
-  return { confirmed: true, excerpt: match.text.slice(0, MAX_EXCERPT) };
+  // The reply is everything the owner said about this ask from that read-back on.
+  const reply = windows
+    .filter((window) => window.at >= from)
+    .flatMap((window) => ownerTurns(window.turns))
+    .map((turn) => turn.message);
+  const excerpt = match.text.slice(0, MAX_EXCERPT);
+  const verdict = replyVerdict(reply, transcript[from]?.message ?? "", askWords);
+  if (verdict === "agreed") return { confirmed: true, excerpt };
+  if (verdict === "declined") return { confirmed: false, reason: "the owner said no to the read-back" };
+  if (verdict === "unclear")
+    return { confirmed: false, reason: "the owner's reply to the read-back is not clear" };
+  return {
+    confirmed: false,
+    reason: "the owner's reply to the read-back needs a judge",
+    undecided: { reply, excerpt },
+  };
 }
 
 /** Whether the post-call transcript backs a voice decision; see the top of this file. */
@@ -531,4 +647,37 @@ export function confirmVoiceDecision({
     }
   }
   return excerpt;
+}
+
+/**
+ * `confirmVoiceDecision`, plus the judge for an owner's reply to a read-back
+ * that the fast path could not decide. The judge gets only that reply (the
+ * owner's turns); `agreed` confirms the allow, and anything else (`declined`,
+ * `unclear`, an answer that is none of these, an error, or no answer within
+ * `timeoutMs`) leaves it not confirmed.
+ */
+export async function judgeVoiceDecision(
+  input: ConfirmInput,
+  judge: ReplyJudge = new FailClosedJudge(),
+  timeoutMs = JUDGE_TIMEOUT_MS,
+): Promise<VoiceConfirmation> {
+  const result = confirmVoiceDecision(input);
+  if (result.confirmed || result.undecided === undefined) return result;
+  const { reply, excerpt } = result.undecided;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timeout = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), timeoutMs);
+    });
+    const verdict = await Promise.race([judge.judge([...reply]), timeout]);
+    if (verdict === "agreed") return { confirmed: true, excerpt };
+    if (verdict === "declined")
+      return { confirmed: false, reason: "the judge heard a no in the owner's reply" };
+    if (verdict === "timeout") return { confirmed: false, reason: "the judge did not answer in time" };
+    return { confirmed: false, reason: "the judge found the owner's reply unclear" };
+  } catch {
+    return { confirmed: false, reason: "the judge failed" };
+  } finally {
+    clearTimeout(timer);
+  }
 }

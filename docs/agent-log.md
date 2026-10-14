@@ -1897,7 +1897,8 @@ Template:
   After the security fixes: the first reading counted (9), no ask-for-yes
   cue (1), no doubt check after the read-back (65), doubt before the
   read-back counted (5), no long-ask rule (2).
-- Risk, accepted by the owner's direction: with no yes word, a voice model
+- Risk in the first version (closed by owner direction 2 below, which needs
+  a positive verdict): with no yes word, a voice model
   that reads the request back and then submits allow on a neutral reply
   ("I'm driving") would be confirmed; so would a refusal in another language
   ("nein"). The read-back, the doubt markers and the model's own judgement
@@ -1933,12 +1934,9 @@ Template:
     transcriber marker (any bracket: `[inaudible]`, `(noise)`, `<unk>`), is
     longer than `MAX_REPLY_WORDS` (8), or only repeats the read-back's words.
     "Mm-hmm", "uh-huh" and "mhm" count as a yes only as one hyphenated sound.
-  - Open decision for the owner: whether a reply must also hold a casual yes.
-    `isAffirmative(reply)` is the one switch. It returns true today
-    (`REQUIRE_CASUAL_YES = false`, following the owner's "no keyword list may
-    reject a natural yes"), so unrelated chatter ("the dog is barking") still
-    approves after a read-back. `hasCasualYes` holds the generous list;
-    tests cover both settings.
+  - Open decision at the time: whether a reply must also hold a casual yes,
+    behind an `isAffirmative(reply)` switch. The owner's next direction
+    (below) replaced that switch with a judge.
   - Changed expectations: the four "Just to confirm: git push origin main via
     Bash?" re-readings in `voice-confirm.test.ts` now name the session ("...
     for Claude in demo-app?"), since PUSH and INSTALL come from different
@@ -1949,3 +1947,54 @@ Template:
     distinct-word rule (1), no command-token rule (2), no marker rule (5), no
     filler rule (6), no length rule (1), no echo rule (4), casual yes
     required (5).
+- Bot staff review of 01952d1 (request changes, 62) and Greptile on a245577:
+  - Fixed: read-backs are matched newest first, so an earlier conditional
+    reply no longer blocks a later clear one (staff P2, Greptile P2). The
+    read-back's template words (`yes`, `confirm`, `allow`, `sorry`) are no
+    longer key words, so an ask that contains them ("yes | pnpm test", or one
+    made only of them) cannot be told apart, or claim a read-back, by the
+    words the agent adds (Greptile P1; containment already blocked the exact
+    case, and a new test covers the case only this rule blocks). Repeated
+    yes sounds ("yes, uh-huh, uh-huh") are tested (Greptile P2; the
+    lookaround regex already handled them). Common refusals in other
+    languages (`nein`, `nee`, `nej`, `niet`, `nie`, `non`, `não`, `nada`)
+    sound doubtful (staff P2, partial).
+  - The staff review's two P1s ask for a positive affirmative and for a
+    human to confirm the consent change against AGENTS.md and plan section
+    5B ("anything other than a clear yes is a deny"). Both were answered by
+    the owner's next direction (below): a positive verdict, from the fast
+    path or a judge, is now required, and the default judge fails closed.
+    AGENTS.md and the plan are human-owned and unchanged; a human still
+    needs to confirm the direction and approve any real judge.
+- Owner direction 2 (relayed by the autopilot coordinator): "let Claude
+  decide what they mean... if Claude thinks he said yes Claude asks 'that's a
+  yes right?'... phrase matching is fine so it's quicker on common phrases
+  but it should definitely not be limited like a regex".
+  - Change: the allow check is built around a pluggable `ReplyJudge`
+    (`agreed | declined | unclear`) that is given only the owner's reply
+    turns to the read-back, never agent text. A fast path (`replyVerdict`)
+    decides first. A reply made only of clear-yes phrases with no doubt or
+    negation marker agrees, and one made only of clear-no phrases declines.
+    Noise (empty, fillers, a transcriber marker, more than 8 words, the
+    read-back echoed) is unclear. Everything else goes to the judge, with an
+    8-second timeout (`judgeVoiceDecision`). Doubt markers no longer reject
+    on their own; they keep the fast path from agreeing. A judge error,
+    timeout or anything but `agreed` is not confirmed.
+  - Decisions: the default judge is `FailClosedJudge` (always unclear), so
+    nothing outside the fast path approves today. `FakeJudge` scripts
+    verdicts, errors and hangs for tests. No network client was written: a
+    model-backed judge needs the owner's OK to add the API and a plan
+    change. `VoiceCalls` takes `judge` and `judgeTimeoutMs` options, but
+    `orchestrator.ts` (shared with HL-10) does not pass them yet, so the
+    daemon always uses the fail-closed judge. `isAffirmative`, `hasCasualYes`
+    and `REQUIRE_CASUAL_YES` are removed.
+  - Changed expectation: "does not approve when the owner takes the reply to
+    the read-back back" now expects "needs a judge" with the whole reply
+    (`["of course", "wait"]`), not a doubt rejection. The noise and
+    `isAffirmative` tests became fast-path and judge tests.
+  - Mutation checks, each reverted: fast yes ignoring doubt markers (3
+    tests fail), fast path agreeing with anything (87), no noise rules (5), a
+    judge `declined` confirming (1), a judge error confirming (1), no judge
+    timeout (1), the judge also seeing agent text (2), the fail-closed judge
+    agreeing (4); review fixes: oldest read-back first (1), template words as
+    key words (1), no non-English refusals (6), no read-back required (95).

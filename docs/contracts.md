@@ -345,9 +345,10 @@ moves on, replacing the HL-08 sentence that submitted `unclear`; it asks for
 the PIN at most once per call and never goes quiet. Since HL-09c the daemon
 requires the read-back exchange in the transcript for every voice allow: the
 ask's reading, a later agent turn reading the same ask back as a question for
-a yes, and the owner's reply to it with no refusal, hedge, doubt or question
-back from then on; no yes word is needed. An allow without it is not
-confirmed and the ask is texted
+a yes, and the owner's reply to it, which a fast path of common clear replies
+or, for anything else, a pluggable `ReplyJudge` must find agreed (the judge
+sees only the owner's reply turns; the default judge fails closed). An allow
+without it is not confirmed and the ask is texted
 ([daemon.md](daemon.md#call-orchestration)). `submit_answer` no longer
 offers the model `unclear`; the daemon still parses it from an agent on an
 older definition, and it still ends the ask as no answer.
