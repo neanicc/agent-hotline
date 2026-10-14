@@ -11,6 +11,16 @@ import { costLines, estimateMonthlyCost, NO_USAGE, readUsage } from "../src/cost
 import { NOW, seedTypicalUsage, TYPICAL } from "./cost-helpers.js";
 
 const rates: CostRates = { ...DEFAULT_COST_RATES };
+const DAY = 24 * 60 * 60 * 1000;
+const TYPICAL_CALL = {
+  provider: "fake" as const,
+  direction: "outbound" as const,
+  providerIds: {},
+  askIds: ["ask-1"],
+  outcome: "answered" as const,
+  durationSeconds: 30,
+  costEstimateCents: 0,
+};
 
 let dir: string;
 let dbPath: string;
@@ -24,6 +34,17 @@ describe("readUsage", () => {
   it("counts the last 30 days of calls, minutes and texts", async () => {
     await seedTypicalUsage(dbPath);
     expect(await readUsage(dbPath, NOW)).toEqual({ kind: "read", usage: TYPICAL });
+  });
+
+  it("selects calls by start time, inside the window only", async () => {
+    const store = await openStore(dbPath);
+    const base = TYPICAL_CALL;
+    store.putCall({ ...base, id: "in", startedAt: new Date(NOW.getTime() - 30 * DAY + 1000).toISOString() });
+    store.putCall({ ...base, id: "out", startedAt: new Date(NOW.getTime() - 30 * DAY).toISOString() });
+    store.putCall({ ...base, id: "future", startedAt: new Date(NOW.getTime() + 1000).toISOString() });
+    store.close();
+    const reading = await readUsage(dbPath, NOW);
+    expect(reading).toEqual({ kind: "read", usage: { ...NO_USAGE, callsPlaced: 1, billedMinutes: 1 } });
   });
 
   it("reads an empty store as no usage, and a missing one as missing without creating it", async () => {
@@ -109,13 +130,15 @@ describe("costLines", () => {
     expect(lines[3]).toContain("plan $6.00 (monthly, 75 min included)");
   });
 
-  it("names a missing or unreadable store and prices no usage", () => {
+  it("prices a missing store as no usage, and gives no figure for an unreadable one", () => {
     expect(costLines({ kind: "missing" }, rates, "/x/hotline.db")[0]).toContain(
       "about $7.15 a month, with no usage: no store at /x/hotline.db yet",
     );
-    expect(costLines({ kind: "unreadable", problem: "locked" }, rates, "/x/hotline.db")[0]).toContain(
-      "could not read /x/hotline.db (locked)",
+    const unreadable = costLines({ kind: "unreadable", problem: "locked" }, rates, "/x/hotline.db");
+    expect(unreadable[0]).toBe(
+      "estimate: not available, could not read /x/hotline.db (locked); run hotline doctor again",
     );
+    expect(unreadable.join("\n")).not.toContain("$");
   });
 });
 

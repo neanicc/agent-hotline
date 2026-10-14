@@ -178,16 +178,19 @@ lines never pass, warn or fail.
 The `INFO  cost` lines estimate a month's bill from the last 30 days in the
 daemon's store (`hotline.db` in the hotline home), computed locally with no
 network call. The store is opened read-only: doctor never creates, migrates or
-writes it. A missing or unreadable store is named and priced as no usage.
+writes it. A missing store is named and priced as no usage; an unreadable one (say, locked
+by the daemon for more than 2 s) is named and gets no figure at all.
 
-- **Calls:** every call that ended in the window, placed or received, with its
+- **Calls:** every call that started in the window, placed or received, with its
   duration rounded up to whole minutes (as Twilio bills). Each billed minute
   pays the Twilio call leg and the LLM; minutes past the ElevenLabs plan's
   included ones pay ElevenLabs' per-minute rate.
-- **Texts:** Hotline's own texts (`text.sent` and the crash notice in the audit
-  log), one reply for each text you sent (an upper bound: an empty text gets
-  none), and every text received, yours or another number's. Each counts as one
-  segment at the Twilio rate plus carrier fees.
+- **Texts:** Hotline's own texts (`text.sent`, written after a successful send,
+  and the crash notice, written before its send), one reply for each text you
+  sent, and every text received, yours or another number's. Each counts as one
+  segment at the Twilio rate plus carrier fees. The crash notice and the replies
+  are upper bounds (a failed notice or an empty text sends nothing); the generic
+  reply to another number is not in the audit log and is not counted.
 - **Fixed fees:** the Twilio number and the ElevenLabs plan count every month,
   even with no usage.
 

@@ -1955,9 +1955,17 @@ Template:
     calls (95 s and 0 s) and six text events.
   - Scenario suite: not built yet (HL-12). Real agent integration: not
     affected. Live call: not done (owner only).
+- Review fixes on #60 (staff review and Greptile, head 3bc001c): calls are
+  filtered by `started_at` in SQL first (a day's margin, then the exact window
+  in code), so old history is never loaded; the install guide says calls are
+  chosen by start time; an unreadable store (say, locked past 2 s) prints no
+  dollar figure at all; the guide names the text counts that are upper bounds
+  (crash notice written before its send, one reply per owner text) and the one
+  that is missing (the generic reply to another number is not audited).
 - Open issues or follow-ups:
   - Derive the daemon's `CALL_CENTS_PER_MINUTE` from `DEFAULT_COST_RATES`, or
     drop `costEstimateCents` from new call records.
-  - Record replies to the owner's texts (and HL-09c's confirmation texts, if
-    they use another event) in the audit log, so the estimate counts them
-    exactly instead of one per received text.
+  - Audit every text actually sent (replies to the owner, the generic reply
+    to other numbers, the crash notice after it goes out, and HL-09c's
+    confirmation texts if they use another event), so the estimate counts
+    them exactly instead of by upper bound.

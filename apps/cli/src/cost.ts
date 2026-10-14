@@ -7,7 +7,8 @@ import type { CostRates } from "@hotline/core";
 
 /** The usage window, treated as one month. */
 export const COST_WINDOW_DAYS = 30;
-const WINDOW_MS = COST_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const WINDOW_MS = COST_WINDOW_DAYS * DAY_MS;
 
 export interface Usage {
   /** Calls the daemon placed to the owner. */
@@ -38,7 +39,11 @@ export type UsageReading =
   | { kind: "missing" }
   | { kind: "unreadable"; problem: string };
 
-/** Audit events that stand for a text Hotline sent: `text.sent` and the crash notice. */
+/**
+ * Audit events that stand for a text Hotline sent: `text.sent` (written after a
+ * successful send) and the crash notice (written before its send, so an upper
+ * bound). The generic reply to another number is not audited and not counted.
+ */
 const SENT_EVENTS = ["text.sent", "sms.interrupted"] as const;
 /** The owner's handled texts; each gets at most one reply. */
 const OWNER_TEXT_EVENT = "sms.received";
@@ -71,12 +76,14 @@ export async function readUsage(path: string, now: Date): Promise<UsageReading> 
     const since = until - WINDOW_MS;
     const usage: Usage = { ...NO_USAGE };
     if (tables.has("calls")) {
+      // SQL drops old rows (the store writes toISOString; a day's margin covers
+      // any other timestamp precision), then the exact window applies here.
       const rows = db
         .prepare(
           `SELECT started_at, json_extract(record, '$.direction') AS direction,
-             json_extract(record, '$.durationSeconds') AS seconds FROM calls`,
+             json_extract(record, '$.durationSeconds') AS seconds FROM calls WHERE started_at >= ?`,
         )
-        .all();
+        .all(new Date(since - DAY_MS).toISOString());
       for (const row of rows) {
         const started = Date.parse(String(row.started_at));
         if (!(started > since && started <= until)) continue;
@@ -178,20 +185,26 @@ const lineText = (lines: readonly CostLine[]) =>
 
 /** The doctor's info lines for a usage reading. Never pass/fail. */
 export function costLines(reading: UsageReading, rates: CostRates, storePath: string): string[] {
+  const ratesLine = "rates: config costs.* in dollars as listed (defaults match the README cost table)";
+  if (reading.kind === "unreadable") {
+    // No figure at all: a total priced on no usage would read like a real estimate.
+    return [
+      `estimate: not available, could not read ${storePath} (${reading.problem}); run hotline doctor again`,
+      ratesLine,
+    ];
+  }
   const usage = reading.kind === "read" ? reading.usage : NO_USAGE;
   const estimate = estimateMonthlyCost(usage, rates);
   const source =
     reading.kind === "read"
       ? `from the last ${COST_WINDOW_DAYS} days in ${storePath}`
-      : reading.kind === "missing"
-        ? `with no usage: no store at ${storePath} yet`
-        : `with no usage: could not read ${storePath} (${reading.problem})`;
+      : `with no usage: no store at ${storePath} yet`;
   const sent = usage.textsSent + usage.replies;
   return [
     `estimate: about ${dollars(estimate.totalCents)} a month, ${source} (assumed rates, not a bill; computed locally)`,
     `usage: ${plural(usage.callsPlaced + usage.callsReceived, "call")} (${usage.callsPlaced} placed, ${usage.callsReceived} received), ${usage.billedMinutes} billed min, ${plural(sent, "text")} sent (including ${plural(usage.replies, "reply", "replies")}), ${usage.textsReceived} received`,
     `Twilio: ${lineText(estimate.twilio)}`,
     `ElevenLabs: ${lineText(estimate.elevenLabs)}`,
-    "rates: config costs.* in dollars as listed (defaults match the README cost table)",
+    ratesLine,
   ];
 }
