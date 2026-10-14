@@ -200,6 +200,20 @@ describe("smsAnswer", () => {
   });
 
   it("never yields an approval from anything but a yes word, over many generated replies", () => {
+    // Written out here rather than taken from the parser, so a parser that
+    // wrongly reads some generated text as a yes cannot also be the judge.
+    const yesWords = ["yes", "y", "yeah", "yep", "yup", "approve", "approved", "allow"];
+    const code = "482913";
+    const mayApprove = (body: string, risk: Ask["risk"]): boolean => {
+      const words = body
+        .toLowerCase()
+        .replace(/\s+/g, " ")
+        .trim()
+        .replace(/[.!?]+$/, "")
+        .trim();
+      const confirmed = yesWords.some((word) => words === `${word} ${code}`);
+      return risk === "high" ? confirmed : confirmed || yesWords.includes(words);
+    };
     const pieces = [
       "yes",
       "no",
@@ -222,11 +236,15 @@ describe("smsAnswer", () => {
         for (const c of ["", " ", "."]) {
           const body = `${a}${c}${b}`;
           for (const target of [permission, risky]) {
-            const result = answer({ ask: target, body, confirmationCode: "482913" });
-            if (result.outcome !== "answered" || result.answer.decision.type !== "allow") continue;
+            const result = answer({ ask: target, body, confirmationCode: code });
+            const approved = result.outcome === "answered" && result.answer.decision.type === "allow";
+            expect({ body, risk: target.risk, approved }).toEqual({
+              body,
+              risk: target.risk,
+              approved: mayApprove(body, target.risk),
+            });
+            if (!approved) continue;
             approvals++;
-            const reply = parseSmsReply(body);
-            expect(reply.type).toBe("yes");
             if (target.risk === "high") expect(result.answer.confirmation).toBe("text");
           }
         }
