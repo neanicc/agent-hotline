@@ -15,6 +15,7 @@ import {
   type LogOptions,
   MAX_STATUS_LENGTH,
   PinGate,
+  POST_CALL_BODY_LIMIT,
   type SubmitAnswerResult,
   type ToolCall,
   type VoiceAnswer,
@@ -475,6 +476,21 @@ describe("post-call webhook", () => {
     expect((await postCall(transcription("conv_1", "agent_other"))).statusCode).toBe(200);
     expect((await postCall({ type: "post_call_audio", data: { full_audio: "AAAA" } })).statusCode).toBe(200);
     expect(postCalls).toEqual([]);
+  });
+
+  it(`reads a long transcript up to ${POST_CALL_BODY_LIMIT} bytes and refuses a bigger one`, async () => {
+    const long = (conversation: string, turns: number) => {
+      const body = transcription(conversation);
+      body.data.transcript = Array.from({ length: turns }, () => ({
+        role: "user",
+        message: "x".repeat(1000),
+      }));
+      return body;
+    };
+    expect((await postCall(long("conv_long", 400))).statusCode).toBe(200);
+    const huge = await postCall(long("conv_huge", 1100));
+    expect([huge.statusCode, huge.body]).toEqual([403, ""]);
+    expect(postCalls.map((e) => (e as { conversationId: string }).conversationId)).toEqual(["conv_long"]);
   });
 
   it("never logs the transcript or numbers", async () => {

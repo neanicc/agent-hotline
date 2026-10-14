@@ -53,7 +53,7 @@ describe("PinGate", () => {
   it("verifies a call with the right PIN and tells the redactor", async () => {
     const { pins, learned } = gate();
     expect(pins.isVerified("conv_1")).toBe(false);
-    expect(await pins.attempt("conv_1", "48 21")).toEqual({
+    expect(await pins.attempt("conv_1", "48 21", "inbound")).toEqual({
       verified: true,
       attemptsLeft: 2,
       endCall: false,
@@ -65,27 +65,39 @@ describe("PinGate", () => {
 
   it(`ends the call after ${PIN_ATTEMPTS_PER_CALL} wrong PINs and never checks another`, async () => {
     const { pins, checks } = gate();
-    expect(await pins.attempt("conv_1", "1111")).toEqual({
+    expect(await pins.attempt("conv_1", "1111", "inbound")).toEqual({
       verified: false,
       attemptsLeft: 1,
       endCall: false,
     });
-    expect(await pins.attempt("conv_1", "2222")).toEqual({ verified: false, attemptsLeft: 0, endCall: true });
-    expect(await pins.attempt("conv_1", "4821")).toEqual({ verified: false, attemptsLeft: 0, endCall: true });
+    expect(await pins.attempt("conv_1", "2222", "inbound")).toEqual({
+      verified: false,
+      attemptsLeft: 0,
+      endCall: true,
+    });
+    expect(await pins.attempt("conv_1", "4821", "inbound")).toEqual({
+      verified: false,
+      attemptsLeft: 0,
+      endCall: true,
+    });
     expect(checks).toEqual(["1111", "2222"]);
     expect(pins.isVerified("conv_1")).toBe(false);
   });
 
   it("allows the right PIN after one wrong one", async () => {
     const { pins } = gate();
-    await pins.attempt("conv_1", "1111");
-    expect(await pins.attempt("conv_1", "4821")).toEqual({ verified: true, attemptsLeft: 1, endCall: false });
+    await pins.attempt("conv_1", "1111", "inbound");
+    expect(await pins.attempt("conv_1", "4821", "inbound")).toEqual({
+      verified: true,
+      attemptsLeft: 1,
+      endCall: false,
+    });
   });
 
   it("does not let concurrent guesses exceed the limit", async () => {
     const { pins, checks } = gate();
     const results = await Promise.all(
-      ["1", "2", "3", "4", "5"].map((d) => pins.attempt("conv_1", d.repeat(4))),
+      ["1", "2", "3", "4", "5"].map((d) => pins.attempt("conv_1", d.repeat(4), "inbound")),
     );
     expect(checks).toHaveLength(PIN_ATTEMPTS_PER_CALL);
     expect(results.every((r) => !r.verified && r.endCall)).toBe(true);
@@ -94,25 +106,34 @@ describe("PinGate", () => {
   it(`locks every PIN check, the right PIN too, after ${PIN_FAILURES_PER_HOUR} failures in an hour`, async () => {
     const { pins, advance } = gate();
     for (let i = 0; i < PIN_FAILURES_PER_HOUR / PIN_ATTEMPTS_PER_CALL; i += 1) {
-      await pins.attempt(`conv_${i}`, "0000");
-      await pins.attempt(`conv_${i}`, "0000");
+      await pins.attempt(`conv_${i}`, "0000", "inbound");
+      await pins.attempt(`conv_${i}`, "0000", "inbound");
     }
-    expect(await pins.attempt("conv_new", "4821")).toEqual({
+    expect(await pins.attempt("conv_new", "4821", "inbound")).toEqual({
       verified: false,
       attemptsLeft: 0,
       endCall: true,
     });
     advance(59 * 60 * 1000);
-    expect((await pins.attempt("conv_new2", "4821")).verified).toBe(false);
+    expect((await pins.attempt("conv_new2", "4821", "inbound")).verified).toBe(false);
     advance(2 * 60 * 1000);
-    expect((await pins.attempt("conv_new3", "4821")).verified).toBe(true);
+    expect((await pins.attempt("conv_new3", "4821", "inbound")).verified).toBe(true);
+  });
+
+  it("keeps inbound guessing from locking the PIN on calls Hotline placed, and the other way round", async () => {
+    const { pins } = gate();
+    for (let i = 0; i < PIN_FAILURES_PER_HOUR; i += 1) await pins.attempt(`conv_in_${i}`, "0000", "inbound");
+    expect((await pins.attempt("conv_in_x", "4821", "inbound")).verified).toBe(false);
+    expect((await pins.attempt("conv_out", "4821", "outbound")).verified).toBe(true);
+    // A call keeps the budget of its first attempt.
+    expect((await pins.attempt("conv_in_0", "4821", "outbound")).verified).toBe(false);
   });
 
   it("keeps counting failures stamped in the future when the clock moves back", async () => {
     const { pins, advance } = gate();
-    for (let i = 0; i < PIN_FAILURES_PER_HOUR; i += 1) await pins.attempt(`conv_${i}`, "0000");
+    for (let i = 0; i < PIN_FAILURES_PER_HOUR; i += 1) await pins.attempt(`conv_${i}`, "0000", "inbound");
     advance(-3 * 60 * 60 * 1000);
-    expect((await pins.attempt("conv_x", "4821")).verified).toBe(false);
+    expect((await pins.attempt("conv_x", "4821", "inbound")).verified).toBe(false);
   });
 
   it("treats a failing check as a wrong PIN", async () => {
@@ -120,12 +141,12 @@ describe("PinGate", () => {
       check: async () => Promise.reject(new Error("scrypt")),
       clock: () => new Date(),
     });
-    expect(await pins.attempt("conv_1", "4821")).toMatchObject({ verified: false });
+    expect(await pins.attempt("conv_1", "4821", "inbound")).toMatchObject({ verified: false });
   });
 
   it("forgets a verification after two hours", async () => {
     const { pins, advance } = gate();
-    await pins.attempt("conv_1", "4821");
+    await pins.attempt("conv_1", "4821", "inbound");
     advance(2 * 60 * 60 * 1000);
     expect(pins.isVerified("conv_1")).toBe(false);
   });

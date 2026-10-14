@@ -638,3 +638,17 @@ Template:
     test fails), every person labelled owner (7), inbound calls labelled owner
     without the PIN (2), no control-character stripping (1), no bracket and
     brace stripping (2). `scripts/ci/run.sh test`: 638 tests in 32 files.
+- Bot staff review on #33 (approve with nits, two P2s, two P3s), fixed here:
+  - P2: the nickname, tool name and options were outside the fence. Every
+    agent-derived string now sits in its own `<agent_text>` fence, and the
+    prompt says the asks and the opening line are built from agent text.
+  - P2: one global PIN failure budget let inbound guessing (spoofed caller ID)
+    lock PIN approvals on calls Hotline placed. Inbound and outbound calls now
+    have separate budgets; a call keeps the budget of its first attempt. The
+    remaining trade-off (inbound guessing locks the inbound line for an hour)
+    is documented in `docs/daemon.md`.
+  - P3: `WebhookRoute` gains an optional `bodyLimit`; the post-call route reads
+    up to 1 MiB, with a test that a 400 KB transcript is accepted and an
+    oversized one gets the bare 403.
+  - P3 (in-memory post-call dedupe across restarts) stays an HL-09/HL-13
+    follow-up, as already listed above.

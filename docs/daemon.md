@@ -134,7 +134,7 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
 
 | Tool | What the route does |
 | --- | --- |
-| `verify_pin` | Checks the PIN with the `PinGate`: 2 wrong PINs per call, then `end_call: true` and no further checks on that call; 6 wrong PINs across all calls in a rolling hour lock every check, the right PIN included, until the hour has passed. Answers `{verified, attempts_left, end_call}`. A verified PIN is registered with the redactor (`addShortSecret`). The PIN is checked against `owner.pinHash` with scrypt and never logged or stored |
+| `verify_pin` | Checks the PIN with the `PinGate`: 2 wrong PINs per call, then `end_call: true` and no further checks on that call; 6 wrong PINs across all calls of one direction in a rolling hour lock every check on that direction, the right PIN included, until the hour has passed. Inbound and outbound calls have separate budgets, so someone guessing on inbound calls (caller ID can be spoofed) cannot block PIN approvals on calls Hotline placed to the owner. The trade-off: such guessing still locks the owner's own inbound line for up to an hour, which fails closed. Answers `{verified, attempts_left, end_call}`. A verified PIN is registered with the redactor (`addShortSecret`). The PIN is checked against `owner.pinHash` with scrypt and never logged or stored |
 | `submit_answer` | On an inbound call (anything but a call to the owner's number from another number), `pin-required` until this call passed `verify_pin`, because caller ID can be spoofed. Otherwise passes the ask number, decision (`option`, `allow`, `deny`, `text`, `done` or `unclear`), the owner's words, the direction and the call ids to the `submitAnswer` handler. `confirmation` is `pin` only when this call passed `verify_pin`; nothing in the request can set it |
 | `get_status` | `{"result": "pin-required"}` until this call passed `verify_pin`. Then the `getStatus` handler's text, redacted and cut to 1500 characters |
 | `send_instruction` | `pin-required` until this call passed `verify_pin`. Then the `sendInstruction` handler gets the session number, instruction and the owner's words |
@@ -156,8 +156,9 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
   that number that passed `verify_pin` (still remembered by the PinGate).
   Otherwise they are `caller` turns, which `ownerSaid` never matches.
 - Events for another agent id and other webhook types (such as
-  `post_call_audio`) get `200` and are ignored. Do not enable audio webhooks:
-  bodies over 256 KiB are refused.
+  `post_call_audio`) get `200` and are ignored. This route reads bodies up to
+  1 MiB (the listener's default is 256 KiB), enough for a long transcript; a
+  bigger body gets the bare 403. Do not enable audio webhooks.
 - **Logs:** tool name and result, event kind. Never bodies, words, transcripts,
   PINs or numbers.
 

@@ -83,11 +83,13 @@ function cut(text: string, max: number): string {
 
 function describeAsk(ask: VoiceAsk, index: number, redact: (text: string) => string): string {
   // Redact the whole text first, then cut, so a cut can never split a secret
-  // into a piece the redactor no longer recognizes.
-  const spoken = (text: string, max: number) => cut(redact(text), max);
-  const who = spoken(ask.nickname, MAX_SPOKEN_NICKNAME_LENGTH);
-  const what = spoken(ask.text, MAX_SPOKEN_ASK_LENGTH);
-  const tool = ask.toolName === undefined ? "" : ` to use ${spoken(ask.toolName, MAX_SPOKEN_OPTION_LENGTH)}`;
+  // into a piece the redactor no longer recognizes. Every agent-derived string
+  // (nickname, tool name, options, text) sits inside its own fence; only the
+  // fixed words around them come from Hotline.
+  const fenced = (text: string, max: number) => `<agent_text>${cut(redact(text), max)}</agent_text>`;
+  const who = fenced(ask.nickname, MAX_SPOKEN_NICKNAME_LENGTH);
+  const what = fenced(ask.text, MAX_SPOKEN_ASK_LENGTH);
+  const tool = ask.toolName === undefined ? "" : ` to use ${fenced(ask.toolName, MAX_SPOKEN_OPTION_LENGTH)}`;
   const head: Record<AskKind, string> = {
     question: "question",
     permission: `permission request${tool}, ${ask.risk === "high" ? "HIGH RISK (PIN required)" : "low risk"}`,
@@ -97,8 +99,8 @@ function describeAsk(ask: VoiceAsk, index: number, redact: (text: string) => str
   const options =
     ask.options.length === 0
       ? ""
-      : ` Options: ${ask.options.map((o, i) => `${i + 1}) ${spoken(o, MAX_SPOKEN_OPTION_LENGTH)}`).join(" ")}.`;
-  return `Ask ${index + 1}, from ${who}, ${head[ask.kind]}: <agent_text>${what}</agent_text>${options}`;
+      : ` Options: ${ask.options.map((o, i) => `${i + 1}) ${fenced(o, MAX_SPOKEN_OPTION_LENGTH)}`).join(" ")}.`;
+  return `Ask ${index + 1}, from ${who}, ${head[ask.kind]}: ${what}${options}`;
 }
 
 /**

@@ -39,6 +39,12 @@ import type { WebhookRoute } from "./server.js";
 /** Longest status text handed to the voice agent, after redaction. */
 export const MAX_STATUS_LENGTH = 1500;
 const SEEN_EVENTS = 1000;
+/**
+ * A post-call transcription carries the whole transcript plus analysis and
+ * metadata, so it may exceed the listener's default. Bigger bodies get the bare
+ * 403; ElevenLabs then retries and the asks end as "no answer".
+ */
+export const POST_CALL_BODY_LIMIT = 1024 * 1024;
 
 /** What every server-tool call says about the call it came from. */
 export interface ToolCall {
@@ -216,7 +222,7 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
       return { result };
     }),
     toolRoute("verify_pin", async (body, call) => {
-      const attempt = await pins.attempt(call.conversationId, body.pin);
+      const attempt = await pins.attempt(call.conversationId, body.pin, call.direction);
       return { verified: attempt.verified, attempts_left: attempt.attemptsLeft, end_call: attempt.endCall };
     }),
     toolRoute("get_status", async (_body, call) => {
@@ -243,6 +249,7 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
   routes.push({
     method: "POST",
     url: POST_CALL_PATH,
+    bodyLimit: POST_CALL_BODY_LIMIT,
     precheck: (request) => header(request, SIGNATURE_HEADER) !== undefined && jsonRequest(request),
     verify: (request) => {
       const raw = rawBody(request);

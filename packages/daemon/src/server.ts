@@ -53,6 +53,8 @@ export interface WebhookRoute {
   url: string;
   precheck?: WebhookPrecheck;
   verify: WebhookVerifier;
+  /** Largest body this route reads, when it needs more than the listener's 256 KiB. */
+  bodyLimit?: number;
   handler: (request: FastifyRequest, reply: FastifyReply) => unknown;
 }
 
@@ -230,6 +232,7 @@ export function buildWebhookServer({ log, routes = [] }: WebhookServerOptions): 
           method: route.method,
           url: route.url,
           config: { verifyWebhook: route.verify, precheckWebhook: route.precheck },
+          ...(route.bodyLimit === undefined ? {} : { bodyLimit: route.bodyLimit }),
           handler: route.handler,
         });
       }

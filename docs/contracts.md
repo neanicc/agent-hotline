@@ -261,8 +261,10 @@ the server tools and the post-call webhook. Failures reject with
 What leaves the machine is `callVariables(call, redact)`, shared by the real and
 fake providers: `hotline_call_id`, `ask_count` (1 to 4), `opening` (who is
 calling) and `asks`, one line per ask with its number, the session nickname,
-the kind (`HIGH RISK (PIN required)` for high-risk permission requests) and the
-text inside `<agent_text>...</agent_text>`. Each string is redacted whole
+the kind (`HIGH RISK (PIN required)` for high-risk permission requests), the
+tool name, the options and the text. Every agent-derived string (nickname, tool
+name, each option, the text) sits inside its own `<agent_text>...</agent_text>`
+fence; only Hotline's fixed words are outside. Each string is redacted whole
 first, then cut: ask text to 300 characters, options to 80, nicknames to 60.
 Control and invisible format characters, line breaks, angle brackets and
 braces are removed, so agent text is one plain line that cannot close its
