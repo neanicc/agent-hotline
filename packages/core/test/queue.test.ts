@@ -329,6 +329,49 @@ describe("no pickup, dropped and stuck calls", () => {
     ]);
   });
 
+  it("retries an ask that joined the call inside its batch window after the retry delay, not its batch window", () => {
+    // Issue #50: q2 joined the first call 1 ms into its 10 ms batch window. That window no
+    // longer matters once the ask has gone out; its retry waits only the retry delay.
+    const h = new Harness(makeSettings({}, { batchWindowMs: 10, retryDelayMs: 0, maxAsksPerCall: 2 }));
+    h.ask({ id: "q1" });
+    h.now += 1;
+    h.ask({ id: "q2", text: "Second question?" });
+    expect(h.advance(9)).toEqual([{ type: "place-call", callId: "test-1", askIds: ["q1", "q2"] }]);
+    expect(h.state.open.find((q) => q.ask.id === "q2")?.readyAt).toBe(h.now + 1);
+    // Not picked up, with no retry delay: both are called again at once, still before q2's
+    // batch window would have ended.
+    expect(h.send({ type: "call-ended", callId: "test-1", result: "no-pickup" })).toEqual([
+      { type: "place-call", callId: "test-2", askIds: ["q1", "q2"] },
+    ]);
+    expect(h.state.open.map((q) => [q.ask.id, q.callAttempts, q.readyAt])).toEqual([
+      ["q1", 2, h.now],
+      ["q2", 2, h.now],
+    ]);
+    // Silence on the retry too: both are texted, and neither is ever answered.
+    expect(h.send({ type: "call-ended", callId: "test-2", result: "no-pickup" })).toEqual([
+      { type: "send-text", askId: "q1", reason: "after-call" },
+      { type: "send-text", askId: "q2", reason: "after-call" },
+    ]);
+    const resolved = ofType(h.advance(30 * MINUTE), "resolve");
+    expect(resolved.map((r) => r.outcome)).toEqual([
+      { outcome: "no-answer", askId: "q1", reason: "no-pickup" },
+      { outcome: "no-answer", askId: "q2", reason: "no-pickup" },
+    ]);
+  });
+
+  it("keeps a retry with a delay waiting even when its batch window ended earlier", () => {
+    // The same start with a 1 ms retry delay: the retry is not placed in the step that ended
+    // the call, and goes out once the delay is over.
+    const h = new Harness(makeSettings({}, { batchWindowMs: 10, retryDelayMs: 1, maxAsksPerCall: 2 }));
+    h.ask({ id: "q1" });
+    h.now += 1;
+    h.ask({ id: "q2", text: "Second question?" });
+    h.advance(9);
+    expect(h.send({ type: "call-ended", callId: "test-1", result: "no-pickup" })).toEqual([]);
+    expect(nextWakeAt(h.state, new Date(h.now), h.settings)?.getTime()).toBe(h.now + 1);
+    expect(h.advance(1)).toEqual([{ type: "place-call", callId: "test-2", askIds: ["q1", "q2"] }]);
+  });
+
   it("ignores the end of a call that is not in progress", () => {
     const h = new Harness(settings);
     expect(h.send({ type: "call-ended", callId: "test-9", result: "answered" })).toEqual([
