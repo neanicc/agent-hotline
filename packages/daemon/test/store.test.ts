@@ -388,3 +388,67 @@ describe("audit", () => {
     raw.close();
   });
 });
+
+describe("ask change listeners", () => {
+  it("hear committed status changes and answers, not refused ones", async () => {
+    const db = await open();
+    db.putSession(session);
+    db.addAsk(ask());
+    db.addAsk(ask({ id: "a2", createdAt: T1 }));
+    const heard: string[] = [];
+    const stop = db.onAskChange((id) => heard.push(id));
+    db.onAskChange(() => {
+      throw new Error("a broken listener");
+    });
+
+    expect(() => db.recordAnswer(answer({ decision: { type: "allow" } }), new Date(T1))).toThrow(StoreError);
+    db.recordAnswer(answer(), new Date(T1));
+    expect(db.setAskStatus("a1", "cancelled")).toBe(false);
+    expect(db.setAskStatus("a2", "cancelled")).toBe(true);
+    expect(heard).toEqual(["a1", "a2"]);
+    expect(db.getAsk("a2")?.status).toBe("cancelled");
+
+    stop();
+    db.addAsk(ask({ id: "a3" }));
+    db.setAskStatus("a3", "expired");
+    expect(heard).toEqual(["a1", "a2"]);
+  });
+
+  it("count a session's open asks of one kind", async () => {
+    const db = await open();
+    db.putSession(session);
+    db.addAsk(ask());
+    db.addAsk(ask({ id: "a2", status: "in-flight" }));
+    db.addAsk(ask({ id: "a3", status: "expired" }));
+    db.addAsk(ask({ id: "a4", kind: "notify", options: [] }));
+    expect(db.countOpenAsks("s1", "question")).toBe(2);
+    expect(db.countOpenAsks("s1", "notify")).toBe(1);
+    expect(db.countOpenAsks("s2", "question")).toBe(0);
+    db.putSession({ ...session, id: "s2", agentSessionId: "agent-session-2" });
+    db.addAsk(ask({ id: "a5", sessionId: "s2" }));
+    expect(db.countOpenAsks(undefined, "question")).toBe(3);
+    expect(db.countOpenAsks(undefined, "notify")).toBe(1);
+  });
+
+  it("find a live session by agent and agent session id", async () => {
+    const db = await open();
+    db.putSession(session);
+    db.putSession({ ...session, id: "s2", agent: "codex" });
+    db.putSession({ ...session, id: "s3", agentSessionId: "agent-session-3", state: "ended" });
+    expect(db.findLiveSession("claude-code", "agent-session-1")?.id).toBe("s1");
+    expect(db.findLiveSession("codex", "agent-session-1")?.id).toBe("s2");
+    expect(db.findLiveSession("claude-code", "agent-session-3")).toBeUndefined();
+    expect(db.findLiveSession("claude-code", "unknown")).toBeUndefined();
+  });
+
+  it("list one session's newest asks first", async () => {
+    const db = await open();
+    db.putSession(session);
+    db.putSession({ ...session, id: "s2", agentSessionId: "agent-session-2" });
+    db.addAsk(ask());
+    db.addAsk(ask({ id: "a2", createdAt: T1 }));
+    db.addAsk(ask({ id: "a3", sessionId: "s2" }));
+    expect(db.listSessionAsks("s1", 10).map((a) => a.id)).toEqual(["a2", "a1"]);
+    expect(db.listSessionAsks("s1", 1).map((a) => a.id)).toEqual(["a2"]);
+  });
+});

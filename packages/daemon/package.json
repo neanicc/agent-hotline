@@ -16,6 +16,7 @@
   "dependencies": {
     "@hotline/core": "workspace:*",
     "@hotline/providers": "workspace:*",
-    "fastify": "5.12.5"
+    "fastify": "5.12.5",
+    "zod": "4.6.5"
   }
 }

@@ -19,6 +19,7 @@ import Fastify, {
   type FastifyReply,
   type FastifyRequest,
 } from "fastify";
+import { type AgentRoutesOptions, registerAgentRoutes } from "./agent-routes.js";
 import { bearerToken, tokensMatch } from "./api-token.js";
 import { fastifyLoggerOptions, type LogOptions, urlPath } from "./logger.js";
 import type { HotlineStore } from "./store.js";
@@ -123,10 +124,12 @@ export interface AgentApiOptions {
   apiToken: string;
   log: LogOptions;
   version: string;
+  /** Session and ask routes for the MCP server; omitted, only `/v1/health` exists. */
+  agentRoutes?: AgentRoutesOptions;
 }
 
 /** The token-protected local API agents talk to. Call `listen` on 127.0.0.1 only. */
-export function buildAgentApi({ apiToken, log, version }: AgentApiOptions): FastifyInstance {
+export function buildAgentApi({ apiToken, log, version, agentRoutes }: AgentApiOptions): FastifyInstance {
   const app = Fastify({
     logger: fastifyLoggerOptions(log, "agent-api"),
     bodyLimit: AGENT_API_BODY_LIMIT,
@@ -162,6 +165,7 @@ export function buildAgentApi({ apiToken, log, version }: AgentApiOptions): Fast
   });
 
   app.get("/v1/health", async () => ({ ok: true, version }));
+  if (agentRoutes !== undefined) registerAgentRoutes(app, agentRoutes);
   return app;
 }
 
@@ -259,7 +263,17 @@ export interface StartDaemonOptions {
   log: LogOptions;
   version: string;
   webhookRoutes?: readonly WebhookRoute[];
+  /** The injected clock for asks and sessions; defaults to the wall clock. */
+  clock?: () => Date;
+  /** `config.policy.askTimeoutMinutes`; defaults to 30. */
+  askTimeoutMinutes?: number;
+  /** `config.nicknames`. */
+  nicknames?: Readonly<Record<string, string>>;
+  /** For tests: ids for new sessions and asks. */
+  newId?: () => string;
 }
+
+export const DEFAULT_ASK_TIMEOUT_MINUTES = 30;
 
 export interface Daemon {
   readonly apiUrl: string;
@@ -276,7 +290,20 @@ export interface Daemon {
 
 /** Starts both listeners on 127.0.0.1. On failure nothing is left listening; the caller keeps the store. */
 export async function startDaemon(options: StartDaemonOptions): Promise<Daemon> {
-  const api = buildAgentApi({ apiToken: options.apiToken, log: options.log, version: options.version });
+  const api = buildAgentApi({
+    apiToken: options.apiToken,
+    log: options.log,
+    version: options.version,
+    agentRoutes: {
+      store: options.store,
+      // The log redactor already knows the API token and any other registered secret.
+      redactor: options.log.redactor,
+      clock: options.clock ?? (() => new Date()),
+      askTimeoutMinutes: options.askTimeoutMinutes ?? DEFAULT_ASK_TIMEOUT_MINUTES,
+      nicknames: options.nicknames,
+      newId: options.newId,
+    },
+  });
   const hooks = buildWebhookServer({ log: options.log, routes: options.webhookRoutes });
   try {
     await api.listen({ host: LOOPBACK_HOST, port: options.apiPort });

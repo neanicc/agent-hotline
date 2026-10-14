@@ -238,6 +238,9 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
       log,
       version: options.version,
       webhookRoutes: [...sms.routes, ...voice.routes],
+      clock,
+      askTimeoutMinutes: config.policy.askTimeoutMinutes,
+      nicknames: config.nicknames,
     });
     if (sms.off !== undefined) daemon.log.info({ reason: sms.off }, "sms webhook off");
     if (voice.off !== undefined) daemon.log.info({ reason: voice.off }, "voice webhooks off");

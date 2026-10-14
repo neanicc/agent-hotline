@@ -2,6 +2,7 @@
 
 export const packageName = "@hotline/daemon";
 
+export * from "./agent-routes.js";
 export * from "./api-token.js";
 export * from "./config-file.js";
 export * from "./elevenlabs-webhook.js";

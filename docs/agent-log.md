@@ -541,6 +541,72 @@ Template:
   the `call-me` command; HL-09 maps that command to this event, dedupes inbound
   texts by message id, and turns the ignore reasons into owner replies.
 
+## 2026-10-13 — HL-05 MCP server (#32)
+
+- Decision / change: `hotline mcp` (stdio, `packages/agents`) offers
+  `ask_human`, `notify_human` and `check_inbox`; see `docs/mcp.md`. It talks only
+  to the daemon on 127.0.0.1 with the token and never follows redirects
+  (Greptile). It relays `answered` only for the
+  ask it created and only with a decision a question can have. Every failure,
+  timeout, cancel or doubtful outcome is `no-answer`.
+  `@modelcontextprotocol/sdk` is pinned at 1.31.0 (15 days old; its one change
+  since 1.30.1 is OAuth-only, and 1.32.x is too new). zod 4.6.5 is now a direct
+  dependency of `agents` and `daemon`.
+- Daemon routes (minimal, behind the existing token and `Host` checks):
+  - Session register and end.
+  - Question or notify asks, with text and options redacted before they are
+    stored. HL-06 adds `permission` and `stop`.
+  - A long-polling outcome route, cancel, and inbox.
+  - An `answered` outcome comes only from an answer the store accepted
+    through `recordAnswer` after `answerProblem` (the requirement carried over
+    on #7 and #10).
+  - Open asks are capped at 3 questions and 10 notifications per session, and
+    10 and 30 across all sessions (`429`, audited). Due asks are marked
+    expired before each count. `urgent` is stored only as the agent's
+    request.
+  - The store gained `onAskChange`, `listSessionAsks`, `countOpenAsks` and
+    `findLiveSession`. There is no migration.
+- Defaults chosen:
+  - The agent comes from `--agent`, else from `clientInfo.name`. Claude Code's
+    `CLAUDE_CODE_SESSION_ID` becomes `agentSessionId`; Codex exposes none.
+  - The server registers on initialize and ends the session on close.
+  - It long-polls 25 s at a time. After 3 failed polls it returns `failed` and
+    cancels the ask, best effort.
+  - It sends progress every 60 s, only when the client sent a `progressToken`.
+  - `check_inbox` returns `instructions: []` until HL-10.
+  - Timeouts, from the docs and the Codex rmcp source (not tested): Claude
+    Code's per-server `timeout` is a hard limit, so the snippet sets none. The
+    stdio idle timeout of 30 min resets on progress; the snippet suggests 40
+    min. Codex's `tool_timeout_sec` (60 s) does not reset on progress, so the
+    snippet sets 2100.
+- Bug fixed: a client that aborted a long poll could leave a connection that
+  `server.close()` never reaped, so shutdown hung until the 10 s timeout.
+  Shutdown now releases long polls and closes leftover agent API connections
+  after 2 s. With that fix disabled, 9 of 10 runs of the MCP test file failed;
+  with it, 12 of 12 passed.
+- Evidence (worktree, Node 24.11.0; the pre-merge tree also on 22.23.1):
+  - `run.sh setup`, `build` and `test` pass, with 572 tests after merging main.
+  - The tests drive the SDK `Client` against a real daemon on 127.0.0.1
+    (InMemoryTransport, fake clock), plus `hotline mcp` over stdio framing.
+  - Mutation checks fail tests when the `askId` match, ask-text redaction or
+    the ask cap is removed.
+  - Manual: the built CLI ran as child processes, with the daemon and
+    `hotline mcp` driven by the SDK `StdioClientTransport`. `ask_human`
+    returned the recorded option with the owner's words, the daemon exited 0,
+    and neither process's stderr held the token.
+  - Not run: the scenario suite (HL-12); real Claude Code and Codex, because
+    driving them calls their model APIs; live call.
+- Open issues or follow-ups:
+  - HL-09: store specific no-answer reasons, and gate `urgent` on
+    `quietHours.allowUrgentCalls` and the rate limits. Before calling, check
+    that the ask is still open and its session not ended: an agent that gave
+    up while the daemon was unreachable cannot cancel its ask.
+  - HL-10: add the instruction queue, and expire stale sessions (a killed
+    server never ends its session).
+  - HL-11: write the `docs/mcp.md` snippets.
+  - A human should confirm the snippets and a Codex wait of more than 60 s with
+    real sessions and fake providers.
+
 ## 2026-10-14 — HL-08 ElevenLabs voice provider (#33)
 
 - Decision / change:

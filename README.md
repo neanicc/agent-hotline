@@ -33,6 +33,7 @@ pnpm run test         # Vitest, all packages
 pnpm run lint         # Biome lint and format check (`pnpm run format` fixes)
 pnpm run hotline --version   # runs the built CLI: "hotline 0.0.0"
 pnpm run hotline daemon --help   # the daemon; see docs/daemon.md
+pnpm run hotline mcp --help      # the MCP server agents start; see docs/mcp.md
 ```
 
 `pnpm --filter @hotline/core test` runs one package's tests. CI calls the same
