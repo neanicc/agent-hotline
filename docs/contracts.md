@@ -259,8 +259,9 @@ the server tools and the post-call webhook. Failures reject with
 `VoiceCallError`, carrying the HTTP status only, never the provider's message.
 
 What leaves the machine is `callVariables(call, redact)`, shared by the real and
-fake providers: `hotline_call_id`, `ask_count` (1 to 4), `opening` (who is
-calling) and `asks`, one line per ask with its number, the session nickname,
+fake providers: `hotline_call_id`, `ask_count` (1 to 4), `opening` (fixed
+words only, "One of your agents needs you...", because ElevenLabs speaks it as
+is and agent text cannot be fenced there) and `asks`, one line per ask with its number, the session nickname,
 the kind (`HIGH RISK (PIN required)` for high-risk permission requests), the
 tool name, the options and the text. Every agent-derived string (nickname, tool
 name, each option, the text) sits inside its own `<agent_text>...</agent_text>`
@@ -285,7 +286,8 @@ decision it submits or what `owner_words` it sends.
   calls to the daemon's real routes with the tool secret and signs the post-call
   webhooks, so the scenario suite exercises authentication too.
   `playPending()` plays placed calls in order (a call without a script is not
-  picked up); `inboundCall(script, from)` plays a call in. The fake ends a call
+  picked up); `inboundCall(script, from)` plays a call in. Transcript turns are
+  timed with the injected `clock`. The fake ends a call
   when a tool answers `end_call: true`, as the prompt tells the real agent to.
 
 **The agent definition** (`elevenlabs-agent.ts`, `AGENT_DEFINITION_VERSION`):
@@ -306,10 +308,12 @@ once more, then reported as `unclear`.
 checks it against the owner's turns of the post-call transcript (case and
 punctuation ignored, whole words, never agent or caller turns). Call
 orchestration should confirm a voice decision with it before trusting it.
-`parsePostCallEvent(body, {ownerNumber, pinVerified})` labels the person's
-turns `owner` only on an outbound call to the owner's number or an inbound call
-from it that passed the PIN; any other person, and every call parsed without
-that context, is a `caller`.
+`parsePostCallEvent(body, {ownerNumber, pinVerifiedAt})` labels the person's
+turns `owner` only on an outbound call to the owner's number, or for turns
+spoken after the PIN was verified on an inbound call from it (the call's
+`start_time_unix_secs` plus the turn's `time_in_call_secs`, later than the
+verification). Any other person or turn, every turn without a time on an
+inbound call, and every call parsed without that context, is a `caller`.
 
 `validPostCallSignature`, `postCallSignature` and `postCallSignatureHeader`
 implement the `ElevenLabs-Signature` HMAC; `parsePostCallEvent` reduces a

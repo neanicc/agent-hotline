@@ -114,7 +114,10 @@ describe("FakeVoiceProvider", () => {
       },
     ]);
     expect(played?.endedEarly).toBe(false);
-    const event = parsePostCallEvent(recorded.postCalls[0], { ownerNumber: OWNER, pinVerified: () => false });
+    const event = parsePostCallEvent(recorded.postCalls[0], {
+      ownerNumber: OWNER,
+      pinVerifiedAt: () => undefined,
+    });
     expect(event).toMatchObject({ type: "transcription", direction: "outbound", externalNumber: OWNER });
     expect(event?.type === "transcription" && event.transcript).toContainEqual({
       role: "owner",

@@ -92,7 +92,17 @@ const transcription = {
   },
 };
 
-const OWNER_CONTEXT = { ownerNumber: "+15555550100", pinVerified: (id: string) => id === "conv_pin" };
+// The owner's turn in the fixture is at T + 4 s. `conv_pin` passed the PIN at
+// T + 2 s, before it; `conv_late_pin` only at T + 10 s, after it.
+const OWNER_CONTEXT = {
+  ownerNumber: "+15555550100",
+  pinVerifiedAt: (id: string) =>
+    id === "conv_pin"
+      ? new Date((T + 2) * 1000)
+      : id === "conv_late_pin"
+        ? new Date((T + 10) * 1000)
+        : undefined,
+};
 
 describe("parsePostCallEvent", () => {
   it("reduces a transcription to the fields the daemon uses", () => {
@@ -117,7 +127,7 @@ describe("parsePostCallEvent", () => {
     data: {
       ...transcription.data,
       conversation_id: conversation,
-      metadata: { phone_call: { direction, external_number: external } },
+      metadata: { start_time_unix_secs: T, phone_call: { direction, external_number: external } },
     },
   });
   const personRoles = (body: unknown, context: typeof OWNER_CONTEXT | undefined = OWNER_CONTEXT) => {
@@ -136,6 +146,23 @@ describe("parsePostCallEvent", () => {
       "owner",
     ],
     ["an inbound call from the owner's number without the PIN", call("inbound", "+15555550100"), "caller"],
+    [
+      "an inbound call from the owner's number, for words said before the PIN",
+      call("inbound", "+15555550100", "conv_late_pin"),
+      "caller",
+    ],
+    [
+      "an inbound call after the PIN but with no call start time",
+      {
+        ...transcription,
+        data: {
+          ...transcription.data,
+          conversation_id: "conv_pin",
+          metadata: { phone_call: { direction: "inbound", external_number: "+15555550100" } },
+        },
+      },
+      "caller",
+    ],
     [
       "an inbound call from a stranger, even with the PIN",
       call("inbound", "+15555550199", "conv_pin"),

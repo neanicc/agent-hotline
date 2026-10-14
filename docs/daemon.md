@@ -145,6 +145,11 @@ recorded in the audit log as `sms.received` with its SID and reply type
 
 ### ElevenLabs (`/hooks/el/*`)
 
+Known limit: the PinGate's attempt counters, its verified calls and both replay
+memories are in memory, so a daemon restart resets them. Per-call limits (2
+wrong PINs) still apply after a restart; the hourly budget starts again.
+Persisting them is HL-13 work.
+
 `elevenLabsRoutes` (`elevenlabs-webhook.ts`) serves the voice agent's four
 server tools and the post-call webhook. `runDaemon` registers them only when
 `voice.provider` is `elevenlabs`, `voice.agentId` and `tunnel.publicUrl` are set,
@@ -155,10 +160,18 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
 
 **Server tools** (`POST /hooks/el/tools/<name>`):
 
-- **Precheck:** an `x-hotline-tool-secret` header and a JSON content type, or
-  `403` before the body is read.
-- **Verify:** the header must equal `elevenlabs.toolSecret`, compared in
-  constant time (both sides hashed with SHA-256). An empty secret never matches.
+- **Precheck:** the `x-hotline-tool-secret` header must equal
+  `elevenlabs.toolSecret`, compared in constant time (both sides hashed with
+  SHA-256), and the content type must be JSON, or `403` before the body is
+  read. An empty secret never matches. `verify` repeats the secret check.
+- **Once per delivery:** `submit_answer`, `verify_pin` and `send_instruction`
+  remember each delivery (tool name and exact body) for two hours. A repeat,
+  such as an ElevenLabs retry or a replay, gets the first response and the
+  handler does not run again, so a repeated wrong PIN spends no attempt. A
+  delivery that was refused (`pin-required`, `invalid`, `refused`) or failed is
+  forgotten, so the same call can succeed once it is allowed. `get_status` only
+  reads, after the PIN, and runs every time. The memory does not survive a
+  restart (HL-13).
 - **Owner on the call:** the body's `caller_id` or `called_number`, which
   ElevenLabs fills from `system__caller_id` and `system__called_number`, must be
   `owner.phoneNumber`. Otherwise the answer is `{"result": "refused",
@@ -186,9 +199,11 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
   leaves the event unhandled, so ElevenLabs' retry gets through. Durable replay
   protection is HL-13.
 - **Who spoke:** the person's transcript turns are labelled `owner` only on an
-  outbound call whose other end is `owner.phoneNumber`, or an inbound call from
-  that number that passed `verify_pin` (still remembered by the PinGate).
-  Otherwise they are `caller` turns, which `ownerSaid` never matches.
+  outbound call whose other end is `owner.phoneNumber`, or, on an inbound call
+  from that number, turns spoken after `verify_pin` succeeded (call start plus
+  the turn's time in the call, against the PinGate's verification time; a turn
+  without a time does not count). Everything else is a `caller` turn, which
+  `ownerSaid` never matches.
 - Events for another agent id and other webhook types (such as
   `post_call_audio`) get `200` and are ignored. This route reads bodies up to
   1 MiB (the listener's default is 256 KiB), enough for a long transcript; a

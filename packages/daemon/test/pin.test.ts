@@ -144,6 +144,16 @@ describe("PinGate", () => {
     expect(await pins.attempt("conv_1", "4821", "inbound")).toMatchObject({ verified: false });
   });
 
+  it("says when a call was verified, and nothing for a call that was not", async () => {
+    const { pins, advance } = gate();
+    await pins.attempt("conv_1", "1111", "inbound");
+    expect(pins.verifiedAt("conv_1")).toBeUndefined();
+    advance(5000);
+    await pins.attempt("conv_1", "4821", "inbound");
+    expect(pins.verifiedAt("conv_1")).toEqual(new Date("2026-10-13T22:00:05.000Z"));
+    expect(pins.verifiedAt("conv_2")).toBeUndefined();
+  });
+
   it("forgets a verification after two hours", async () => {
     const { pins, advance } = gate();
     await pins.attempt("conv_1", "4821", "inbound");

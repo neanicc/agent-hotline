@@ -39,6 +39,12 @@ import type { WebhookRoute } from "./server.js";
 /** Longest status text handed to the voice agent, after redaction. */
 export const MAX_STATUS_LENGTH = 1500;
 const SEEN_EVENTS = 1000;
+/** How long a state-changing tool delivery is remembered; longer than any call. */
+const TOOL_REPLAY_MS = 2 * 60 * 60 * 1000;
+/** Tools whose repeat must not run the handler again. `get_status` only reads, after the PIN. */
+const ONCE_TOOLS: ReadonlySet<ToolName> = new Set(["submit_answer", "verify_pin", "send_instruction"]);
+/** Tool results that mean no handler ran, so a repeat may try again. */
+const UNHANDLED_RESULTS: ReadonlySet<string> = new Set(["pin-required", "invalid", "refused"]);
 /**
  * A post-call transcription carries the whole transcript plus analysis and
  * metadata, so it may exceed the listener's default. Bigger bodies get the bare
@@ -163,37 +169,76 @@ function toDecision(body: {
 
 export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute[] {
   const { pins, handlers } = options;
+  /**
+   * State-changing tool deliveries by a hash of tool name and exact body, with
+   * their response and when they may be forgotten, oldest first. A repeat (an
+   * ElevenLabs retry or a replay) gets the first response without running the
+   * handler again. A failed delivery is forgotten so a retry can get through.
+   */
+  const deliveries = new Map<string, { response: Promise<Record<string, unknown>>; expires: number }>();
 
   const toolRoute = <N extends ToolName>(
     name: N,
     serve: (body: ToolBodies[N], call: ToolCall) => Promise<Record<string, unknown>>,
-  ): WebhookRoute => ({
-    method: "POST",
-    url: toolPath(name),
-    precheck: (request) => header(request, TOOL_SECRET_HEADER) !== undefined && jsonRequest(request),
-    verify: (request) => sameSecret(header(request, TOOL_SECRET_HEADER), options.toolSecret),
-    handler: async (request: FastifyRequest, reply: FastifyReply) => {
-      const parsed = TOOL_BODIES[name].safeParse(parseJson(rawBody(request)));
-      let response: Record<string, unknown>;
-      if (!parsed.success) {
-        response = { result: "invalid" };
-      } else if (!ownerOnCall(parsed.data)) {
-        // Someone else's call: nothing about Hotline, the owner or the agents.
-        response = { result: "refused", end_call: true };
-      } else {
-        const { conversation_id, call_sid } = parsed.data;
-        const call: ToolCall = {
-          conversationId: conversation_id,
-          ...(call_sid ? { callSid: call_sid } : {}),
-          direction: callDirection(parsed.data),
-          receivedAt: options.clock(),
-        };
-        response = await serve(parsed.data as ToolBodies[N], call);
+  ): WebhookRoute => {
+    const handleTool = async (raw: string): Promise<Record<string, unknown>> => {
+      const parsed = TOOL_BODIES[name].safeParse(parseJson(raw));
+      if (!parsed.success) return { result: "invalid" };
+      // Someone else's call: nothing about Hotline, the owner or the agents.
+      if (!ownerOnCall(parsed.data)) return { result: "refused", end_call: true };
+      const { conversation_id, call_sid } = parsed.data;
+      const call: ToolCall = {
+        conversationId: conversation_id,
+        ...(call_sid ? { callSid: call_sid } : {}),
+        direction: callDirection(parsed.data),
+        receivedAt: options.clock(),
+      };
+      return serve(parsed.data as ToolBodies[N], call);
+    };
+
+    /** Runs the tool once per distinct delivery; see `deliveries`. */
+    const once = (raw: string) => {
+      const now = options.clock().getTime();
+      for (const [key, seen] of deliveries) {
+        if (seen.expires > now && deliveries.size <= SEEN_EVENTS) break;
+        deliveries.delete(key);
       }
-      request.log.info({ tool: name, result: response.result ?? response.verified }, "voice tool");
-      return reply.code(200).send(response);
-    },
-  });
+      const key = createHash("sha256").update(`${name}\0${raw}`, "utf8").digest("base64url");
+      const seen = deliveries.get(key);
+      if (seen !== undefined) return { response: seen.response, repeat: true };
+      // No await between the lookup and this claim, so one delivery runs the handler.
+      const response = handleTool(raw);
+      deliveries.set(key, { response, expires: now + TOOL_REPLAY_MS });
+      // Forget a delivery that failed or changed nothing (refused before the PIN,
+      // invalid, not the owner), so the same call can succeed once allowed.
+      response.then(
+        (result) => {
+          if (typeof result.result === "string" && UNHANDLED_RESULTS.has(result.result))
+            deliveries.delete(key);
+        },
+        () => deliveries.delete(key),
+      );
+      return { response, repeat: false };
+    };
+
+    return {
+      method: "POST",
+      url: toolPath(name),
+      // The secret needs no body, so a wrong one is refused before the body is read.
+      precheck: (request) =>
+        sameSecret(header(request, TOOL_SECRET_HEADER), options.toolSecret) && jsonRequest(request),
+      verify: (request) => sameSecret(header(request, TOOL_SECRET_HEADER), options.toolSecret),
+      handler: async (request: FastifyRequest, reply: FastifyReply) => {
+        const raw = rawBody(request) ?? "";
+        const { response, repeat } = ONCE_TOOLS.has(name)
+          ? once(raw)
+          : { response: handleTool(raw), repeat: false };
+        const result = await response;
+        request.log.info({ tool: name, result: result.result ?? result.verified, repeat }, "voice tool");
+        return reply.code(200).send(result);
+      },
+    };
+  };
 
   const ownerOnCall = (body: GetStatusBody) =>
     body.caller_id === options.ownerNumber || body.called_number === options.ownerNumber;
@@ -268,7 +313,7 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
       // Turns count as the owner's only on a call known to be with the owner.
       const event = parsePostCallEvent(parseJson(rawBody(request)), {
         ownerNumber: options.ownerNumber,
-        pinVerified: (conversationId) => pins.isVerified(conversationId),
+        pinVerifiedAt: (conversationId) => pins.verifiedAt(conversationId),
       });
       if (event === undefined || event.type === "other" || event.agentId !== options.agentId) {
         request.log.info({ kind: event?.type ?? "malformed" }, "post-call webhook ignored");

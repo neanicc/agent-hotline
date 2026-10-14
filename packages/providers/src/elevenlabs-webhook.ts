@@ -57,7 +57,11 @@ export function validPostCallSignature(
   return timingSafeEqual(a, b);
 }
 
-const Turn = z.object({ role: z.string(), message: z.string().nullish() });
+const Turn = z.object({
+  role: z.string(),
+  message: z.string().nullish(),
+  time_in_call_secs: z.number().nullish(),
+});
 const PhoneCall = z.object({
   direction: z.string().nullish(),
   external_number: z.string().nullish(),
@@ -73,7 +77,11 @@ const Transcription = z.object({
     status: z.string(),
     transcript: z.array(Turn).default([]),
     metadata: z
-      .object({ call_duration_secs: z.number().nullish(), phone_call: PhoneCall.nullish() })
+      .object({
+        start_time_unix_secs: z.number().nullish(),
+        call_duration_secs: z.number().nullish(),
+        phone_call: PhoneCall.nullish(),
+      })
       .nullish(),
   }),
 });
@@ -101,24 +109,28 @@ export interface TranscriptTurn {
 export interface OwnerContext {
   /** `config.owner.phoneNumber`. */
   ownerNumber: string;
-  /** Whether this conversation passed `verify_pin` (the daemon's PinGate). */
-  pinVerified: (conversationId: string) => boolean;
+  /** When this conversation passed `verify_pin` (the daemon's PinGate), if it did. */
+  pinVerifiedAt: (conversationId: string) => Date | undefined;
 }
 
 /**
- * Whether the person on the line was the owner: an outbound call to the owner's
- * number (Hotline dialled it), or an inbound call from the owner's number that
- * passed the PIN, since caller ID can be spoofed. Anything else is not.
+ * From when (unix seconds) the person on the line counts as the owner, or
+ * undefined if never: from the start of an outbound call to the owner's number
+ * (Hotline dialled it), or after the PIN on an inbound call from the owner's
+ * number, since caller ID can be spoofed and words said before the PIN prove
+ * nothing.
  */
-function withOwner(
+function ownerFrom(
   owner: OwnerContext | undefined,
   conversationId: string,
   direction: "inbound" | "outbound" | undefined,
   externalNumber: string | null | undefined,
-): boolean {
-  if (owner === undefined || externalNumber !== owner.ownerNumber) return false;
-  if (direction === "outbound") return true;
-  return direction === "inbound" && owner.pinVerified(conversationId);
+): number | undefined {
+  if (owner === undefined || externalNumber !== owner.ownerNumber) return undefined;
+  if (direction === "outbound") return Number.NEGATIVE_INFINITY;
+  if (direction !== "inbound") return undefined;
+  const verifiedAt = owner.pinVerifiedAt(conversationId);
+  return verifiedAt === undefined ? undefined : verifiedAt.getTime() / 1000;
 }
 
 /** A verified post-call webhook, reduced to what the daemon uses. Transcripts stay on this machine. */
@@ -160,9 +172,18 @@ export function parsePostCallEvent(body: unknown, owner?: OwnerContext): PostCal
     const phone = data.metadata?.phone_call;
     const direction =
       phone?.direction === "inbound" || phone?.direction === "outbound" ? phone.direction : undefined;
-    const person = withOwner(owner, data.conversation_id, direction, phone?.external_number)
-      ? "owner"
-      : "caller";
+    const from = ownerFrom(owner, data.conversation_id, direction, phone?.external_number);
+    const start = data.metadata?.start_time_unix_secs;
+    /** A turn is the owner's only when it is known to come after `from`; an unknown time is not. */
+    const person = (turn: z.infer<typeof Turn>): "owner" | "caller" => {
+      if (from === undefined) return "caller";
+      if (from === Number.NEGATIVE_INFINITY) return "owner";
+      const at =
+        typeof start === "number" && typeof turn.time_in_call_secs === "number"
+          ? start + turn.time_in_call_secs
+          : undefined;
+      return at !== undefined && at > from ? "owner" : "caller";
+    };
     return {
       type: "transcription",
       agentId: data.agent_id,
@@ -176,7 +197,7 @@ export function parsePostCallEvent(body: unknown, owner?: OwnerContext): PostCal
         : {}),
       transcript: data.transcript.flatMap((turn): TranscriptTurn[] =>
         (turn.role === "user" || turn.role === "agent") && typeof turn.message === "string"
-          ? [{ role: turn.role === "agent" ? "agent" : person, message: turn.message }]
+          ? [{ role: turn.role === "agent" ? "agent" : person(turn), message: turn.message }]
           : [],
       ),
     };

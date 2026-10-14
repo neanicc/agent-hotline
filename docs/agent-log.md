@@ -718,3 +718,28 @@ Template:
     oversized one gets the bare 403.
   - P3 (in-memory post-call dedupe across restarts) stays an HL-09/HL-13
     follow-up, as already listed above.
+- Second bot staff review and Greptile on #33, fixed here:
+  - Greptile P0: the tool secret was only checked after the body was read
+    (precheck tested presence). `precheck` now compares the secret in constant
+    time, so a wrong secret never gets its body read.
+  - Greptile P0: an authenticated tool call could be repeated and run its
+    handler again. `submit_answer`, `verify_pin` and `send_instruction` now
+    remember each delivery (tool name and exact body) for two hours and answer
+    a repeat from memory; refused or failed deliveries are forgotten so they
+    can succeed once allowed. ElevenLabs sends no delivery id, so the exact
+    body is the identity. `get_status` is read-only and not deduplicated.
+  - Staff P2: on a PIN-verified inbound call, words said before the PIN counted
+    as the owner's. The PinGate now records when a call was verified, and only
+    turns after that time (call start plus time in call) are the owner's; a
+    turn without a time is a caller's. The fake provider times its turns with
+    an injected clock.
+  - Staff P2: PIN counters are in memory, so a restart resets the hourly
+    budget. Documented as a known limit in `docs/daemon.md`; persisting them is
+    HL-13.
+  - Staff P3: the opening line carried the session nickname unfenced (it is
+    spoken as is, so it cannot be fenced). It is now fixed words only.
+  - Staff P3: the PinGate's `splice` is guarded against a missing index.
+  - Greptile P2 (fields outside the fence) was already fixed in the first
+    review round.
+  - Mutation checks, each reverted: presence-only precheck (1 test fails), no
+    delivery memory (2), inbound turns owner regardless of time (3).

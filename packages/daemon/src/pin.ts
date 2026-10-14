@@ -78,6 +78,8 @@ export interface PinGateOptions {
 interface CallPinState {
   failures: number;
   verified: boolean;
+  /** When the right PIN was given. */
+  verifiedAt?: number;
   /** When this call first tried a PIN. */
   since: number;
   /** Fixed by the first attempt, so a call cannot move to the other budget. */
@@ -104,6 +106,14 @@ export class PinGate {
 
   constructor(options: PinGateOptions) {
     this.#options = options;
+  }
+
+  /** When `conversationId` gave the right PIN, if it did and is still remembered. */
+  verifiedAt(conversationId: string): Date | undefined {
+    const state = this.#calls.get(conversationId);
+    return this.isVerified(conversationId) && state?.verifiedAt !== undefined
+      ? new Date(state.verifiedAt)
+      : undefined;
   }
 
   /** Whether `conversationId` gave the right PIN. */
@@ -135,8 +145,10 @@ export class PinGate {
     const ok = await this.#options.check(pin).catch(() => false);
     if (ok) {
       state.failures -= 1;
-      failures.splice(failures.indexOf(now), 1);
+      const index = failures.indexOf(now);
+      if (index >= 0) failures.splice(index, 1);
       state.verified = true;
+      state.verifiedAt = this.#options.clock().getTime();
       this.#options.onVerified?.(pin);
       return { verified: true, attemptsLeft: PIN_ATTEMPTS_PER_CALL - state.failures, endCall: false };
     }

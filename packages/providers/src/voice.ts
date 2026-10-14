@@ -62,7 +62,10 @@ export class VoiceCallError extends Error {
 export interface CallVariables {
   hotline_call_id: string;
   ask_count: number;
-  /** The rest of the first message: who is calling ("Claude in demo-app needs you..."). */
+  /**
+   * The rest of the first message, which ElevenLabs speaks as is. Fixed words
+   * only: no agent text, since it cannot be fenced there. The asks say who is calling.
+   */
   opening: string;
   /** Every ask as numbered, redacted, length-capped lines. Untrusted agent text. */
   asks: string;
@@ -111,16 +114,14 @@ export function callVariables(call: OutboundCall, redact: (text: string) => stri
   if (call.asks.length === 0 || call.asks.length > MAX_ASKS_PER_CALL) {
     throw new VoiceCallError(`A call covers 1 to ${MAX_ASKS_PER_CALL} asks`);
   }
-  const nicknames = new Set(call.asks.map((ask) => ask.nickname));
-  const [first] = call.asks;
-  const caller =
-    nicknames.size === 1 && first !== undefined
-      ? cut(redact(first.nickname), MAX_SPOKEN_NICKNAME_LENGTH)
-      : "A few of your agents";
+  const sessions = new Set(call.asks.map((ask) => ask.nickname)).size;
   return {
     hotline_call_id: call.callId,
     ask_count: call.asks.length,
-    opening: `${caller} ${nicknames.size === 1 ? "needs" : "need"} you for a sec. Got a moment?`,
+    opening:
+      sessions === 1
+        ? "One of your agents needs you for a sec. Got a moment?"
+        : "A few of your agents need you for a sec. Got a moment?",
     asks: call.asks.map((ask, i) => describeAsk(ask, i, redact)).join("\n"),
   };
 }

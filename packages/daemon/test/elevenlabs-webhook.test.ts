@@ -181,6 +181,13 @@ describe("server tools: authentication", () => {
     expect(pins.isVerified("conv_1")).toBe(false);
   });
 
+  it("refuses a wrong secret before the body is read", async () => {
+    const response = await tool("submit_answer", { ...binding(), ask_number: 1 }, { secret: "wrong-secret" });
+    expect([response.statusCode, response.body]).toEqual([403, ""]);
+    const reasons = lines.map((line) => (JSON.parse(line) as { reason?: string }).reason).filter(Boolean);
+    expect(reasons).toEqual(["precheck failed"]);
+  });
+
   it("answers an unknown tool path with the same bare 403", async () => {
     const response = await tool("approve_everything", binding());
     expect([response.statusCode, response.body]).toEqual([403, ""]);
@@ -277,6 +284,38 @@ describe("submit_answer", () => {
   it("passes the handler's verdict back to the voice agent", async () => {
     answerResult = "needs-pin";
     expect((await answer()).json()).toEqual({ result: "needs-pin" });
+  });
+});
+
+describe("repeated tool calls", () => {
+  it("run a state-changing handler once and answer a repeat from memory", async () => {
+    const first = await answer();
+    const again = await answer();
+    expect(again.json()).toEqual(first.json());
+    expect(answers).toHaveLength(1);
+    await answer({ owner_words: "yes, really, go ahead" });
+    expect(answers).toHaveLength(2);
+  });
+
+  it("never spend a PIN attempt on a repeated guess", async () => {
+    const guess = () => tool("verify_pin", { ...binding(), pin: "1111" });
+    expect((await guess()).json()).toMatchObject({ attempts_left: 1 });
+    expect((await guess()).json()).toMatchObject({ attempts_left: 1 });
+    expect((await tool("verify_pin", { ...binding(), pin: PIN })).json()).toMatchObject({ verified: true });
+  });
+
+  it("forget a delivery once its memory window has passed", async () => {
+    await answer();
+    now = new Date(now.getTime() + 2 * 60 * 60 * 1000 + 1);
+    await answer();
+    expect(answers).toHaveLength(2);
+  });
+
+  it("keep reading the status on every request", async () => {
+    await tool("verify_pin", { ...binding(), pin: PIN });
+    await tool("get_status", binding());
+    await tool("get_status", binding());
+    expect(statusCalls).toHaveLength(2);
   });
 });
 
@@ -459,10 +498,25 @@ describe("post-call webhook", () => {
     expect(postCalls).toHaveLength(1);
   });
 
-  const inboundTranscript = (from: string, conversation: string) => {
+  /** An inbound call that started a minute ago, with the person's words `spokeAt` seconds in. */
+  const inboundTranscript = (from: string, conversation: string, spokeAt = 90) => {
     const body = transcription(conversation);
-    body.data.metadata.phone_call = { direction: "inbound", external_number: from, call_sid: "CAy" };
-    return body;
+    const start = now.getTime() / 1000 - 60;
+    return {
+      ...body,
+      data: {
+        ...body.data,
+        transcript: [
+          { role: "agent", message: "Hey, it's your hotline.", time_in_call_secs: 0 },
+          { role: "user", message: "Yes, go ahead.", time_in_call_secs: spokeAt },
+        ],
+        metadata: {
+          start_time_unix_secs: start,
+          call_duration_secs: 120,
+          phone_call: { direction: "inbound", external_number: from, call_sid: "CAy" },
+        },
+      },
+    };
   };
   const roles = () => (postCalls.at(-1) as { transcript: { role: string }[] }).transcript.map((t) => t.role);
 
@@ -486,6 +540,15 @@ describe("post-call webhook", () => {
     });
     await postCall(inboundTranscript(OWNER, "conv_in_pin"));
     expect(roles()).toEqual(["agent", "owner"]);
+    // Words said before the PIN was verified (30 s into a call that began 60 s ago) never count.
+    await tool("verify_pin", {
+      ...binding("conv_in_early"),
+      caller_id: OWNER,
+      called_number: AGENT_NUMBER,
+      pin: PIN,
+    });
+    await postCall(inboundTranscript(OWNER, "conv_in_early", 30));
+    expect(roles()).toEqual(["agent", "caller"]);
   });
 
   it("ignores another agent's events and other webhook types", async () => {

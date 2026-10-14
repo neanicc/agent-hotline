@@ -154,6 +154,8 @@ export interface FakeVoiceOptions {
   agentId?: string;
   redact?: (text: string) => string;
   client: VoiceToolClient;
+  /** Times the transcript turns (normally the scenario's fake clock). */
+  clock?: () => Date;
 }
 
 const hex32 = (n: number) => n.toString(16).padStart(32, "0");
@@ -169,6 +171,7 @@ export class FakeVoiceProvider implements VoiceProvider {
   readonly #agentId: string;
   readonly #redact: (text: string) => string;
   readonly #client: VoiceToolClient;
+  readonly #clock: () => Date;
   readonly #scripts: HumanScript[] = [];
   readonly #failures: Error[] = [];
   readonly #unplayed: FakePlacedCall[] = [];
@@ -180,6 +183,7 @@ export class FakeVoiceProvider implements VoiceProvider {
     this.#agentId = options.agentId ?? "agent_fake";
     this.#redact = options.redact ?? ((text) => text);
     this.#client = options.client;
+    this.#clock = options.clock ?? (() => new Date());
   }
 
   /** How the human behaves on the next call that has no script yet. Without one, nobody picks up. */
@@ -253,9 +257,12 @@ export class FakeVoiceProvider implements VoiceProvider {
       caller_id: direction === "outbound" ? this.#agentNumber : from,
       called_number: direction === "outbound" ? this.#owner : this.#agentNumber,
     };
-    const transcript: { role: "user" | "agent"; message: string }[] = [
-      { role: "agent", message: "Hey, it's your hotline." },
-    ];
+    const start = this.#clock().getTime();
+    const transcript: { role: "user" | "agent"; message: string; time_in_call_secs: number }[] = [];
+    /** One transcript turn, timed by the clock as ElevenLabs would. */
+    const say = (role: "user" | "agent", message: string) =>
+      transcript.push({ role, message, time_in_call_secs: (this.#clock().getTime() - start) / 1000 });
+    say("agent", "Hey, it's your hotline.");
     const tool = async (name: ToolName, body: Record<string, unknown>) => {
       const response = await this.#client.tool(name, { ...binding, ...body });
       played.tools.push({ tool: name, body: { ...binding, ...body }, response });
@@ -269,10 +276,10 @@ export class FakeVoiceProvider implements VoiceProvider {
       if (step.kind === "silence") continue;
       let response: Record<string, unknown>;
       if (step.kind === "pin") {
-        transcript.push({ role: "user", message: step.digits });
+        say("user", step.digits);
         response = await tool("verify_pin", { pin: step.digits });
       } else if (step.kind === "answer" || step.kind === "unclear") {
-        transcript.push({ role: "user", message: step.words });
+        say("user", step.words);
         response = await tool("submit_answer", {
           ask_number: step.ask,
           decision: step.kind === "unclear" ? "unclear" : step.decision,
@@ -281,11 +288,11 @@ export class FakeVoiceProvider implements VoiceProvider {
           owner_words: step.words,
         });
       } else if (step.kind === "status") {
-        transcript.push({ role: "user", message: "What's everyone doing?" });
+        say("user", "What's everyone doing?");
         response = await tool("get_status", {});
       } else {
         const words = step.words ?? step.instruction;
-        transcript.push({ role: "user", message: words });
+        say("user", words);
         response = await tool("send_instruction", {
           session_number: step.session,
           instruction: step.instruction,
@@ -307,7 +314,8 @@ export class FakeVoiceProvider implements VoiceProvider {
         status: "done",
         transcript,
         metadata: {
-          call_duration_secs: 10 * transcript.length,
+          start_time_unix_secs: Math.floor(start / 1000),
+          call_duration_secs: Math.ceil((this.#clock().getTime() - start) / 1000),
           phone_call: { direction, external_number: external, call_sid: callSid, type: "twilio" },
         },
       },
