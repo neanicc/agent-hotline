@@ -899,3 +899,16 @@ Template:
     session's numbered name (names are labels, never identity), and dedupe
     reads every session at registration (cheap at Tier 1 scale; HL-10 may
     expire stale sessions).
+- Greptile on #35 (three P2s), fixed:
+  - The offer to send a question back covered permission asks, which
+    `answerProblem` accepts only as allow or deny. The prompt now offers it
+    for questions and finished turns only and says a permission request can
+    only be allowed or denied.
+  - "Busy" said unanswered asks go back as no answer at once; the queue
+    actually texts the open asks after an answered call, and they report no
+    answer only on expiry. The prompt and `docs/voice.md` now say that, and
+    the voice agent ends the call without submitting anything.
+  - Saved nicknames from before this change (such as "Claude in demo!")
+    did not reserve the name that sounds the same. Dedupe now compares names
+    in their speakable form. Test included; comparing raw names fails it.
+  - Tests: `CI=true scripts/ci/run.sh test`, 753 tests in 37 files.

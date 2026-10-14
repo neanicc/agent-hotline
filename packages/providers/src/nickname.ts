@@ -101,11 +101,14 @@ export function sessionNickname({
     const head = `${agentName}${suffix} in `;
     return `${head}${cut(place, MAX_SPOKEN_NICKNAME_LENGTH - head.length)}`;
   };
-  const used = new Set([...taken].map((nickname) => nickname.toLowerCase()));
-  if (!used.has(name().toLowerCase())) return name();
+  // Compared as they are spoken: a name saved before this rule (such as
+  // "Claude in demo!") sounds the same as "Claude in demo" and reserves it.
+  const spoken = (nickname: string) => speakableName(nickname).toLowerCase();
+  const used = new Set([...taken].map(spoken));
+  if (!used.has(spoken(name()))) return name();
   for (let n = 2; n < 100; n++) {
     const candidate = name(n);
-    if (!used.has(candidate.toLowerCase())) return candidate;
+    if (!used.has(spoken(candidate))) return candidate;
   }
   // Ninety-nine sessions in one folder: give up on telling them apart rather than loop.
   return name();

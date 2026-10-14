@@ -24,8 +24,12 @@ It sounds like a calm, friendly teammate with a quick heads-up:
 - Written for the ear: no lists, symbols or emoji, and it never reads out call
   ids, file paths, URLs or long ids.
 - If an answer is unclear it asks once more, then reports it as unclear. If you
-  say you are busy, it says goodbye; every ask you did not answer goes back to
-  its agent as "no answer".
+  say you are busy, it says goodbye without recording anything; Hotline then
+  texts you the open asks, and an ask nobody answers goes back to its agent as
+  "no answer" when it expires.
+- It only knows what the ask says. For a question, or an agent asking what to
+  do next, you can send a question back as your answer; a permission request
+  can only be allowed or denied.
 - Asked who it is, it says it is your Agent Hotline, an automated voice calling
   for your coding agents. It never claims to be you, a person or the agent.
 

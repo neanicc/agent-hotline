@@ -116,7 +116,16 @@ describe("persona (plan section 6)", () => {
 
   it("asks once more when unclear, and leaves a busy owner's asks unanswered", () => {
     expect(AGENT_PROMPT).toContain("If an answer is unclear, ask once more.");
-    expect(AGENT_PROMPT).toContain("asks without an answer go back to the agents as no answer");
+    expect(AGENT_PROMPT).toContain(
+      "Say goodbye and end the call without submitting anything; Hotline texts them the open asks, and an ask nobody answers goes back to its agent as no answer.",
+    );
+  });
+
+  it("offers a question back only where the daemon accepts text, never on a permission request", () => {
+    // answerProblem: questions take an option or text, finished turns text or done, permissions allow or deny.
+    expect(AGENT_PROMPT).toContain(
+      "For a question or a finished turn they can send the agent a question back, which you submit as decision text with their words. A permission request can only be allowed or denied.",
+    );
   });
 
   it("never passes itself off as the owner, a person or the coding agent", () => {

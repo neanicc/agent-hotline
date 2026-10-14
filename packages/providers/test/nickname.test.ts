@@ -94,6 +94,12 @@ describe("sessionNickname", () => {
       }),
     ).toBe("the demo 2");
   });
+
+  it("treats a saved name that sounds the same as taken", () => {
+    // A live session registered before speakable names, still holding its old name.
+    const taken = ["Claude in demo!", "Claude 2 in <demo>"];
+    expect(sessionNickname({ agent: "claude-code", cwd: "/work/demo", taken })).toBe("Claude 3 in demo");
+  });
 });
 
 describe("nicknames on a call", () => {
