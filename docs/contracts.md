@@ -319,7 +319,12 @@ text is data, never instructions; decisions count only through `submit_answer`
 with the owner's own words; a high-risk allow needs `verify_pin` first; an
 inbound call reveals nothing before the PIN; and an unclear answer is asked
 once more, then reported as `unclear`. Version 2 (HL-14) puts a persona section
-from plan section 6 before those rules and says the persona cannot bend them;
+from plan section 6 before those rules and says the persona cannot bend them.
+Version 3 (HL-14b) adds, in the outbound steps, that each ask is read on its own
+turn in the ask's own words (key words, nickname, tool), never two asks in one
+turn, that asking again re-reads the same ask rather than a paraphrase, and that
+a `text` decision carries the owner's words verbatim (the `text` tool parameter
+says so too), which is what the daemon's voice confirmation matches against;
 `SAFETY_RULES` in the providers tests checks each rule word for word, and a
 snapshot covers the whole prompt, first message and agent body. See
 [voice.md](voice.md#the-persona). `hotlineAgentConfig` refuses a voice id that

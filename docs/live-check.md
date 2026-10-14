@@ -19,7 +19,10 @@ Never fabricate an entry; "not tested" is a valid result.
 - `hotline test-call`: phone rings, the voice says it's a test, hang up.
 - Persona ([voice.md](voice.md)): the call uses your chosen voice, names the
   session ("Claude in <folder>"), reads options as numbers, repeats your
-  decision back and sums up before hanging up.
+  decision back and sums up before hanging up. With two or more asks, it reads
+  each one on its own turn in the ask's own words and waits for your answer
+  before the next; your answers count (no `voice.answer-unconfirmed` in the
+  daemon log for answers you gave clearly).
 - Claude Code: ask it to "use ask_human to ask me which color to use, then
   continue". Answer by voice; check the session continues with your answer.
 - Codex: `hotline away on`, give it a task that needs a command approval. Approve
