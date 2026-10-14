@@ -32,6 +32,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Ask, AskKind, Session } from "@hotline/core";
 import { type PostCallEvent, type SmsProvider, speakableName } from "@hotline/providers";
+import { z } from "zod";
 import type { SendInstructionResult, ToolCall, VoiceInstruction } from "./elevenlabs-webhook.js";
 import { confirmInstructions, type HeldInstruction, plainInstruction } from "./instruction-confirm.js";
 import type { OrchestratorLog } from "./orchestrator-state.js";
@@ -52,10 +53,41 @@ export const MAX_INSTRUCTION_LENGTH = 1000;
 const CALL_MEMORY_MS = 60 * 60 * 1000;
 /** Calls remembered at once; past it the oldest are forgotten (their instructions are not queued). */
 const MAX_CALLS = 1000;
-/** `daemon_state` key of how many instructions each call holds (counts only). */
+/**
+ * `daemon_state` key where runs before HL-13b saved how many instructions each
+ * call held (counts only). Read once on start, to tell the owner those were lost.
+ */
 export const HELD_STATE_KEY = "inbound.held";
+/** `daemon_state` key of when each direction's lockout text last went out (epoch ms). */
+export const LOCKOUT_TEXTED_KEY = "inbound.lockout-texted-at";
 /** At most one lockout text per direction in this window. */
 const LOCKOUT_TEXT_MS = 60 * 60 * 1000;
+
+/**
+ * A call's memory as saved in the store (`inbound_calls`), so held
+ * instructions survive a restart (HL-13b). The instruction and the owner's
+ * words are redacted before they are saved; nicknames already are.
+ */
+const SavedCall = z.strictObject({
+  sessionIds: z.array(z.string().min(1)),
+  nicknames: z.array(z.string()),
+  held: z
+    .array(
+      z.strictObject({
+        id: z.string().min(1),
+        instruction: z.string(),
+        ownerWords: z.string(),
+        sessionNumber: z.number().int().positive(),
+        listed: z.array(z.string()),
+        sessionId: z.string().min(1),
+        receivedAt: z.iso.datetime(),
+        done: z.boolean().optional(),
+      }),
+    )
+    .max(MAX_INSTRUCTIONS_PER_CALL),
+  pinVerifiedAt: z.number().finite().optional(),
+  pinCallSid: z.string().min(1).optional(),
+});
 /** Status lengths: what the voice route allows (1500) and one SMS (1600), with room for the cut marker. */
 const STATUS_BUDGET = 1400;
 const LATEST_LENGTH = 120;
@@ -114,6 +146,14 @@ interface CallMemory {
   nicknames: string[];
   held: (HeldInstruction & { id: string; sessionId: string; receivedAt: Date; done?: boolean })[];
   expires: number;
+  /**
+   * When the call first passed the PIN, as the route reported it with an
+   * instruction (epoch ms). Saved, so after a restart the post-call transcript
+   * can still tell the owner's turns from the caller's.
+   */
+  pinVerifiedAt?: number;
+  /** The call SID the PIN was given on; the saved time counts only for that call. */
+  pinCallSid?: string;
 }
 
 export interface InboundLineOptions {
@@ -134,40 +174,139 @@ export class InboundLine {
   /** Per conversation: the session numbers its status read out, and its held instructions. */
   readonly #calls = new Map<string, CallMemory>();
   readonly #lockoutTexted: Partial<Record<PinCallDirection, number>> = {};
+  /** Saved calls that could not be read back: their instructions are lost. */
+  #unreadable = 0;
 
   constructor(options: InboundLineOptions) {
     this.#options = options;
     this.#store = options.store;
+    this.#restore();
   }
 
   /**
-   * How many instructions each call still holds, saved in the store, so that
-   * after a restart (which loses them, with the PIN state) the owner is told.
-   * Counts only: no words, no numbers.
+   * Loads the calls a previous run saved, with the instructions they hold, so
+   * their post-call events still confirm them (HL-13b). Done at construction,
+   * before any route serves. A saved call that does not read back is deleted
+   * and counted, for `recover` to tell the owner.
    */
-  #saveHeld(): void {
-    const held: Record<string, number> = {};
-    for (const [id, memory] of this.#calls) {
-      const open = memory.held.filter((h) => !h.done).length;
-      if (open > 0) held[id] = open;
+  #restore(): void {
+    let rows: { conversationId: string; expiresAtMs: number; record: unknown }[];
+    try {
+      rows = this.#store.listInboundCalls();
+    } catch {
+      // A bad table must not keep the daemon from starting: the owner is told
+      // that held instructions may be lost, and the line works on.
+      this.#unreadable += 1;
+      return;
     }
-    this.#store.putState(HELD_STATE_KEY, held);
+    for (const saved of rows) {
+      const parsed = SavedCall.safeParse(saved.record);
+      if (!parsed.success || !Number.isFinite(saved.expiresAtMs)) {
+        this.#deleteSaved(saved.conversationId);
+        // How many it held, when that much can be read (a call holds at most five); else one.
+        const held = (saved.record as { held?: unknown } | undefined)?.held;
+        this.#unreadable += Array.isArray(held) ? Math.min(held.length, MAX_INSTRUCTIONS_PER_CALL) : 1;
+        continue;
+      }
+      const { sessionIds, nicknames, held, pinVerifiedAt, pinCallSid } = parsed.data;
+      this.#calls.set(saved.conversationId, {
+        sessionIds,
+        nicknames,
+        ...(pinVerifiedAt === undefined || pinCallSid === undefined ? {} : { pinVerifiedAt, pinCallSid }),
+        held: held.map(({ done, ...h }) => ({
+          ...h,
+          receivedAt: new Date(h.receivedAt),
+          ...(done === undefined ? {} : { done }),
+        })),
+        expires: saved.expiresAtMs,
+      });
+    }
   }
 
   /**
-   * On start: instructions a previous run held when it stopped were never
-   * queued. Audits them and texts the owner once, then forgets them.
+   * Deletes a call's saved memory. A store error is logged, not thrown, so
+   * what follows (auditing and texting about lost instructions) still runs; a
+   * row left behind is dropped at the next start once its hour has passed.
+   */
+  #deleteSaved(conversationId: string): void {
+    try {
+      this.#store.deleteInboundCall(conversationId);
+    } catch (error) {
+      this.#options.log?.().warn({ err: error }, "could not delete a saved inbound call");
+    }
+  }
+
+  /**
+   * Saves one call's memory, so a restart keeps its session numbers and held
+   * instructions. The words are redacted first; nothing else in it is words.
+   */
+  #save(conversationId: string, memory: CallMemory): void {
+    const { redact } = this.#options;
+    const record: z.input<typeof SavedCall> = {
+      sessionIds: memory.sessionIds,
+      nicknames: memory.nicknames,
+      ...(memory.pinVerifiedAt === undefined || memory.pinCallSid === undefined
+        ? {}
+        : { pinVerifiedAt: memory.pinVerifiedAt, pinCallSid: memory.pinCallSid }),
+      held: memory.held.map((h) => ({
+        id: h.id,
+        instruction: redact(h.instruction),
+        ownerWords: redact(h.ownerWords),
+        sessionNumber: h.sessionNumber,
+        listed: [...h.listed],
+        sessionId: h.sessionId,
+        receivedAt: h.receivedAt.toISOString(),
+        ...(h.done === undefined ? {} : { done: h.done }),
+      })),
+    };
+    this.#store.putInboundCall(conversationId, memory.expires, SavedCall.parse(record));
+  }
+
+  /**
+   * On start: tells the owner about instructions that can no longer be
+   * confirmed. Those are a saved call that did not read back, calls whose
+   * post-call event did not come in time (forgotten here as at any other
+   * time), and counts a run before HL-13b saved when it stopped (it kept
+   * no instructions). Audits them and texts the owner once.
    */
   async recover(): Promise<void> {
+    const now = this.#options.clock();
     const saved = this.#store.getState(HELD_STATE_KEY);
+    if (saved !== undefined) this.#store.putState(HELD_STATE_KEY, {});
     const counts =
       typeof saved === "object" && saved !== null ? Object.values(saved as Record<string, unknown>) : [];
-    const lost = counts.reduce<number>((sum, n) => sum + (typeof n === "number" && n > 0 ? n : 0), 0);
-    this.#store.putState(HELD_STATE_KEY, {});
-    if (lost === 0) return;
-    const now = this.#options.clock();
-    this.#store.appendAudit("voice.instruction-unconfirmed", { reason: "restarted", count: lost }, now);
-    await this.#text(INBOUND_TEXTS.notQueued(lost), "instruction-not-queued", now);
+    const restarted = counts.reduce<number>((sum, n) => sum + (typeof n === "number" && n > 0 ? n : 0), 0);
+    const unreadable = this.#unreadable;
+    this.#unreadable = 0;
+    if (restarted > 0) {
+      this.#store.appendAudit(
+        "voice.instruction-unconfirmed",
+        { reason: "restarted", count: restarted },
+        now,
+      );
+    }
+    if (unreadable > 0) {
+      this.#store.appendAudit(
+        "voice.instruction-unconfirmed",
+        { reason: "unreadable", count: unreadable },
+        now,
+      );
+    }
+    const lost = restarted + unreadable;
+    if (lost > 0) await this.#text(INBOUND_TEXTS.notQueued(lost), "instruction-not-queued", now);
+    await this.#forget(now);
+  }
+
+  /**
+   * When a call that holds instructions passed the PIN, and on which call
+   * SID, as saved with them (also by a previous run). Only for reading that
+   * call's finished transcript (`savedPinVerification` of the ElevenLabs
+   * routes, which uses it only for the same call SID and within the call).
+   */
+  savedPin(conversationId: string): { verifiedAt: Date; callSid: string } | undefined {
+    const memory = this.#calls.get(conversationId);
+    if (memory?.pinVerifiedAt === undefined || memory.pinCallSid === undefined) return undefined;
+    return { verifiedAt: new Date(memory.pinVerifiedAt), callSid: memory.pinCallSid };
   }
 
   /** The live sessions, ended stale ones first, in the order a status numbers them. */
@@ -254,10 +393,23 @@ export class InboundLine {
     const head = `${count(live.length, ["live session", "live sessions"])}.`;
     const { text, included } = this.#status(sessions, now, true, head, numberOf);
     // Only sessions this call heard read out get a number its instructions may use.
+    let numbered = false;
     for (const session of included) {
       if (known(session) >= 0) continue;
       memory.sessionIds.push(session.id);
       memory.nicknames.push(speakableName(this.#options.redact(session.nickname)));
+      numbered = true;
+    }
+    // A call is saved only once it holds an instruction (`#hold`); after that,
+    // new numbers are saved with it. A call that holds none is not worth a
+    // write per status: after a restart it hears the status again (fails closed).
+    if (numbered && memory.held.length > 0) {
+      try {
+        this.#save(call.conversationId, memory);
+      } catch (error) {
+        // The status is still read out; only the new numbers are not saved.
+        this.#options.log?.().warn({ err: error }, "could not save an inbound call's session numbers");
+      }
     }
     return text;
   }
@@ -294,7 +446,7 @@ export class InboundLine {
     // Forget expired calls (and the oldest past the cap) first, so this call's
     // memory is read only after, never pushed to once it was let go. Calls
     // whose post-call event never came then stop counting against the caps.
-    this.#forget(now, voice.conversationId);
+    void this.#forget(now, voice.conversationId);
     const call = this.#calls.get(voice.conversationId);
     // Only a number the status on this call read out.
     const sessionId =
@@ -326,13 +478,36 @@ export class InboundLine {
       sessionId: session.id,
       receivedAt: now,
     });
-    this.#saveHeld();
+    const before = { at: call.pinVerifiedAt, sid: call.pinCallSid };
+    const verifiedAt = voice.pinVerifiedAt?.getTime();
+    // Kept only with the call SID it was given on, and never moved to another SID.
+    const sid = voice.callSid;
+    if (
+      verifiedAt !== undefined &&
+      Number.isFinite(verifiedAt) &&
+      sid !== undefined &&
+      (before.sid === undefined || before.sid === sid)
+    ) {
+      call.pinVerifiedAt = before.at === undefined ? verifiedAt : Math.min(before.at, verifiedAt);
+      call.pinCallSid = sid;
+    }
+    try {
+      // Saved before the voice agent hears "queued", so a restart keeps it.
+      this.#save(voice.conversationId, call);
+    } catch (error) {
+      call.held.pop();
+      if (before.at === undefined) delete call.pinVerifiedAt;
+      else call.pinVerifiedAt = before.at;
+      if (before.sid === undefined) delete call.pinCallSid;
+      else call.pinCallSid = before.sid;
+      throw error;
+    }
     return "queued";
   }
 
   /** This call's memory, created if new; forgets expired calls, and the oldest past `MAX_CALLS`. */
   #memory(conversationId: string, now: Date): CallMemory {
-    this.#forget(now, conversationId);
+    void this.#forget(now, conversationId);
     let memory = this.#calls.get(conversationId);
     if (memory === undefined) {
       memory = { sessionIds: [], nicknames: [], held: [], expires: now.getTime() + CALL_MEMORY_MS };
@@ -341,14 +516,21 @@ export class InboundLine {
     return memory;
   }
 
-  /** Forgets calls past `CALL_MEMORY_MS` (their instructions are never queued), and the oldest past `MAX_CALLS`. */
-  #forget(now: Date, keep?: string): void {
+  /**
+   * Forgets calls past `CALL_MEMORY_MS` (their instructions are never queued),
+   * and the oldest past `MAX_CALLS`, in memory and in the store. The returned
+   * promise settles once the owner was texted about lost instructions; it
+   * never rejects.
+   */
+  #forget(now: Date, keep?: string): Promise<void> {
     let lost = 0;
     for (const [id, memory] of this.#calls) {
       // The call being served is never evicted for space, only when it expired.
       const spare = id === keep || this.#calls.size <= MAX_CALLS;
       if (memory.expires > now.getTime() && spare) continue;
       this.#calls.delete(id);
+      // Only a call that held an instruction was saved.
+      if (memory.held.length > 0) this.#deleteSaved(id);
       // The voice agent told the owner these were queued: say they were not.
       for (const held of memory.held.filter((h) => !h.done)) {
         this.#store.appendAudit("voice.instruction-unconfirmed", { reason: "no post-call event" }, now, {
@@ -357,12 +539,10 @@ export class InboundLine {
         lost += 1;
       }
     }
-    if (lost > 0) this.#saveHeld();
-    if (lost > 0) {
-      this.#text(INBOUND_TEXTS.notQueued(lost), "instruction-not-queued", now).catch((error: unknown) =>
-        this.#options.log?.().warn({ err: error }, "could not text about instructions not passed on"),
-      );
-    }
+    if (lost === 0) return Promise.resolve();
+    return this.#text(INBOUND_TEXTS.notQueued(lost), "instruction-not-queued", now).catch((error: unknown) =>
+      this.#options.log?.().warn({ err: error }, "could not text about instructions not passed on"),
+    );
   }
 
   /**
@@ -380,6 +560,7 @@ export class InboundLine {
     }
     const memory = this.#calls.get(event.conversationId);
     if (memory === undefined || memory.held.length === 0) {
+      // Never saved: a call is saved only once it holds an instruction.
       this.#calls.delete(event.conversationId);
       return;
     }
@@ -411,7 +592,7 @@ export class InboundLine {
       held.done = true;
     }
     this.#calls.delete(event.conversationId);
-    this.#saveHeld();
+    this.#deleteSaved(event.conversationId);
     // One text closes the loop either way: the voice agent said "queued" before
     // the transcript was checked. Counts only, never the words.
     if (notQueued > 0) {
@@ -516,9 +697,25 @@ export class InboundLine {
   async pinLockout(direction: PinCallDirection): Promise<void> {
     const now = this.#options.clock();
     this.#store.appendAudit("voice.pin-lockout", { direction }, now);
-    const last = this.#lockoutTexted[direction];
+    // When the last one went out is saved, so a restart does not allow another early.
+    let saved: Partial<Record<PinCallDirection, unknown>> = {};
+    try {
+      const state = this.#store.getState(LOCKOUT_TEXTED_KEY);
+      if (typeof state === "object" && state !== null) saved = state as typeof saved;
+    } catch {
+      // This run's own record still applies.
+    }
+    const times = [saved[direction], this.#lockoutTexted[direction]].filter(
+      (at): at is number => typeof at === "number" && Number.isFinite(at),
+    );
+    const last = times.length === 0 ? undefined : Math.max(...times);
     if (last !== undefined && now.getTime() - last < LOCKOUT_TEXT_MS) return;
     this.#lockoutTexted[direction] = now.getTime();
+    try {
+      this.#store.putState(LOCKOUT_TEXTED_KEY, { ...saved, [direction]: now.getTime() });
+    } catch {
+      // This run still remembers it.
+    }
     await this.#text(INBOUND_TEXTS.lockout(direction), "pin-lockout", now);
   }
 

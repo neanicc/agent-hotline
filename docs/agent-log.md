@@ -3149,3 +3149,171 @@ Template:
   - `docs/install.md` says that whole `ANTHROPIC_*` and `OPENAI_*` prefixes
     are withheld, so a custom endpoint setting does not reach the judge
     (P3).
+
+## 2026-10-14 — HL-13b Persist PIN budgets, alarm limit, held instructions and replay memories (#78)
+
+- Decision: migration 5 (appended; 1 to 4 unchanged) adds `pin_failures`,
+  `inbound_calls` and `tool_deliveries`. The `PinGate` counts wrong PINs
+  through a `PinFailureLog` (`storedPinFailures(store)` in the daemon,
+  memory in tests), so the 6-an-hour and 10-a-day budgets per direction hold
+  across a restart. Which calls proved the PIN and each call's own two
+  attempts stay in memory on purpose: a restart makes a call give the PIN
+  again (fails closed), and a call that was mid-guess gets its two attempts
+  back, still inside the stored budgets. A failure log that cannot be read
+  or written refuses the attempt without checking the PIN.
+- Decision: the forgery alarm's and each direction's lockout text's last send
+  time are in `daemon_state` (`security.forgery-texted-at`,
+  `inbound.lockout-texted-at`), merged with the run's own record so a store
+  error never allows extra texts.
+- Decision: a call that holds an instruction is saved (`inbound_calls`)
+  with its session numbering whenever either changes, the instruction and the
+  owner's words redacted first, and loaded in the `InboundLine` constructor,
+  before any route serves. The post-call event confirms them against the
+  pulled transcript as usual; after a restart that is the redacted copy, so
+  an instruction with a secret in it fails closed. The row is deleted when
+  the event is handled or the call is forgotten (past its hour, which a
+  start also checks). A saved call that does not parse is deleted, audited
+  (`unreadable`) and texted about. The old `inbound.held` counts are still
+  read once, so the first start after upgrading tells the owner what a
+  pre-HL-13b run lost.
+- Decision: server-tool deliveries that changed state are kept in
+  `tool_deliveries` for their two hours, so a replayed `verify_pin` or
+  `send_instruction` after a restart gets the first response and does not
+  run again (with held instructions now persisted, a replayed
+  `send_instruction` could otherwise have held a duplicate). Deliveries still
+  running stay in memory. A store that cannot be read answers `busy`; one that
+  cannot be written keeps the delivery in memory for this run.
+- Decision: the post-call replay memory is not persisted. A replay after a
+  restart (it needs a signature inside the 30 minute window) is pulled and
+  handled again and changes nothing: call orchestration's saved state ignores
+  it (`voice.post-call-ignored`, existing test in `orchestration.test.ts`),
+  the inbound line deleted the call's held instructions when it handled the
+  event and `addInstruction` is idempotent by id (new test in
+  `inbound-line.test.ts`), and the inbound call record is an upsert.
+- Decision (issue P3, partly done here): each server tool gets `maxInFlight`
+  8 and a 5 second body deadline, as the post-call route has. The SMS route's
+  cap was tried and removed after review (see below).
+  The other P3 (count texts sent outside the queue against `textsPerHour`
+  and `textsPerDay`) touches call policy and is left as a follow-up.
+- `docs/security.md` is not on main yet (HL-13, PR #77, is open), so the
+  residual-risk and follow-up notes went into `docs/daemon.md`; updating
+  security.md's "Accepted residual risks" and "Follow-ups" for HL-13b is a
+  follow-up once #77 lands.
+- Evidence: `scripts/ci/run.sh build` (lint, typecheck) and `test` pass.
+  New tests reopen the store (`persisted-limits.test.ts`: migration from
+  schema 4, hourly and daily PIN budgets across reopens, a broken failure log
+  refusing unchecked, the forgery alarm and lockout text limits across a
+  reopen, tool deliveries), restart the whole daemon on the same home
+  (`restart-limits.test.ts`: the hourly budget and the daily cap hold across
+  restarts; a replayed guess after a restart is answered from the store and
+  not counted), and restart the inbound line (held instructions confirmed by
+  the next run's post-call event, session numbers and caps kept, expired and
+  unreadable saved calls texted once, pre-HL-13b counts). The old test that
+  expected a restart to drop held instructions now asserts that they are
+  kept. Route tests cover a replay after a restart, a broken delivery store,
+  and the new in-flight caps. Mutation checks, each reverted: the PIN log not
+  stored in `runDaemon` (3 tests fail), the delivery memory not stored (1),
+  the inbound line not restoring (5), the alarm or the lockout limit ignoring
+  the store (1 each), the in-flight caps removed (4). The scenario suite
+  could not be run locally (the sandbox refuses commands containing its
+  stage name); hosted CI runs it. No real call, text or credential was used.
+- CI fix: the first push also saved every call that only heard the status.
+  That doubled the writes per `get_status`, and on the Ubuntu runner the
+  1001-call cap test went from 1.3 s to past its 5 s timeout. Such calls are
+  no longer saved; after a restart they get `unknown-session` until the
+  status is read again (fails closed). The timeout was not changed.
+- Review fixes (Greptile and staff review of 2096831):
+  - Greptile P1, held instructions lose PIN proof: on an inbound call the
+    post-call transcript counts the person's turns as the owner's only after
+    the PinGate's verification time, which a fresh PinGate does not have, so a
+    restored instruction could never be confirmed through the real route (the
+    unit test had passed an owner-labelled transcript straight to `postCall`).
+    `send_instruction` now passes the PIN time with the instruction. The inbound
+    line saves it with the call (earliest wins), and the route's owner context
+    uses the earlier of it and this run's PinGate time
+    (`savedPinVerifiedAt`). It only labels the finished transcript; live tools
+    still need the PIN again. New route-level test: PIN, status and
+    instruction, restart, then the real signed post-call webhook queues the
+    instruction (fails with the saved time ignored).
+  - Greptile P1, same right PIN after a restart stays unverified: the
+    byte-identical `verify_pin` was answered from the stored delivery without
+    touching the new PinGate. A remembered `verified: true` on a call this
+    run has not verified is now checked again; remembered wrong guesses are
+    still answered from memory.
+  - Greptile P2: a damaged `tool_deliveries` row now throws instead of
+    reading as "never delivered", so the tool answers `busy` and does not
+    run again.
+  - Staff review P2s: `#restore` no longer throws from the constructor (a bad
+    table counts as unreadable and the owner is texted), and deleting a saved
+    call cannot throw past the audit and text about lost instructions.
+  - Staff review P3s (SMS slots can delay a genuine text; two prunes and a
+    count per tool call) are documented and left as they are.
+- Staff review of 6bb2854: (P2) a test now holds an instruction with a
+  redactable secret, restarts, and shows the post-call event queues nothing
+  and texts the owner (it fails closed, as documented). (P3) the residual
+  risk of the `tool_deliveries` key (a plain SHA-256 of a `verify_pin` body
+  that holds the PIN, kept two hours) is written up in `docs/daemon.md`. It
+  adds little over the scrypt `pinHash` such a reader already has.
+- Staff review of 9495874:
+  - (P2) The `tool_deliveries` key was an unsalted hash of a body that holds
+    the PIN, so the database alone gave the PIN away in milliseconds. It is
+    now an HMAC under the tool secret, which never enters the database. Test:
+    no stored key equals the plain hash of the body.
+  - (P2) An unauthenticated sender could hold all 8 SMS slots and starve the
+    owner's texts. The cap is now 32 with a 2 second body deadline, so that
+    takes many more connections; the trade-off and its fail-closed outcome are
+    documented. Reserving capacity for genuine Twilio requests is a
+    follow-up.
+  - (P3) A comment states that a saved PIN time covers this call's turns
+    after a restart.
+  - (P3) Saving new session numbers in `get_status` cannot fail the status
+    any more.
+- Staff review of 6404cf2 (P2): any cap on the SMS route lets an
+  unauthenticated sender crowd out the owner's only text channel, which is a
+  new availability limit compared with main. The SMS cap and its tests are
+  removed, so the route is as it was on main. The server-tool caps stay,
+  because only a holder of the tool secret can take a slot there. Bounding the
+  SMS route with capacity reserved for genuine Twilio requests is a
+  follow-up. (P3s: the saved PIN time widening the owner-turn window goes into
+  security.md with #77; splitting `SavedCall` out of `inbound-line.ts` waits
+  for HL-13c.)
+- Staff review of 2a4c2cb (P2): the saved PIN time let turns after a
+  restart, before the PIN was given again, count as the owner's. The owner
+  context gained an optional `pinLapse` (`@hotline/providers`): from this
+  run's start until this run's PinGate verifies the call (open-ended if it
+  never does), turns are the caller's. Route-level tests: a yes said before
+  the restart confirms the held instruction, a yes after it does not, and a
+  yes after the PIN is given again does (the lapse removed: 1 test fails).
+  (P3) The recheck comment now ties it to the identical body and HMAC key;
+  the wrong-guess test already pins that other responses are not rechecked.
+  (P3) Follow-up issues for security.md and the SMS cap are left to the
+  conductor; this run does not create issues.
+- Security review of 0b85aa5 (coordinator), both fixed failing closed:
+  - Replay through the delivery cache: a remembered response used to be
+    returned before the pull, so a recorded state-changing body replayed
+    after the call ended still got its answer. Every delivery is now pulled
+    and checked as a live call with the owner first; only then is the
+    delivery memory consulted. `get_status` is never remembered. Tests: a
+    `submit_answer` replay after a restart answers from memory without
+    re-running while the call goes on, and gets the refusal once it is over
+    (fails against the previous route code); a `get_status` replayed after
+    the call ended reveals nothing.
+  - Saved PIN drift: the saved PIN time is now stored with the call SID it
+    was given on, and counts only when the pulled record has the same call
+    SID and the time falls within the call's start and end. It never serves
+    a live tool, and it is deleted with the call. Tests: restart mid-call
+    (confirmed), a different call SID or a time outside the call (not
+    confirmed; each binding removed makes its test fail), and the existing
+    live-tool test.
+- Staff review of e86792a: (P2) the suggestion to drop the saved-PIN
+  machinery and require the PIN again is not taken. Without it, a held
+  instruction on an inbound call can never be confirmed after a restart,
+  which is the ticket's third done-when item. It stays bound to the call SID
+  and window, and fails closed. (P2) A test now covers PIN repeats answered
+  from this run's fallback memory when the store cannot write. A key can be
+  counted in both the fallback and the store only after a recheck, which only
+  makes `busy` come sooner. The P3s are left as they are.
+- Open issues or follow-ups: bound `/hooks/twilio/sms` with reserved capacity
+  for genuine Twilio requests; security.md update after #77; count out-of-queue
+  texts against the text rate limits; HL-13c (#80) retries processing records
+  and normalises the SMS body comparison in the same files.

@@ -127,6 +127,12 @@ the `twilio.accountSid` and `twilio.authToken` secrets exist. Otherwise it logs
 
 - **Precheck:** an `X-Twilio-Signature` header and a form content type, or `403`
   before the body is read.
+- **Not bounded yet:** unlike the post-call and server-tool routes, this
+  route has no in-flight cap or body deadline. Anyone can send a signature
+  header, and the signature can only be checked over the body, so a plain cap
+  would let an unauthenticated sender hold every slot and shut out the
+  owner's texts. HL-13b tried one and took it out for that reason. Bounding
+  it while reserving room for genuine Twilio requests is a follow-up.
 - **Verify:** the signature is recomputed with Twilio's documented algorithm
   (`validTwilioSignature` in `@hotline/providers`) over the exact public URL
   (`publicUrl` origin plus the raw path and query) and the form parameters, and
@@ -161,7 +167,8 @@ the `twilio.accountSid` and `twilio.authToken` secrets exist. Otherwise it logs
   unhandled so Twilio's retry can get through, and a copy that arrives while
   the first is still being handled waits for that attempt, then either answers
   with empty TwiML or, if the attempt failed, handles the message itself.
-  Durable replay protection is HL-13.
+  Across restarts, call orchestration's `inbound_messages` table remembers
+  each SID for 400 days (see [Store](#store)).
 - **Replies are redacted:** a reply the owner handler returns goes through the
   required `redact` option (the daemon's redactor) and the SMS length check
   before it is put in the TwiML. One that is empty after redaction or longer
@@ -177,10 +184,40 @@ records it in the audit log as `sms.received` with its SID and reply type
 
 ### ElevenLabs (`/hooks/el/*`)
 
-Known limit: the PinGate's attempt counters, its verified calls and both replay
-memories are in memory, so a daemon restart resets them. Per-call limits (2
-wrong PINs) still apply after a restart; the hourly budget starts again.
-Persisting them is HL-13 work.
+**What a restart keeps (HL-13b).** The PinGate's hourly and daily budgets of
+wrong PINs (`pin_failures`), the server-tool delivery memory
+(`tool_deliveries`), the held instructions of inbound calls with their
+session numbers (`inbound_calls`), and when the forgery alarm and each direction's
+lockout text last went out (`daemon_state`) are in SQLite, so a restart hands
+a PIN guesser no fresh budget, does not run a replayed tool call again, and
+allows no early second text. Two things stay in memory on purpose, both
+failing closed: which calls proved the PIN (after a restart a call is asked
+for it again; until then `get_status` and `send_instruction` answer
+`pin-required`), and each call's own two attempts (a call that was
+mid-guess gets them back, still inside the stored budgets). The owner saying
+the same right PIN again on the same call sends a byte-identical
+`verify_pin`; a remembered `verified: true` is therefore checked again when
+this run's PinGate has not verified the call (a right PIN spends no budget),
+while a remembered wrong guess is still answered from memory. When a call
+holds an instruction, the time it passed the PIN is saved with it, together
+with the call SID it was given on. The post-call check uses it only for that
+call: the pulled record must carry the same call SID, and the time must fall
+within the call (from its start to its end as the record has them).
+Otherwise it is ignored, and the held instructions are confirmed against
+this run's PinGate alone, which usually means not at all. When it counts,
+the owner's turns start at the earlier of the saved time and this run's
+PinGate time. It never serves a live tool. The saved
+time covers the call only up to this run's start: turns after the restart
+count as the owner's again only once the PIN is given again in this run
+(`pinLapse` in the owner context). Turns while the daemon was down still
+count, since the person on the call had already proved the PIN. The
+post-call replay memory stays in memory too; why a replay after a restart is
+harmless is under "Once per event" below. If the PIN budgets cannot be read
+or written, the attempt is refused without checking the PIN; if the delivery
+memory cannot be read, or a saved response is damaged, the tool answers
+`busy`; if it cannot be written, the delivery is remembered for this run
+only. If the saved calls cannot be read at start, the daemon still starts and
+the owner is texted that instructions may not have been passed on.
 
 **Verified by pull (HL-13a).** The tool secret and the post-call HMAC secret
 can be read by any process running as the owner, so neither proves a request
@@ -213,10 +250,21 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
   `elevenlabs.toolSecret`, compared in constant time (both sides hashed with
   SHA-256), and the content type must be JSON, or `403` before the body is
   read. An empty secret never matches. `verify` repeats the secret check.
+- **Bounded:** each tool reads or handles at most 8 calls at once
+  (`MAX_TOOL_CALLS_IN_FLIGHT`, HL-13b), each given 5 seconds to deliver its
+  body; more get the `403`. Only a sender with the tool secret gets that far.
 - **Once per delivery:** `submit_answer`, `verify_pin` and `send_instruction`
-  remember each delivery (tool name and exact body) for two hours. A repeat,
-  such as an ElevenLabs retry or a replay, gets the first response and the
-  handler does not run again, so a repeated wrong PIN spends no attempt. Only
+  remember each delivery (tool name and exact body) for two hours. Every
+  delivery, a repeat included, is first checked against ElevenLabs' record
+  (this agent's live call with the owner, with the same numbers and call
+  SID); only then does a repeat, such as an ElevenLabs retry or a replay,
+  get the first response (a result or a PIN verdict, nothing else), and the
+  handler does not run again, so a repeated wrong PIN spends no attempt. A
+  replay once the call is over gets the refusal, never the remembered
+  response. The cost: every repeat, an ElevenLabs retry included, makes one
+  ElevenLabs conversation GET, bounded by the 8 in-flight calls per tool. If
+  retries turn out to be common, a short memo of a recent live pull per
+  conversation would cut that. Only
   deliveries that changed state are remembered (`recorded`, `queued`, or a PIN
   attempt); anything else (`pin-required`, `needs-pin`, `not-recorded`,
   `invalid`, `refused`) or a failure is forgotten, so the same call can succeed
@@ -229,8 +277,13 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
   remembered delivery is never evicted before its window ends: with 1000 live
   ones (only possible with the tool secret), a new delivery gets
   `{"result": "busy"}` and does not run. `get_status` only
-  reads, after the PIN, and runs every time. The memory does not survive a
-  restart (HL-13).
+  reads, after the PIN, and runs every time. Remembered deliveries are kept in
+  the store (`tool_deliveries`), so a replay after a restart also gets the
+  first response (HL-13b); deliveries still running are in memory. The key
+  is an HMAC-SHA256 of the tool name and body under the tool secret, which
+  lives in the Keychain or the `0600` secrets file and never in the
+  database. A `verify_pin` body holds the PIN, and a plain hash in the
+  database could be reversed by trying every 4 to 8 digit PIN.
 - **Owner on the call:** the body's `caller_id` or `called_number`, which
   ElevenLabs fills from `system__caller_id` and `system__called_number`, must be
   `owner.phoneNumber`. Otherwise the answer is `{"result": "refused",
@@ -311,12 +364,19 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
   for a conversation is handled once. A replay, or a retry after success, gets
   `200` and is ignored, whatever its signature header looks like. Events are
   remembered for 35 minutes, past the signature's age limit. A failed handler
-  leaves the event unhandled, so ElevenLabs' retry gets through. The memory
-  does not survive a restart, so a signed body replayed within its 30 minute
-  window after a restart is handled again: call orchestration ignores an event
-  for a call it is no longer waiting on. Live events are never evicted: with 1000 held, a new
-  one gets `503` so ElevenLabs retries it later. Durable replay protection is
-  HL-13.
+  leaves the event unhandled, so ElevenLabs' retry gets through. Live events
+  are never evicted: with 1000 held, a new one gets `503` so ElevenLabs
+  retries it later. This memory is not persisted (HL-13b decided it need not
+  be): a signed body replayed within its 30 minute window after a restart is
+  pulled and handled again, and changes nothing, because everything it could
+  act on is already in SQLite. Call orchestration's saved state knows the call
+  is over and ignores it (`voice.post-call-ignored`); the inbound line deleted
+  the call's held instructions when it handled the event, and
+  `addInstruction` is idempotent by id, so nothing is queued or texted twice;
+  the inbound call record is an upsert by conversation. Tests:
+  `orchestration.test.ts` ("a replayed post-call event after a restart changes
+  nothing") and `inbound-line.test.ts` ("keeps held instructions across a
+  restart").
 - **Known limits:** on an outbound call, whoever picks up the owner's phone
   counts as the owner (high-risk approvals still need the PIN). The inbound
   PIN boundary compares the daemon's clock with ElevenLabs' call start time
@@ -894,13 +954,22 @@ anyone else's text the generic SMS reply.
   gets one text either way, with counts only: that it was queued, or that it
   was not passed on (and how many others were queued), since the voice agent
   said `queued` before the transcript was checked. The held instructions and the call's
-  numbering live in memory for an hour. Past that without a post-call event
-  they are dropped, audited (`no post-call event`) and the owner gets the same
-  "not passed on" text. A restart before the post-call event drops them too
-  (fail closed; the PinGate's verification is in memory, so nothing would
-  count as the owner's anyway), but how many each call held is saved in
-  `daemon_state` (`inbound.held`, counts only), so the next start audits them
-  (`restarted`) and texts the owner once. The Stop hook looks for
+  numbering are kept for an hour in memory. A call is also saved in the
+  store (`inbound_calls`, HL-13b) once it holds an instruction, with its
+  numbering, the instruction and the owner's words redacted first. A call
+  that only heard the status is not saved (a write per status was too
+  costly for what it keeps): after a restart it gets `unknown-session` until
+  the status is read again. Past that without a post-call event they are dropped, audited
+  (`no post-call event`) and the owner gets the same "not passed on" text.
+  A restart keeps them: the next run loads them before any route serves, and
+  the post-call event confirms them against the pulled transcript as usual,
+  with the owner's turns told apart by the PIN time saved with them (after a
+  restart, against the redacted copy, so an instruction with a secret in it
+  fails closed). On start, calls past their hour are dropped as
+  above, and a saved call that does not read back is deleted, audited
+  (`unreadable`) and texted about. A run before HL-13b saved only counts
+  (`daemon_state` `inbound.held`); the first start after upgrading audits
+  them (`restarted`) and texts the owner once. The Stop hook looks for
   instructions only with the agent's own session id, so it never registers a
   throwaway session to look.
 - **Delivery.** Each instruction is handed over once, oldest first, to the
@@ -921,7 +990,9 @@ anyone else's text the generic SMS reply.
   only on a call Hotline placed, so an inbound call answers no ask, PIN or not.
   The plan's inbound line reads status and takes instructions only.
 - **Lockouts.** `PinGate.onLockout` is audited (`voice.pin-lockout`) and texted
-  to the owner, at most once an hour per direction, quiet hours or not.
+  to the owner, at most once an hour per direction, quiet hours or not. When
+  each direction's text last went out is saved (`daemon_state`
+  `inbound.lockout-texted-at`), so a restart allows no early second one.
 - **Inbound call records.** Each inbound call's post-call event stores a
   `CallRecord` (direction `inbound`, no asks, `answered` when anything the
   person said counted as the owner's, else `rejected`) with its duration and
@@ -975,7 +1046,16 @@ session's queued ones (dropping expired ones in the same transaction), and
 `ackInstructions` marks the given ids delivered in one transaction.
 `addInstruction` is idempotent by id.
 `onAskAdded` tells listeners about each new ask, as `onAskChange` does about
-status changes.
+status changes. Migration 5 (HL-13b) adds what must survive a restart:
+`pin_failures` (each wrong PIN's direction and time, for the PinGate's hourly
+and daily budgets; older than a day is pruned), `inbound_calls` (the inbound
+line's memory of a call that holds an instruction: the session numbers its
+status read out and the instructions it holds until the post-call event, the
+words redacted; deleted
+once the event is handled or the call is forgotten) and `tool_deliveries`
+(state-changing server-tool deliveries by hash, with the response each got,
+for two hours). Times in these three are epoch milliseconds. The forgery
+alarm's and the lockout text's last send times are in `daemon_state`.
 
 - Migrations are an append-only list (`MIGRATIONS`). `PRAGMA user_version` counts
   how many have run. Each runs in its own transaction, so a failure leaves the
