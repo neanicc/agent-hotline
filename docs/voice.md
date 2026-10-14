@@ -12,12 +12,21 @@ audio, and the repository never contains voice samples or recordings.
 The voice agent is an ElevenLabs Agents conversational agent whose prompt, first
 message and tools live in code:
 [`packages/providers/src/elevenlabs-agent.ts`](../packages/providers/src/elevenlabs-agent.ts)
-(`AGENT_PROMPT`, `AGENT_FIRST_MESSAGE`, `AGENT_DEFINITION_VERSION`, currently 2).
+(`AGENT_PROMPT`, `AGENT_FIRST_MESSAGE`, `AGENT_DEFINITION_VERSION`, currently 3).
 
 It sounds like a calm, friendly teammate with a quick heads-up:
 
 - Short, casual sentences; one or two per turn, one ask at a time, then it
   listens. If you talk over it, it stops.
+- It reads each ask on its own turn, in the ask's own words (its key words,
+  the session name and the tool), and waits for your answer before the next
+  ask. It never reads two asks in one turn, and when it asks again or checks
+  what you meant it reads the same ask again rather than rewording it. The
+  daemon only counts your answer when it follows a turn it recognises as that
+  ask's reading, so a reworded or combined reading gets no answer
+  ([daemon.md](daemon.md#call-orchestration)). Free-text answers (your answer
+  to a question, or what an agent should do next) are sent on in your own
+  words, verbatim, never summed up.
 - It says which session is calling before each ask ("Claude in demo-app has a
   question"), reads options as numbers ("option 1, ...; option 2, ..."),
   repeats your decision back, and before hanging up sums up what you decided.

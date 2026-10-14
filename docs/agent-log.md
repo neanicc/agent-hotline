@@ -1207,3 +1207,52 @@ Template:
     texts no longer work.
   - P2 (split the orchestrator before HL-10) and P3 (measure false "no answer"
     in the live check) stay follow-ups.
+
+## 2026-10-14 — HL-14b Persona reads each ask on its own turn (#PR)
+
+- Decision / change: the voice agent prompt now tells the model how to read
+  asks so the daemon's voice confirmation (`voice-confirm.ts`) can match the
+  owner's answers. `AGENT_DEFINITION_VERSION` is 3. Additions only, in the
+  outbound steps: step 1 reads each ask in its own turn in the ask's own words
+  (key words, session name, tool), never two asks in one turn, waiting for the
+  answer before the next, and says why (a reworded or combined reading gets no
+  answer); step 3 sends a `text` decision as the owner's words verbatim, never
+  summed up, shortened, corrected or added to; step 6 re-reads the same ask, not
+  a paraphrase, to ask again or check what the owner meant. The `submit_answer`
+  tool's `text` description also says "their own words, verbatim". No existing
+  sentence changed: the snapshot diff is the three appended sentences and the
+  `definition-v3` tag, and `SAFETY_RULES` passes unchanged.
+- Decisions (no human available):
+  - The rules sit in the outbound steps, after the untrusted-text rule, not in
+    the persona section, since they serve the decision check rather than tone.
+    Steps keep their numbers, so the diff stays additive.
+  - Reading an ask in its own words may run past the persona's "one or two
+    short sentences"; the prompt says that is fine, and still excludes what is
+    never read out (ids, paths, URLs), so a path-heavy ask may fall below the
+    match threshold and fail closed.
+  - The fake voice provider is unchanged: it already reads each ask's `asks`
+    line as its own agent turn and submits scripted text verbatim. It does not
+    model re-reads.
+- Evidence (automated, worktree, Node 24.11.0 locally): `scripts/ci/run.sh
+  build` passes; `CI=true scripts/ci/run.sh test` passes (918 tests in 42
+  files). New `packages/daemon/test/persona-readings.test.ts` plays the fake
+  voice agent for one, two and four asks (permission, question with options,
+  high-risk permission, finished turn) and checks `readings()` finds each ask
+  exactly once, in order, and that each answer confirms; also an
+  out-of-order answer, a free-text answer confirming only verbatim, and a
+  turn combining two asks reading neither (both answers fail closed). New
+  prompt tests in `elevenlabs-agent.test.ts`. Mutation checks on the fake, each
+  reverted: reading all asks in one turn (4 of 6 new tests fail); reading only
+  "Ask N, from <session>, <kind>" without the ask's text (4 fail; the one-ask
+  case still matches on session and tool words, which is the existing
+  threshold). Scenario suite: not built yet (HL-12). No ElevenLabs request was
+  made and no real call was placed: whether the real model follows these rules
+  is a live-check item (added to `docs/live-check.md`).
+- Open issues or follow-ups:
+  - HL-11: re-apply the agent and tools (version 3) on `hotline init`;
+    `hotline doctor` compares the version.
+  - Live check (HL-16): count `voice.answer-unconfirmed` on real calls with two
+    or more asks before tuning the reading threshold.
+  - Two asks in one call whose key words are one inside the other (such as
+    `git push origin main` and `git push origin main --force` from one session)
+    tie on the longer one's reading and fail closed.
