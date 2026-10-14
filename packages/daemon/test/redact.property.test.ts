@@ -144,7 +144,7 @@ describe("redactor fuzzing: secrets", () => {
           expect(leaks(output, template, [secret, form]), JSON.stringify({ text, output })).toEqual([]);
         },
       ),
-      { numRuns: 1500 },
+      { numRuns: 5000 },
     );
   });
 
@@ -168,7 +168,7 @@ describe("redactor fuzzing: secrets", () => {
           }
         },
       ),
-      { numRuns: 1000 },
+      { numRuns: 4000 },
     );
   });
 
@@ -185,7 +185,7 @@ describe("redactor fuzzing: secrets", () => {
           expect(leaks(output, template, [value, form]), JSON.stringify({ text, output })).toEqual([]);
         },
       ),
-      { numRuns: 1500 },
+      { numRuns: 5000 },
     );
   });
 
@@ -202,7 +202,7 @@ describe("redactor fuzzing: secrets", () => {
           expect(leaks(output, template, [value]), JSON.stringify({ text, output })).toEqual([]);
         },
       ),
-      { numRuns: 1500 },
+      { numRuns: 5000 },
     );
   });
 });
@@ -234,7 +234,7 @@ describe("redactor fuzzing: PINs and phone numbers", () => {
         const encoded = [...secret].map((digit) => `%3${digit}`).join("");
         expect(known.text(`said=${encoded} ok`).includes(secret)).toBe(false);
       }),
-      { numRuns: 2000 },
+      { numRuns: 5000 },
     );
   });
 
@@ -281,7 +281,7 @@ describe("redactor fuzzing: PINs and phone numbers", () => {
           expect(leaks(output, template, forms), JSON.stringify({ text, output })).toEqual([]);
         },
       ),
-      { numRuns: 2000 },
+      { numRuns: 5000 },
     );
   });
 });
@@ -331,7 +331,7 @@ describe("redactor fuzzing: linear time", () => {
         const ratio = hostileRatio((input) => known.text(input), hostile);
         expect(ratio, JSON.stringify(unit)).toBeLessThan(MAX_HOSTILE_RATIO);
       }),
-      { numRuns: 40 },
+      { numRuns: 80 },
     );
   });
 

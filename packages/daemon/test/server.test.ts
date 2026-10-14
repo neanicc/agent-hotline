@@ -263,7 +263,9 @@ describe("verified webhook routes", () => {
     await app.close();
   });
 
-  it(`read at most ${WEBHOOK_BODY_LIMIT / 1024} KiB before verifying, unless the route sets its own limit`, async () => {
+  it("read at most 64 KiB before verifying, unless the route sets its own limit", async () => {
+    // HL-13 cut this from 256 KiB: an unsigned sender gets the daemon to read less.
+    expect(WEBHOOK_BODY_LIMIT).toBe(64 * 1024);
     const app = server(() => true);
     const payload = (size: number) => ({ a: "x".repeat(size - 10) });
     expect(
