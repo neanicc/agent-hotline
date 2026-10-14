@@ -93,6 +93,13 @@ const PHONE_CANDIDATE =
 /** Any bare run of 10 to 15 digits, even inside a word: masked as a phone number. */
 const DIGIT_RUN = /(?<!\d)\d{10,15}(?!\d)/g;
 
+/**
+ * Digits, optionally joined by short runs of phone formatting (`+`, `%2B`,
+ * spaces, dots, dashes, parentheses). Each repetition consumes a digit and the
+ * separators are never digits, so matching is linear.
+ */
+const DIGIT_CLUSTER = /(?:\+|%2[Bb])?\(?\d(?:[\s().-]{0,3}\d)*/g;
+
 function maskPhone(match: string): string {
   const digits = match.replace(/\D/g, "");
   const international = match.startsWith("+") || /^%2b/i.test(match);
@@ -101,13 +108,6 @@ function maskPhone(match: string): string {
   const min = international ? 8 : 10;
   if (count < min || count > 15) return match;
   return `***${digits.slice(-4)}`;
-}
-
-/** A number that could be a phone number written without formatting. */
-function looksLikePhoneNumber(value: number): boolean {
-  if (!Number.isSafeInteger(value)) return false;
-  const digits = String(Math.abs(value)).length;
-  return digits >= 10 && digits <= 15;
 }
 
 export interface Redactor {
@@ -119,11 +119,15 @@ export interface Redactor {
    * secret-looking keys are removed.
    */
   value(input: unknown): unknown;
-  /** Also removes this exact value wherever it appears (values shorter than 8 characters are ignored). */
+  /**
+   * Also removes this exact value wherever it appears, raw, URL-encoded or
+   * JSON-escaped (values shorter than 8 characters are ignored).
+   */
   addSecret(secret: string): void;
   /**
-   * Also removes a short all-digit secret, the owner's PIN, wherever it stands on
-   * its own (not inside a longer digit run). Accepts 4 to 8 digits.
+   * Also removes a short all-digit secret, the owner's PIN (4 to 8 digits). Any
+   * digit run or formatted number containing it is removed whole, which errs
+   * towards removing too much.
    */
   addShortSecret(digits: string): void;
 }
@@ -147,24 +151,43 @@ export function createRedactor(knownSecrets: Iterable<string> = []): Redactor {
   const secrets = new Set<string>();
   const shortSecrets = new Set<string>();
   let exact: RegExp | undefined;
-  let exactShort: RegExp | undefined;
 
   const addSecret = (secret: string) => {
-    if (secret.length < 8 || secrets.has(secret)) return;
-    secrets.add(secret);
-    exact = new RegExp(alternation(secrets), "g");
+    if (secret.length < 8) return;
+    // Also the forms a secret takes inside a URL or a JSON string.
+    const uri = encodeURIComponent(secret);
+    const forms = [secret, uri, uri.replace(/%[0-9A-F]{2}/g, (hex) => hex.toLowerCase())];
+    forms.push(JSON.stringify(secret).slice(1, -1));
+    const before = secrets.size;
+    for (const form of forms) secrets.add(form);
+    if (secrets.size !== before) exact = new RegExp(alternation(secrets), "g");
   };
   for (const secret of knownSecrets) addSecret(secret);
 
   const addShortSecret = (digits: string) => {
     if (!/^\d{4,8}$/.test(digits)) throw new Error("A short secret must be 4 to 8 digits");
     shortSecrets.add(digits);
-    exactShort = new RegExp(`(?<!\\d)(?:${alternation(shortSecrets)})(?!\\d)`, "g");
+  };
+
+  /**
+   * Removes every digit cluster (a run of digits, possibly formatted as a phone
+   * number) whose digits contain a registered short secret anywhere, whole. Runs
+   * before phone masking, so a masked number can never print the PIN as its last
+   * four digits, and a PIN inside a longer run or a formatted number is not missed.
+   */
+  const removeShortSecrets = (input: string): string => {
+    if (shortSecrets.size === 0) return input;
+    return input.replace(DIGIT_CLUSTER, (cluster) => {
+      const digits = cluster.replace(/\D/g, "");
+      for (const secret of shortSecrets) if (digits.includes(secret)) return REDACTED;
+      return cluster;
+    });
   };
 
   const text = (input: string): string => {
     let out = input;
     if (exact) out = out.replace(exact, REDACTED);
+    out = removeShortSecrets(out);
     if (out.length > MAX_REDACTED_TEXT) out = `${cutBeforeWord(out, MAX_REDACTED_TEXT)} [truncated]`;
     out = out.replace(PRIVATE_KEY_BLOCK, `${REDACTED} private key`);
     out = out.replace(AUTH_SCHEME, (_match, scheme: string) => `${scheme} ${REDACTED}`);
@@ -178,15 +201,18 @@ export function createRedactor(knownSecrets: Iterable<string> = []): Redactor {
       run !== REDACTED && hasLetterAndDigit(run) && !NOT_SECRET_IDS.test(run) ? REDACTED : run,
     );
     out = out.replace(PHONE_CANDIDATE, maskPhone);
-    out = out.replace(DIGIT_RUN, (run) => `***${run.slice(-4)}`);
-    // Last, so removing a PIN can never break up a phone number before it is masked.
-    if (exactShort) out = out.replace(exactShort, REDACTED);
-    return out;
+    return out.replace(DIGIT_RUN, (run) => `***${run.slice(-4)}`);
   };
 
   const value = (input: unknown, depth = 0): unknown => {
     if (typeof input === "string") return text(input);
-    if (typeof input === "number") return looksLikePhoneNumber(input) ? text(String(input)) : input;
+    if (typeof input === "number") {
+      // A number is redacted like its decimal text: phone-shaped, a registered
+      // secret, or containing the PIN.
+      const decimal = String(input);
+      const redacted = text(decimal);
+      return redacted === decimal ? input : redacted;
+    }
     if (input === null || typeof input !== "object") return input;
     if (depth >= MAX_DEPTH) return REDACTED;
     if (Array.isArray(input)) return input.map((item) => value(item, depth + 1));

@@ -105,11 +105,16 @@ message, request fields, error stacks and bindings are all covered:
   in `name=value` and JSON text lose their values too. Quoted values honour
   backslash escapes. An unterminated quote fails closed: the rest of the line is
   removed.
-- The owner's PIN, which is shorter than the 8-character minimum for known
-  secrets, can be registered with `addShortSecret` (4 to 8 digits). It is then
-  removed wherever it stands alone, never inside a longer digit run. Until the
-  inbound line (HL-10) handles a spoken or keyed PIN, key-based redaction above
-  is what protects it.
+- Known secrets (8 characters or more) are also matched URL-encoded (upper- or
+  lowercase escapes) and JSON-escaped.
+- The owner's PIN, which is shorter than that minimum, can be registered with
+  `addShortSecret` (4 to 8 digits). Any digit run or formatted number that
+  contains it anywhere is removed whole, before phone masking, so a masked number
+  can never print the PIN as its last four digits. Until the inbound line (HL-10)
+  handles a spoken or keyed PIN, the key-based redaction above is what protects
+  it.
+- Numbers are redacted like their decimal text: phone-shaped, equal to a known
+  secret, or containing the PIN.
 - Strings longer than 16 KiB are cut, along with the word at the cut, and
   marked `[truncated]`. The patterns are bounded, so redaction stays linear on
   long or hostile input.

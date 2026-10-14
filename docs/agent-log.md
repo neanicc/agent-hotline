@@ -226,6 +226,18 @@ Template:
       digit run is masked even inside a word.
     - The bias is to over-redact: ids with 10 or more consecutive digits lose
       those digits.
+  - Fourth round (coordinator follow-up on 0dc356c):
+    - (1) Every number is redacted like its decimal text, so `{input: 1234}`
+      with that PIN registered, or a number equal to a known secret, is
+      removed under any key.
+    - (2) The short-secret pass now runs before phone masking. It removes
+      whole any digit run or formatted number containing the PIN, so `12345`,
+      `12341234`, a 12-digit run ending in the PIN and `+1 (555) 555-1234` all
+      fail closed, and a masked number can never print the PIN as its last
+      four digits. The digit-cluster pattern is linear, and timed tests cover
+      four hostile shapes with a PIN registered.
+    - (3) Known secrets also match their `encodeURIComponent` form (upper- and
+      lowercase escapes) and their JSON-escaped form.
   - Not changed: webhook verification still runs after body parsing (256 KiB
     cap), which signatures over form parameters need. HL-07 can refuse a
     missing signature header earlier.

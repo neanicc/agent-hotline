@@ -217,18 +217,81 @@ describe("bypasses closed after the security review", () => {
     });
   });
 
-  it("removes a registered PIN wherever it stands alone, never inside longer numbers", () => {
+  it("removes a registered PIN wherever it appears, and any digit run around it", () => {
     const known = createRedactor();
-    known.addShortSecret("4821");
-    expect(known.text("the caller said 4821 twice: 4821.")).toBe(
+    known.addShortSecret("1234");
+    expect(known.text("the caller said 1234 twice: 1234.")).toBe(
       `the caller said ${REDACTED} twice: ${REDACTED}.`,
     );
-    expect(known.text("order 948210 and 14821")).toBe("order 948210 and 14821");
-    expect(known.value({ heard: "4821" })).toEqual({ heard: REDACTED });
-    // A phone number ending in the PIN is still masked as a phone number first.
-    expect(known.text("+15555554821")).toBe(`***${REDACTED}`);
+    expect(known.value({ heard: "1234" })).toEqual({ heard: REDACTED });
     expect(() => known.addShortSecret("12")).toThrow();
     expect(() => known.addShortSecret("abcd")).toThrow();
+  });
+
+  it.each([
+    ["12345", REDACTED],
+    ["12341234", REDACTED],
+    ["keys 991234 end", `keys ${REDACTED} end`],
+    // A 12-digit run ending in the PIN is removed whole, never masked to ***1234.
+    ["555555551234", REDACTED],
+    ["x555555551234", `x${REDACTED}`],
+    // The PIN inside a formatted phone number takes the whole number with it.
+    ["+1 (555) 555-1234", REDACTED],
+    ["call +15555551234 now", `call ${REDACTED} now`],
+    ["From=%2B15555551234", `From=${REDACTED}`],
+  ])("fails closed on the PIN inside %s", (input, expected) => {
+    const known = createRedactor();
+    known.addShortSecret("1234");
+    const out = known.text(input);
+    expect(out).toBe(expected);
+    expect(out).not.toContain("1234");
+  });
+
+  it.each([
+    "9".repeat(MAX_REDACTED_TEXT),
+    "9 ".repeat(MAX_REDACTED_TEXT / 2),
+    "(9-".repeat(MAX_REDACTED_TEXT / 3),
+    "+9    ".repeat(MAX_REDACTED_TEXT / 6),
+  ])("scans hostile digit shape %# for the PIN in under 50 ms", (input) => {
+    const known = createRedactor();
+    known.addShortSecret("1234");
+    const started = performance.now();
+    known.text(input);
+    expect(performance.now() - started).toBeLessThan(50);
+  });
+
+  it("still masks phone numbers that do not contain the PIN", () => {
+    const known = createRedactor();
+    known.addShortSecret("1234");
+    expect(known.text(`call ${OWNER}`)).toBe("call ***0100");
+  });
+
+  it("redacts numbers that equal or contain a registered secret, under any key", () => {
+    const known = createRedactor(["98765432"]);
+    known.addShortSecret("1234");
+    expect(known.value({ input: 1234, other: 512345, long: 98765432, count: 7, ratio: 0.5 })).toEqual({
+      input: REDACTED,
+      other: REDACTED,
+      long: REDACTED,
+      count: 7,
+      ratio: 0.5,
+    });
+  });
+
+  it("removes URL-encoded and JSON-escaped forms of a known secret", () => {
+    const secret = 'tok/en+va"lue\\x=9';
+    const known = createRedactor([secret]);
+    const encoded = encodeURIComponent(secret);
+    expect(known.text(`/hooks/x?k=${encoded}&a=1`)).toBe(`/hooks/x?k=${REDACTED}&a=1`);
+    expect(known.text(`lower ${encoded.replace(/%[0-9A-F]{2}/g, (e) => e.toLowerCase())}`)).toBe(
+      `lower ${REDACTED}`,
+    );
+    const json = JSON.stringify({ note: `pre ${secret} end` });
+    expect(known.text(json)).toBe(`{"note":"pre ${REDACTED} end"}`);
+    for (const out of [known.text(encoded), known.text(json)]) {
+      expect(out).not.toContain("tok");
+      expect(out).not.toContain("lue");
+    }
   });
 
   it("masks phone numbers used as object keys and as numbers", () => {
