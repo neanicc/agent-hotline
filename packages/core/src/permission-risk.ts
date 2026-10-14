@@ -658,13 +658,16 @@ function safePath(path: string, cwd: string): boolean {
  * what is read past rg's defaults are left out, so they are high: `--hidden`,
  * `--no-ignore` and `-u`/`--unrestricted` reach `.env` and `.git` with no path
  * argument naming them, and `-L`/`--follow` reads through symlinks out of the
- * project.
+ * project. So are `-g`/`--glob`/`--iglob` and `-t`/`--type`: a file a glob
+ * override or a type selects is searched even when hidden (an override also
+ * beats the ignore files), so `rg -g '.*' KEY` reads `.env`, and the `sh` type
+ * names `.bashrc` and `.zshrc`. `--type-not` only excludes and stays.
  */
 export const RIPGREP_LONG_OPTIONS: ReadonlySet<string> = new Set(
   (
     "--line-number --no-line-number --ignore-case --case-sensitive --smart-case --files-with-matches " +
     "--files-without-match --count --count-matches --word-regexp --line-regexp --fixed-strings " +
-    "--invert-match --only-matching --with-filename --no-filename --type --type-not --glob --iglob " +
+    "--invert-match --only-matching --with-filename --no-filename --type-not " +
     "--context --after-context --before-context --max-count --max-depth --files " +
     "--json --color --no-heading --heading --column --stats --regexp --sort --sortr --trim --multiline " +
     "--max-columns --vimgrep --null --quiet --text --byte-offset"
@@ -673,7 +676,7 @@ export const RIPGREP_LONG_OPTIONS: ReadonlySet<string> = new Set(
 /** Single-letter rg flags that take no value (`-z`, which runs decompressors, is not one). */
 export const RIPGREP_FLAGS = "nNiIsSlcwxFvoHhUqab";
 /** Single-letter rg options whose value is the next word or attached digits. */
-export const RIPGREP_VALUE_OPTIONS = "ABCmtTge";
+export const RIPGREP_VALUE_OPTIONS = "ABCmTe";
 
 function knownRgOption(arg: string): boolean {
   if (arg === "--" || !arg.startsWith("-")) return true;
