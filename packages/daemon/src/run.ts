@@ -94,6 +94,9 @@ export interface RunDaemonOptions {
    * `globalThis.fetch`; tests pass one that never reaches the network.
    */
   fetch?: HttpFetch;
+  // Test and scenario-suite seams. `providers` and `autoTick` must never be
+  // wired to user config, CLI flags or the environment: a substituted provider
+  // or a stopped timer would bypass the configured, owner-bound providers.
   /** For tests and the scenario suite: providers to use instead of the configured ones. */
   providers?: { voice?: VoiceProvider; sms?: SmsProvider };
   /** Whether call orchestration ticks on its own timer (default true). */

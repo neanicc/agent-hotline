@@ -1137,3 +1137,9 @@ Template:
     is asked to reply again. Decision: 10 seconds, since nobody reads a request
     and answers faster, and coded replies are unaffected. The test harness
     lets the scripted owner take 15 seconds to read. Test; the mutant fails 1.
+- Bot staff review on c675995 (approve with nits, score 89): both P2s ask for
+  follow-ups, not code. Track the false "no answer" rate of voice confirmation
+  in the live check (HL-16). Split the orchestrator (voice holding and
+  post-call; durable state and recovery) before HL-10 adds inbound handling.
+  P3: the test seams on `RunDaemonOptions` now carry a comment that they must
+  never be wired to config or the environment.
