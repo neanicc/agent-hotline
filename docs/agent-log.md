@@ -238,6 +238,20 @@ Template:
       four hostile shapes with a PIN registered.
     - (3) Known secrets also match their `encodeURIComponent` form (upper- and
       lowercase escapes) and their JSON-escaped form.
+  - Fifth round (coordinator, parser differential): form parsers decode `%XX`
+    and `+` before they read a name, which raw-text patterns missed
+    (`Dig%69ts=1234`, `Digits+=1234`, `%44igits=1234`). Each `&`/`;`/`?`/`#`/`,`
+    or whitespace segment holding an escape or `+` is also checked decoded.
+    Malformed escape runs decode byte by byte. If the decoded copy looks secret
+    and the raw copy does not, the whole raw segment is removed. With the pass
+    disabled, 6 tests fail.
+- Logging contract (documented at the top of `logger.ts` and in
+  `docs/daemon.md`):
+  - Callers log parsed, allowlisted fields only.
+  - Request logs carry method and path only.
+  - The redactor is a safety net, not the primary control.
+  - Deeper work belongs to HL-13 (#14): fuzzing the redactor, `.env` lines and
+    the threat model.
   - Not changed: webhook verification still runs after body parsing (256 KiB
     cap), which signatures over form parameters need. HL-07 can refuse a
     missing signature header earlier.

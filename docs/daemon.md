@@ -83,7 +83,16 @@ startup on Node 22 and 24. It is harmless.
 
 ## Logs
 
-JSON lines (pino, through Fastify) on stderr. Fastify logs every request as it
+The contract for every caller (also at the top of `logger.ts`):
+
+1. Log parsed, allowlisted fields only: ids, statuses, counts, method and path,
+   and a reason. Never log raw bodies, headers, query strings, provider
+   payloads, transcripts, ask text or anything an agent or caller wrote.
+2. Request logs carry the method and path only.
+3. The redactor below is a safety net, not the primary control. Code that relies
+   on it to make a raw value safe to log is a bug.
+
+JSON lines (pino, through Fastify) go to stderr. Fastify logs every request as it
 arrives, before any token or signature check, so its request serializer is
 replaced: those lines carry the method and path only, never the query string,
 headers or body. Each line is also redacted just before it is written, so the
@@ -107,6 +116,12 @@ message, request fields, error stacks and bindings are all covered:
   removed.
 - Known secrets (8 characters or more) are also matched URL-encoded (upper- or
   lowercase escapes) and JSON-escaped.
+- Form and URL parsers decode `%XX` and `+` before they read a name, so
+  `Dig%69ts=1234` arrives as `Digits=1234`. Each segment (split on `&`, `;`, `?`,
+  `#`, `,` and whitespace) that holds an escape or a `+` is also checked
+  decoded. Malformed escapes decode byte by byte. If the decoded copy holds a
+  secret assignment, credential, known secret or the PIN and the raw copy does
+  not, the whole raw segment is removed.
 - The owner's PIN, which is shorter than that minimum, can be registered with
   `addShortSecret` (4 to 8 digits). Any digit run or formatted number that
   contains it anywhere is removed whole, before phone masking, so a masked number

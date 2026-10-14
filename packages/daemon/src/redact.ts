@@ -33,6 +33,29 @@ const SECRET_ASSIGNMENT = new RegExp(
   "gi",
 );
 
+/** Non-global copies for `test`, which must not carry `lastIndex` between calls. */
+const SECRET_ASSIGNMENT_TEST = new RegExp(SECRET_ASSIGNMENT.source, "i");
+
+/** Splits text into form and URL segments, keeping the delimiters. */
+const SEGMENT_DELIMITER = /([&;?#,\s]+)/;
+
+/**
+ * Decodes a segment the way a form or query parser would: `+` becomes a space,
+ * then `%XX` escapes are decoded. A run of escapes that is not valid UTF-8 is
+ * decoded byte by byte instead of failing, so malformed input still decodes.
+ */
+function formDecode(segment: string): string {
+  return segment.replace(/\+/g, " ").replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => {
+    try {
+      return decodeURIComponent(run);
+    } catch {
+      return run.replace(/%([0-9A-Fa-f]{2})/g, (_escape, hex: string) =>
+        String.fromCharCode(Number.parseInt(hex, 16)),
+      );
+    }
+  });
+}
+
 /** Longer strings are cut to this many characters before redaction; logs never need more. */
 export const MAX_REDACTED_TEXT = 16 * 1024;
 
@@ -54,6 +77,7 @@ const PRIVATE_KEY_BLOCK =
 
 /** `Authorization` schemes followed by a credential. */
 const AUTH_SCHEME = /\b([Bb]earer|Basic)\s{1,8}[A-Za-z0-9._~+/=-]{8,}/g;
+const AUTH_SCHEME_TEST = new RegExp(AUTH_SCHEME.source);
 
 /** Credential formats recognisable on their own, wherever they appear. */
 const KNOWN_TOKENS: readonly RegExp[] = [
@@ -184,11 +208,40 @@ export function createRedactor(knownSecrets: Iterable<string> = []): Redactor {
     });
   };
 
+  /** Whether `segment` holds something the passes below would redact. */
+  const looksSecret = (segment: string): boolean =>
+    SECRET_ASSIGNMENT_TEST.test(segment) ||
+    AUTH_SCHEME_TEST.test(segment) ||
+    KNOWN_TOKENS.some((pattern) => new RegExp(pattern.source).test(segment)) ||
+    (exact !== undefined && new RegExp(exact.source).test(segment)) ||
+    removeShortSecrets(segment) !== segment;
+
+  /**
+   * Form and URL parsers decode `%XX` and `+` before they read a name, so
+   * `Dig%69ts=1234` or `Digits+=1234` reaches Twilio's parser as `Digits=1234`
+   * while the raw text slips past the patterns. Each segment (between `&`, `;`,
+   * `?`, `#`, `,` and whitespace) that holds an escape or a `+` is decoded too. If
+   * the decoded copy looks secret and the raw one does not, the whole raw segment
+   * is removed.
+   */
+  const removeEncodedSecrets = (input: string): string => {
+    if (!/%[0-9A-Fa-f]{2}|\+/.test(input)) return input;
+    return input
+      .split(SEGMENT_DELIMITER)
+      .map((segment, index) => {
+        // Odd indexes are the delimiters the split captured.
+        if (index % 2 === 1 || !/%[0-9A-Fa-f]{2}|\+/.test(segment)) return segment;
+        return looksSecret(formDecode(segment)) && !looksSecret(segment) ? REDACTED : segment;
+      })
+      .join("");
+  };
+
   const text = (input: string): string => {
     let out = input;
     if (exact) out = out.replace(exact, REDACTED);
     out = removeShortSecrets(out);
     if (out.length > MAX_REDACTED_TEXT) out = `${cutBeforeWord(out, MAX_REDACTED_TEXT)} [truncated]`;
+    out = removeEncodedSecrets(out);
     out = out.replace(PRIVATE_KEY_BLOCK, `${REDACTED} private key`);
     out = out.replace(AUTH_SCHEME, (_match, scheme: string) => `${scheme} ${REDACTED}`);
     out = out.replace(SECRET_ASSIGNMENT, (_match, name: string, value: string) => {

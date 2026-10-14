@@ -2,6 +2,17 @@
 // that redacts each line just before it leaves the process. Redacting the final
 // line, rather than individual fields, also covers messages, child bindings and
 // whatever the request, response and error serializers produce.
+//
+// Logging contract, for every caller in the daemon:
+//
+// 1. Log parsed, allowlisted fields only: ids, statuses, counts, method and path,
+//    a reason. Never a raw request body, header set, query string, provider
+//    payload, transcript, ask text or anything an agent or caller wrote.
+// 2. Request logs carry the method and path only (`requestSerializer`); a
+//    rejected request adds a short reason, never its body.
+// 3. The redactor is a safety net under rules 1 and 2, not the primary control.
+//    Pattern redaction cannot recognise every secret, so code that relies on it
+//    to make a raw value safe to log is a bug.
 import type { Redactor } from "./redact.js";
 
 export type LogLevel = "fatal" | "error" | "warn" | "info" | "debug" | "trace" | "silent";

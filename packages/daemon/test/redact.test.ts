@@ -332,6 +332,46 @@ describe("bypasses closed after the security review", () => {
     expect(text(`CA${"0123456789abcdef".repeat(2)}`)).not.toContain("0123456789");
   });
 
+  it.each([
+    ["Dig%69ts=1234&CallSid=CA1", `${REDACTED}&CallSid=CA1`],
+    ["Digits+=1234&From=x", `${REDACTED}&From=x`],
+    ["%44igits=1234", REDACTED],
+    ["a=1&p%61ssword=hunter22&b=2", `a=1&${REDACTED}&b=2`],
+    ['{"Dig%69ts":"1234"}', REDACTED],
+  ])("removes a secret whose name is hidden by URL encoding in %s", (input, expected) => {
+    const out = text(input);
+    expect(out).toBe(expected);
+    expect(out).not.toContain("1234");
+  });
+
+  it("removes a registered secret or PIN that is only recognisable once decoded", () => {
+    const known = createRedactor(["plainword-secret"]);
+    known.addShortSecret("4821");
+    expect(known.text("k=%70lainword-secret&a=1")).toBe(`${REDACTED}&a=1`);
+    expect(known.text("x=plainword%2Dsecret")).toBe(REDACTED);
+    expect(known.text("said=%34%38%32%31 ok")).toBe(`${REDACTED} ok`);
+    // A malformed escape still decodes the valid ones around it.
+    expect(known.text("k=%70lainword-secret%E0%A4")).toBe(REDACTED);
+  });
+
+  it("leaves encoded segments without secrets alone", () => {
+    expect(text("q=hello+world&path=%2Fv1%2Fhealth")).toBe("q=hello+world&path=%2Fv1%2Fhealth");
+  });
+
+  it("decodes 16 KiB of hostile escapes in under 50 ms", () => {
+    const known = createRedactor(["plainword-secret"]);
+    known.addShortSecret("4821");
+    for (const input of [
+      "%41".repeat(MAX_REDACTED_TEXT / 3),
+      "+".repeat(MAX_REDACTED_TEXT),
+      "%E0+".repeat(4096),
+    ]) {
+      const started = performance.now();
+      known.text(input);
+      expect(performance.now() - started).toBeLessThan(50);
+    }
+  });
+
   it("keeps pino's own timestamp in log lines", () => {
     const lines: string[] = [];
     redactingStream({ write: (line) => lines.push(line) }, createRedactor()).write(
