@@ -15,10 +15,11 @@ import { isTestMode } from "./setup.js";
 /** The throwaway Keychain service. Never `agent-hotline`, where the real secrets live. */
 export const KEYCHAIN_CHECK_SERVICE = "agent-hotline-doctor-check";
 /**
- * Not one of the real secret names, so even under the wrong service it could
- * never overwrite or delete a real secret. The store only passes it to `security`.
+ * Each run's account is this plus a random suffix, so overlapping doctor runs
+ * never touch each other's item. Not one of the real secret names, so even under
+ * the wrong service it could never overwrite or delete a real secret.
  */
-export const KEYCHAIN_CHECK_ACCOUNT = "doctor.selfTest" as SecretName;
+export const KEYCHAIN_CHECK_ACCOUNT_PREFIX = "doctor.selfTest";
 /** Each `security` call is killed after this long; the test stops at the first failure. */
 export const KEYCHAIN_CHECK_TIMEOUT_MS = 1_500;
 
@@ -83,6 +84,8 @@ export async function keychainSelfTest(exec: Exec, options: KeychainSelfTestOpti
   };
   const store = new KeychainSecretStore(recording, KEYCHAIN_CHECK_SERVICE);
   const value = options.value ?? randomBytes(18).toString("base64url");
+  // The store only passes the account on to `security`; it need not be a real SecretName.
+  const account = `${KEYCHAIN_CHECK_ACCOUNT_PREFIX}.${randomBytes(6).toString("hex")}` as SecretName;
   let step: Step = "add";
   const begin = (next: Step) => {
     step = next;
@@ -95,18 +98,18 @@ export async function keychainSelfTest(exec: Exec, options: KeychainSelfTestOpti
   try {
     // set() adds through `security -i` with `-X <hex>`, then reads back and compares.
     begin("add");
-    await store.set(KEYCHAIN_CHECK_ACCOUNT, value);
+    await store.set(account, value);
     begin("read back");
-    if ((await store.get(KEYCHAIN_CHECK_ACCOUNT)) !== value) {
+    if ((await store.get(account)) !== value) {
       problem = "the value read back did not match";
     } else {
       begin("delete");
-      await store.delete(KEYCHAIN_CHECK_ACCOUNT);
+      await store.delete(account);
       if (codes[0] !== 0) {
         problem = "the item was already gone";
       } else {
         begin("missing-item lookup");
-        if ((await store.get(KEYCHAIN_CHECK_ACCOUNT)) === undefined) gone = true;
+        if ((await store.get(account)) === undefined) gone = true;
         else problem = "the deleted item could still be read";
       }
     }
@@ -117,14 +120,19 @@ export async function keychainSelfTest(exec: Exec, options: KeychainSelfTestOpti
     else problem = "security failed";
   }
   const exits = codes.length > 0 ? ` (security exit ${codes.join(" then ")})` : "";
+  // A timed-out add may still land after the cleanup below has run.
+  const lateAdd = timedOut && step === "add";
   let cleanup = "";
   if (!gone) {
     // Remove the throwaway item whatever failed above; exit 44 (already gone) is fine.
     try {
-      await store.delete(KEYCHAIN_CHECK_ACCOUNT);
+      await store.delete(account);
     } catch {
       cleanup = `; could not remove the throwaway item, delete service ${KEYCHAIN_CHECK_SERVICE} in Keychain Access`;
     }
+  }
+  if (lateAdd && cleanup === "") {
+    cleanup = `; if a ${KEYCHAIN_CHECK_SERVICE} item shows up in Keychain Access later, delete it`;
   }
   if (problem === undefined) {
     return {

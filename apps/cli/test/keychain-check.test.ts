@@ -3,10 +3,11 @@
 // printing the value and a newline, `-i` reading one command from stdin. The real
 // /usr/bin/security never runs here: spawn is replaced and must never be called.
 import { join } from "node:path";
+import { SecretName } from "@hotline/core";
 import { type Exec, type ExecResult, KEYCHAIN_SERVICE, nodeExec, writePrivateFile } from "@hotline/daemon";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  KEYCHAIN_CHECK_ACCOUNT,
+  KEYCHAIN_CHECK_ACCOUNT_PREFIX,
   KEYCHAIN_CHECK_SERVICE,
   keychainCheckExec,
   keychainSelfTest,
@@ -72,13 +73,23 @@ const VALUE = "dummy-value-for-the-self-test";
 const HEX = Buffer.from(VALUE, "utf8").toString("hex");
 const verb = (call: { args: string[] }) => call.args[0];
 
-/** Every call targeted the throwaway service and account, never the real items. */
-function expectOnlyThrowaway(fake: { calls: { args: string[]; input: string | undefined }[] }) {
-  for (const { args, input } of fake.calls) {
-    const words = args[0] === "-i" ? (input ?? "").trim().split(/\s+/) : args;
+/** A run's account: the prefix and 12 random hex digits. */
+const ACCOUNT = /^doctor\.selfTest\.[0-9a-f]{12}$/;
+type Call = { args: string[]; input: string | undefined };
+const wordsOf = ({ args, input }: Call) => (args[0] === "-i" ? (input ?? "").trim().split(/\s+/) : args);
+const accountOf = (call: Call) => {
+  const words = wordsOf(call);
+  return words[words.indexOf("-a") + 1] ?? "";
+};
+
+/** Every call targeted the throwaway service and one run's account, never the real items. */
+function expectOnlyThrowaway(fake: { calls: Call[] }) {
+  for (const call of fake.calls) {
+    const words = wordsOf(call);
     expect(words[words.indexOf("-s") + 1]).toBe(KEYCHAIN_CHECK_SERVICE);
-    expect(words[words.indexOf("-a") + 1]).toBe(KEYCHAIN_CHECK_ACCOUNT);
+    expect(accountOf(call)).toMatch(ACCOUNT);
   }
+  expect(new Set(fake.calls.map(accountOf)).size).toBe(1);
 }
 
 /** The last call was a delete of the throwaway item (cleanup ran). */
@@ -102,9 +113,8 @@ describe("keychainSelfTest", () => {
   it("uses a throwaway service and account, never the real ones", () => {
     expect(KEYCHAIN_CHECK_SERVICE).not.toBe(KEYCHAIN_SERVICE);
     expect(KEYCHAIN_CHECK_SERVICE).toMatch(/^[A-Za-z0-9._-]+$/);
-    expect(["daemon.apiToken", "elevenlabs.apiKey", "twilio.authToken"]).not.toContain(
-      KEYCHAIN_CHECK_ACCOUNT,
-    );
+    expect(KEYCHAIN_CHECK_ACCOUNT_PREFIX).toBe("doctor.selfTest");
+    expect(SecretName.options.some((name) => name.startsWith(KEYCHAIN_CHECK_ACCOUNT_PREFIX))).toBe(false);
   });
 
   it("passes: adds through -i with -X hex, reads back, deletes, and a missing item reads as unset", async () => {
@@ -122,8 +132,9 @@ describe("keychainSelfTest", () => {
       "find-generic-password",
     ]);
     // The value goes in on stdin as hex, never in an argument.
+    const account = accountOf(fake.calls[0] as Call);
     expect(fake.calls[0]?.input).toBe(
-      `add-generic-password -U -s ${KEYCHAIN_CHECK_SERVICE} -a ${KEYCHAIN_CHECK_ACCOUNT} -X ${HEX}\n`,
+      `add-generic-password -U -s ${KEYCHAIN_CHECK_SERVICE} -a ${account} -X ${HEX}\n`,
     );
     for (const { args } of fake.calls) expect(args.join(" ")).not.toContain(HEX);
     expectOnlyThrowaway(fake);
@@ -144,6 +155,21 @@ describe("keychainSelfTest", () => {
       expect(first.detail + second.detail).not.toContain(value);
       expect(first.detail + second.detail).not.toContain(hex);
     }
+  });
+
+  it("keeps overlapping runs apart: each uses its own account", async () => {
+    const fake = fakeSecurity();
+    const checks = await Promise.all([
+      keychainSelfTest(fake),
+      keychainSelfTest(fake),
+      keychainSelfTest(fake),
+    ]);
+    expect(checks.map((check) => check.status)).toEqual(["pass", "pass", "pass"]);
+    // The runs interleaved (all three added before any read back), each on its own item.
+    const accounts = fake.calls.map(accountOf);
+    expect(new Set(accounts).size).toBe(3);
+    expect(fake.calls.slice(0, 3).map(verb)).toEqual(["-i", "-i", "-i"]);
+    expect(fake.items.size).toBe(0);
   });
 
   it("fails a refused add with the exit code only, not security's echo of the hex", async () => {
@@ -221,7 +247,7 @@ describe("keychainSelfTest", () => {
     const check = await keychainSelfTest(fake, { value: VALUE, timeoutMs: 20 });
     expect(Date.now() - started).toBeLessThan(1_000);
     expect(check.detail).toBe(
-      "self-test failed at add: security did not finish in time (is the login Keychain locked?)",
+      `self-test failed at add: security did not finish in time (is the login Keychain locked?); if a ${KEYCHAIN_CHECK_SERVICE} item shows up in Keychain Access later, delete it`,
     );
     expectCleanup(fake);
   });

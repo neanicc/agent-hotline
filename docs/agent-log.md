@@ -2275,7 +2275,7 @@ Template:
   `security`'s output or the value. Unless the run ended with the item
   confirmed gone, it deletes the item again, and says so if that fails too.
 - Decisions (no human available):
-  - Account `doctor.selfTest`, deliberately not a real `SecretName` (a cast),
+  - Account prefix `doctor.selfTest`, deliberately not a real `SecretName` (a cast),
     so even a wrong service could never overwrite or delete a real secret.
     The value is 18 random bytes, base64url, fresh each run.
   - Time bound: each `security` call is killed after 1.5 s (`nodeExec`'s
@@ -2302,5 +2302,14 @@ Template:
   - The real `/usr/bin/security` was not run, by me or by any test.
   - Scenario suite: not built yet (HL-12). Real agent integration: not
     affected. Live call: not done (owner only).
+- Review fixes on #64 (Greptile P2, staff review P3s, head 8500a11): each
+  run's account is now `doctor.selfTest.<12 random hex digits>`, so
+  overlapping doctor runs cannot overwrite or delete each other's item (new
+  test: three concurrent runs all pass; it fails with a fixed account). An add
+  that timed out may still land after the cleanup, so that FAIL line now tells
+  the owner to delete a leftover `agent-hotline-doctor-check` item if one
+  appears. A per-run account means a leftover is never overwritten by the
+  next run, which that hint and the install guide cover. After catching up
+  with main: `build` and `test` (1631 tests in 56 files) pass.
 - Open issues or follow-ups: the first real `hotline doctor` run on the
   owner's Mac is the actual verification of the three assumptions.

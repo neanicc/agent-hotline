@@ -180,8 +180,9 @@ When `secrets.store` resolves to the Keychain (`keychain`, or `auto` on macOS),
 doctor checks that `/usr/bin/security` behaves the way Hotline's Keychain store
 expects, through the same code that stores your credentials. It uses a
 throwaway item, service `agent-hotline-doctor-check` and account
-`doctor.selfTest`, with a fresh random dummy value; it never reads or touches
-the real `agent-hotline` items. It:
+`doctor.selfTest.<random>` (a new one each run, so two doctors running at once
+do not disturb each other), with a fresh random dummy value; it never reads or
+touches the real `agent-hotline` items. It:
 
 1. adds the item with `security -i` (the value goes in on stdin, hex-encoded
    with `-X`, never as an argument) and reads it back with
@@ -196,6 +197,8 @@ stopped after 1.5 s and the test stops at the first failure, so it takes a few
 seconds at most; a timeout usually means the login Keychain is locked. Whatever
 fails, the throwaway item is deleted again; if even that fails, the line says
 so and you can remove the `agent-hotline-doctor-check` item in Keychain Access.
+An add that timed out may still land after that cleanup, so that failure line
+also tells you to delete such an item if one shows up.
 With the file store, or off macOS, this check does not run. Under the test
 runner or `HOTLINE_TEST_MODE=1` it never runs the real `security`: it needs an
 injected fake and fails without one.
