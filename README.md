@@ -36,7 +36,11 @@ pnpm run hotline --version   # runs the built CLI: "hotline 0.0.0"
 pnpm run hotline daemon --help   # the daemon; see docs/daemon.md
 pnpm run hotline mcp --help      # the MCP server agents start; see docs/mcp.md
 pnpm run hotline hook --help     # the permission and Stop hooks; see docs/hooks.md
+pnpm run hotline doctor          # check the setup; see docs/install.md
 ```
+
+Setting Hotline up on your Mac (`hotline init`, `voice apply`, `install`,
+`doctor`, `test-call`) is in [docs/install.md](docs/install.md).
 
 `pnpm --filter @hotline/core test` runs one package's tests. CI calls the same
 steps through [scripts/ci/run.sh](scripts/ci/run.sh) (`setup`, `build`, `test`,

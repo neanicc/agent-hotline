@@ -32,6 +32,9 @@ importers:
       '@hotline/daemon':
         specifier: workspace:*
         version: link:../../packages/daemon
+      '@hotline/providers':
+        specifier: workspace:*
+        version: link:../../packages/providers
     devDependencies:
       '@modelcontextprotocol/sdk':
         specifier: 1.31.0

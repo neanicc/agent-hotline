@@ -2,9 +2,10 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import type { Readable, Writable } from "node:stream";
 import { type AgentKind, productName } from "@hotline/core";
-import type { LogDestination, SignalSource } from "@hotline/daemon";
+import type { Exec, LogDestination, SignalSource } from "@hotline/daemon";
 import { awayCommand, hookCommand } from "./hook.js";
-import { loadDaemonSetup } from "./setup.js";
+import { type Prompter, terminalPrompter } from "./prompt.js";
+import { type CliFetch, loadDaemonSetup } from "./setup.js";
 
 export interface Output {
   stdout(text: string): void;
@@ -24,9 +25,18 @@ export interface CliContext {
   /** The MCP protocol streams for `hotline mcp`, and the hook payload for `hotline hook`. Default to the process's own. */
   stdin?: Readable;
   stdout?: Writable;
+  /** Asks the owner questions (init, test-call). Undefined when there is no terminal. */
+  prompt?: Prompter;
+  /** Runs `security` for the Keychain. Tests inject a fake; in test mode one is required. */
+  exec?: Exec;
+  /** HTTP for the daemon health check and ElevenLabs. Tests inject a fake; in test mode one is required. */
+  fetch?: CliFetch;
+  /** Current time, for backup names. */
+  now?: () => Date;
 }
 
 export function processContext(): CliContext {
+  const prompt = terminalPrompter();
   return {
     env: process.env,
     homeDir: homedir(),
@@ -36,6 +46,7 @@ export function processContext(): CliContext {
     cwd: process.cwd(),
     stdin: process.stdin,
     stdout: process.stdout,
+    ...(prompt === undefined ? {} : { prompt }),
   };
 }
 
@@ -51,6 +62,11 @@ export function usage(): string {
     "Usage: hotline <command>",
     "",
     "Commands:",
+    "  init        Set up the hotline home, config, PIN and credentials",
+    "  install     Add the MCP server and hooks to Claude Code or Codex (claude, codex)",
+    "  doctor      Check the setup: pass, warn or fail for each part",
+    "  voice       List voices, pick one, or apply the ElevenLabs agent (list, set, apply)",
+    "  test-call   Ring your phone once to check the voice line",
     "  away        Switch away mode on or off (on, off, status)",
     "  daemon      Run the Hotline daemon (agent API and webhook listener)",
     "  hook        The Claude Code and Codex permission and Stop hook (stdin JSON)",
@@ -58,8 +74,7 @@ export function usage(): string {
     "  help        Show this message",
     "  version     Print the hotline version",
     "",
-    "More commands (init, install, doctor, voice, test-call)",
-    "arrive with later tickets; see docs/plan.md.",
+    "Run hotline <command> --help for details. Setup guide: docs/install.md.",
   ].join("\n");
 }
 
@@ -216,6 +231,17 @@ export async function run(
       return hookCommand(args, out, context);
     case "away":
       return awayCommand(args, out, context);
+    // Setup commands load on demand, so the hooks and the MCP server start fast.
+    case "init":
+      return (await import("./init.js")).initCommand(args, out, context);
+    case "install":
+      return (await import("./install.js")).installCommand(args, out, context);
+    case "doctor":
+      return (await import("./doctor.js")).doctorCommand(args, out, context);
+    case "voice":
+      return (await import("./voice.js")).voiceCommand(args, out, context);
+    case "test-call":
+      return (await import("./voice.js")).testCallCommand(args, out, context);
     case "mcp":
       return mcpCommand(args, out, context);
     case "help":

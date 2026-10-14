@@ -3,8 +3,8 @@
 How the hotline sounds on the phone, how it names your agent sessions, and how
 to give it a voice from the ElevenLabs library or a clone of your own.
 
-Nothing in this document is automated by Hotline yet: `hotline init` and
-`hotline voice set` arrive with HL-11. Hotline never uploads, records or stores
+`hotline voice list`, `hotline voice set` and `hotline voice apply` are in
+[install.md](install.md#hotline-voice). Hotline never uploads, records or stores
 audio, and the repository never contains voice samples or recordings.
 
 ## The persona
@@ -49,7 +49,7 @@ silence is not a yes. The prompt also says the persona can never bend them.
 
 To change the persona, edit the prompt, bump `AGENT_DEFINITION_VERSION`,
 review the snapshot diff and update it (`pnpm exec vitest run --project
-providers -u`), then re-apply the agent definition (HL-11). A changed safety
+providers -u`), then re-apply the agent definition (`hotline voice apply`). A changed safety
 sentence fails the rule test on purpose; changing one is a security change.
 
 ## Session names
@@ -102,7 +102,7 @@ pick one without it. An English voice suits the English prompt best.
    { "voice": { "voiceId": "AbCdEfGh0123456789xy" } }
    ```
 
-   `hotline voice set <voice id>` will do both once HL-11 lands. Without a
+   `hotline voice set <voice id>` does both. Without a
    voice id the agent uses ElevenLabs' default voice. A malformed id is refused
    (`isVoiceId`), before anything is sent to ElevenLabs.
 

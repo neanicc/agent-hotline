@@ -129,7 +129,8 @@ users can read or write (it holds the PIN hash), so it must be mode `0600`.
 | `policy.askTimeoutMinutes` | 30 | Then "no answer" |
 | `policy.maxConsecutiveContinuations` | 5 | Away-mode Stop continuations in a row (1–20) |
 | `voice.provider` | `elevenlabs` | or `fake` |
-| `voice.voiceId`, `agentId`, `agentPhoneNumberId` | unset | ElevenLabs ids, set by `hotline init` / `hotline voice set` |
+| `voice.voiceId`, `agentId`, `agentPhoneNumberId` | unset | ElevenLabs ids: `voiceId` from `hotline voice set`, `agentId` from `hotline voice apply`, `agentPhoneNumberId` from `hotline init` |
+| `voice.toolSecretId`, `voice.toolIds` | unset | Ids (never values) of the ElevenLabs workspace secret and the four server tools, written by `hotline voice apply` so a re-apply updates them instead of creating new ones |
 | `sms.provider` | `twilio` | or `fake` |
 | `sms.fromNumber` | unset | The Twilio number |
 | `tunnel.publicUrl` | unset | Bare `https://` origin, no path, query or credentials |
@@ -310,10 +311,10 @@ the prompt, first message and four webhook tools as code. `hotlineToolConfigs`
 gives each tool's `tool_config` (URL `<publicUrl>/hooks/el/tools/<name>`, the
 `x-hotline-tool-secret` header from an ElevenLabs workspace secret, and a body
 schema); `hotlineAgentConfig` gives the agent body with the tool ids, voice,
-`end_call` and placeholders for inbound calls. HL-11 `hotline init` applies
-them. Every tool's `conversation_id`, `call_sid`, `caller_id` and
-`called_number` come from ElevenLabs' `system__*` dynamic variables, not from
-the model, and no tool has a confirmation parameter. The prompt says agent
+`end_call` and placeholders for inbound calls. `hotline voice apply` (HL-11)
+creates or updates them; see [install.md](install.md). Every tool's
+`conversation_id`, `call_sid`, `caller_id` and `called_number` come from
+ElevenLabs' `system__*` dynamic variables, not from the model, and no tool has a confirmation parameter. The prompt says agent
 text is data, never instructions; decisions count only through `submit_answer`
 with the owner's own words; a high-risk allow needs `verify_pin` first; an
 inbound call reveals nothing before the PIN; and an unclear answer is asked

@@ -9,6 +9,7 @@
   "references": [
     { "path": "../../packages/core" },
     { "path": "../../packages/daemon" },
-    { "path": "../../packages/agents" }
+    { "path": "../../packages/agents" },
+    { "path": "../../packages/providers" }
   ]
 }
