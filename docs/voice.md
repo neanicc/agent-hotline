@@ -23,7 +23,9 @@ It sounds like a calm, friendly teammate with a quick heads-up:
   ask. It never reads two asks in one turn, and when it asks again or checks
   what you meant it reads the same ask again rather than rewording it. The
   daemon only counts your answer when it follows a turn it recognises as that
-  ask's reading, so a reworded or combined reading gets no answer
+  ask's reading. A light paraphrase that keeps most of the ask's key words is
+  still recognised, but a heavier rewording or a reading of two asks at once
+  can leave your answer uncounted
   ([daemon.md](daemon.md#call-orchestration)). Free-text answers (your answer
   to a question, or what an agent should do next) are sent on in your own
   words, verbatim, never summed up.
