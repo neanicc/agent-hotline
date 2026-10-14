@@ -270,7 +270,7 @@ async function elevenLabsChecks(
     checks.push({ status: "fail", name, detail: "cannot read the agent without the API key" });
     return checks;
   }
-  const { AGENT_DEFINITION_VERSION } = await import("@hotline/providers");
+  const { AGENT_DEFINITION_VERSION, TOOL_NAMES } = await import("@hotline/providers");
   try {
     const deployed = await new ElevenLabsAdmin(apiKey, fetchFor(context)).getAgent(agentId);
     const version = deployed.definitionVersion;
@@ -290,14 +290,21 @@ async function elevenLabsChecks(
         detail: "the agent's voice differs from voice.voiceId; run hotline voice apply",
       });
     }
-    const wanted = Object.values(config.voice.toolIds ?? {}).sort();
-    if (wanted.length > 0 && wanted.join() !== [...deployed.toolIds].sort().join()) {
-      checks.push({
-        status: "warn",
-        name,
-        detail: "the agent's tools differ from the recorded ones; run hotline voice apply",
-      });
-    }
+    // Without all four tools the agent cannot record an answer, check a PIN or read status.
+    const recorded = config.voice.toolIds ?? {};
+    const missing = TOOL_NAMES.filter((tool) => {
+      const id = recorded[tool];
+      return id === undefined || !deployed.toolIds.includes(id);
+    });
+    checks.push(
+      missing.length === 0
+        ? { status: "pass", name, detail: `the agent has all ${TOOL_NAMES.length} Hotline tools` }
+        : {
+            status: "fail",
+            name,
+            detail: `the agent lacks the tools ${missing.join(", ")} (or their ids are not recorded); run hotline voice apply`,
+          },
+    );
   } catch (error) {
     checks.push({ status: "fail", name, detail: (error as Error).message });
   }

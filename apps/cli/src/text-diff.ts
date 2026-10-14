@@ -3,6 +3,8 @@
 // longest-common-subsequence step, so a large file with a small edit stays cheap.
 
 const CONTEXT_LINES = 2;
+/** Largest alignment table (cells) before falling back to a block replacement. */
+export const MAX_TABLE_CELLS = 1_000_000;
 
 function splitLines(text: string): string[] {
   if (text === "") return [];
@@ -25,6 +27,17 @@ function diffLines(before: readonly string[], after: readonly string[]): Array<[
   }
   const a = before.slice(head, before.length - tail);
   const b = after.slice(head, after.length - tail);
+  const context = (lines: readonly string[]) => lines.map((line): [string, string] => [" ", line]);
+  if ((a.length + 1) * (b.length + 1) > MAX_TABLE_CELLS) {
+    // Too large a change to align cheaply (a reformatted file): show it as a
+    // block replacement rather than use a table of a.length * b.length cells.
+    return [
+      ...context(before.slice(0, head)),
+      ...a.map((line): [string, string] => ["-", line]),
+      ...b.map((line): [string, string] => ["+", line]),
+      ...context(before.slice(before.length - tail)),
+    ];
+  }
   // lengths[i][j]: longest common subsequence of a[i..] and b[j..].
   const lengths = Array.from({ length: a.length + 1 }, () => new Array<number>(b.length + 1).fill(0));
   for (let i = a.length - 1; i >= 0; i--) {

@@ -104,6 +104,26 @@ describe("editHooks", () => {
     expect(editHooks(undefined, "s", "claude", "hotline", true)).toBeUndefined();
   });
 
+  it("owns hooks it wrote with any launcher, and only the exact hook shape", () => {
+    const wrapper = editHooks(undefined, "s", "claude", "/opt/bin/hotline-wrapper", false);
+    expect(readHooks(wrapper, "s", "claude")).toHaveLength(2);
+    // A later default install replaces them; a default uninstall removes them.
+    const replaced = JSON.parse(editHooks(wrapper, "s", "claude", "hotline", false) ?? "");
+    expect(replaced.hooks.Stop).toHaveLength(1);
+    expect(replaced.hooks.Stop[0].hooks[0].command).toBe("hotline hook claude stop --wait-seconds 1830");
+    expect(editHooks(wrapper, "s", "claude", "hotline", true)).toBe("{}\n");
+    const notOurs = JSON.stringify({
+      hooks: {
+        Stop: [
+          { hooks: [{ type: "command", command: "my-tool hook claude stop --verbose" }] },
+          { hooks: [{ type: "command", command: "sh -c 'x' hook claude stop" }] },
+        ],
+      },
+    });
+    expect(readHooks(notOurs, "s", "claude")).toEqual([]);
+    expect(editHooks(notOurs, "s", "claude", "hotline", true)).toBe(notOurs);
+  });
+
   it("does not take another agent's hook or another event for its own", () => {
     const codexOnes = editHooks(undefined, "s", "codex", "hotline", false);
     const both = JSON.parse(editHooks(codexOnes, "s", "claude", "hotline", false) ?? "");
@@ -160,14 +180,34 @@ describe("editCodexToml", () => {
     expect(moved.match(/\[mcp_servers\.hotline\]/g)).toHaveLength(1);
   });
 
-  it("never touches a hotline server written by hand", () => {
+  it("never touches a hotline server written by hand, in any TOML form", () => {
     for (const hand of [
       '[mcp_servers.hotline]\ncommand = "hotline"\n',
       '[mcp_servers."hotline"]\ncommand = "hotline"\n',
+      "[mcp_servers.'hotline']\ncommand = 'hotline'\n",
+      '[ mcp_servers . hotline ]\ncommand = "hotline"\n',
+      '[mcp_servers.hotline.env]\nX = "1"\n',
+      '[mcp_servers]\nhotline = { command = "hotline" }\n',
+      '[mcp_servers]\n"hotline" = { command = "hotline" }\n',
+      '[mcp_servers]\nhotline.command = "hotline"\n',
       'mcp_servers.hotline.command = "hotline"\n',
+      'mcp_servers = { hotline = { command = "hotline" } }\n',
     ]) {
-      expect(() => editCodexToml(hand, "c", "hotline", false)).toThrow(/written by hand/);
+      expect(() => editCodexToml(hand, "c", "hotline", false), hand).toThrow(/written by hand/);
+      expect(readCodexMcp(hand).installed, hand).toBe(true);
     }
+    // Other servers, and the word hotline elsewhere, are fine.
+    const other = '[mcp_servers.hotline_old]\ncommand = "x"\n[mcp_servers.other]\nargs = ["hotline"]\n';
+    expect(editCodexToml(other, "c", "hotline", false)).toContain("[mcp_servers.hotline]");
+  });
+
+  it("reads tool_timeout_sec from a hand-written inline table", () => {
+    expect(
+      readCodexMcp('[mcp_servers]\nhotline = { command = "hotline", tool_timeout_sec = 2400 }\n'),
+    ).toEqual({
+      installed: true,
+      toolTimeoutSeconds: 2400,
+    });
   });
 });
 

@@ -95,6 +95,23 @@ describe("hotline doctor", () => {
     expect(health?.headers.authorization).toBe(`Bearer ${SECRETS["daemon.apiToken"]}`);
   });
 
+  it("fails when the agent lacks Hotline's tools, or their ids were never recorded", async () => {
+    const toolsFail = async (voice: Record<string, unknown>) => {
+      await writeSetup({ voice: { agentId: "agent_fake_1", agentPhoneNumberId: "phnum_fake_1", ...voice } });
+      const result = await cli(["doctor", "--home", setup.home], context());
+      expect(result.code).toBe(1);
+      return lines(result.stdout, "FAIL").join("\n");
+    };
+    // A hand-made agent with the current tag but no recorded tools.
+    expect(await toolsFail({})).toContain(
+      "lacks the tools submit_answer, verify_pin, get_status, send_instruction",
+    );
+    // Recorded, but one is no longer on the deployed agent.
+    expect(await toolsFail({ toolIds: { ...TOOL_IDS, get_status: "t9" } })).toContain(
+      "lacks the tools get_status",
+    );
+  });
+
   it("fails when the deployed agent is an older definition", async () => {
     await writeSetup();
     await installAll();

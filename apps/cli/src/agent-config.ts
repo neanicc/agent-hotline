@@ -44,14 +44,30 @@ export function hookCommand(launcher: string, agent: AgentFlag, event: HookEvent
   return `${launcher} hook ${agent} ${HOOK_EVENTS[event]} --wait-seconds ${HOOK_WAIT_SECONDS}`;
 }
 
-/** Whether a hook command is Hotline's `hook <agent> <event>`, whichever launcher wrote it. */
-function isHotlineHook(command: unknown, launcher: string, agent: AgentFlag, event: HookEvent): boolean {
+/**
+ * Whether a hook command is Hotline's `<launcher> hook <agent> <event>`, whatever
+ * launcher wrote it (`hotline`, a `--command` path, or `node .../main.js`). The
+ * shape must match exactly: one program word, then `hook <agent> <event>` and
+ * only Hotline's own `--wait-seconds` and `--port` options.
+ */
+function isHotlineHook(command: unknown, agent: AgentFlag, event: HookEvent): boolean {
   if (typeof command !== "string") return false;
   const words = command.trim().split(/\s+/);
   const at = words.indexOf("hook");
-  if (at < 1 || words[at + 1] !== agent || words[at + 2] !== HOOK_EVENTS[event]) return false;
-  const program = words.slice(0, at).join(" ");
-  return program === launcher || /(^|\/)hotline$/.test(program) || program.endsWith("apps/cli/dist/main.js");
+  const program = words.slice(0, at);
+  const programOk =
+    program.length === 1 || (program.length === 2 && program[0] === "node" && /\.js$/.test(program[1] ?? ""));
+  if (!programOk || words[at + 1] !== agent || words[at + 2] !== HOOK_EVENTS[event]) return false;
+  const options = words.slice(at + 3);
+  for (let index = 0; index < options.length; index += 2) {
+    if (
+      !["--wait-seconds", "--port"].includes(options[index] ?? "") ||
+      !/^\d{1,6}$/.test(options[index + 1] ?? "")
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 type Json = Record<string, unknown>;
@@ -111,7 +127,7 @@ export function editHooks(
     if (!Array.isArray(groups) || !groups.every((group) => isObject(group))) {
       throw new AgentConfigError(`${label}: "hooks.${event}" is not a list of hook groups; fix it by hand`);
     }
-    const ours = (hook: unknown) => isObject(hook) && isHotlineHook(hook.command, launcher, agent, event);
+    const ours = (hook: unknown) => isObject(hook) && isHotlineHook(hook.command, agent, event);
     const count = groups.reduce(
       (total, group) => total + (Array.isArray(group.hooks) ? group.hooks.filter(ours).length : 0),
       0,
@@ -185,8 +201,35 @@ function findBlock(text: string): [number, number] | undefined {
   return [start, end];
 }
 
-const HAND_WRITTEN =
-  /^\s*\[\s*mcp_servers\s*\.\s*"?hotline"?\s*\]|^\s*mcp_servers\s*\.\s*"?hotline"?\s*[.=]/m;
+/** A TOML key or table name without spaces and quotes: `mcp_servers . 'hotline'` is `mcp_servers.hotline`. */
+function bareKey(key: string): string {
+  return key.replace(/["'\s]/g, "");
+}
+
+/**
+ * Whether TOML text defines an `mcp_servers.hotline` server in any form:
+ * `[mcp_servers.hotline]` (any quoting), `hotline = {...}` or `hotline.x = ...`
+ * under `[mcp_servers]`, a dotted root key, or an inline `mcp_servers = {...}`.
+ * A line scanner, not a TOML parser: it errs towards "yes", which only makes
+ * `install` refuse.
+ */
+function definesHotlineServer(text: string): boolean {
+  let table = "";
+  for (const line of text.split("\n")) {
+    const header = /^\s*\[\[?([^\]]*)\]\]?/.exec(line);
+    if (header) {
+      table = bareKey(header[1] ?? "");
+      if (table === "mcp_servers.hotline" || table.startsWith("mcp_servers.hotline.")) return true;
+      continue;
+    }
+    const key = /^\s*([^=#]+?)\s*=/.exec(line);
+    if (!key) continue;
+    const name = table === "" ? bareKey(key[1] ?? "") : `${table}.${bareKey(key[1] ?? "")}`;
+    if (name === "mcp_servers.hotline" || name.startsWith("mcp_servers.hotline.")) return true;
+    if (name === "mcp_servers" && /\bhotline\b/.test(line)) return true;
+  }
+  return false;
+}
 
 /**
  * Codex `config.toml` with Hotline's `[mcp_servers.hotline]` table in a marked
@@ -201,7 +244,7 @@ export function editCodexToml(
   const current = text ?? "";
   const block = findBlock(current);
   const outside = block === undefined ? current : current.slice(0, block[0]) + current.slice(block[1]);
-  if (HAND_WRITTEN.test(outside)) {
+  if (definesHotlineServer(outside)) {
     throw new AgentConfigError(
       `${label} already has an mcp_servers.hotline entry written by hand; remove it and run this again, or keep it and set tool_timeout_sec = ${CODEX_TOOL_TIMEOUT_SECONDS}`,
     );
@@ -241,7 +284,7 @@ export function readHooks(text: string | undefined, label: string, agent: AgentF
     for (const group of groups) {
       if (!isObject(group) || !Array.isArray(group.hooks)) continue;
       for (const hook of group.hooks) {
-        if (!isObject(hook) || !isHotlineHook(hook.command, "hotline", agent, event)) continue;
+        if (!isObject(hook) || !isHotlineHook(hook.command, agent, event)) continue;
         const wait = /--wait-seconds\s+(\d{1,6})\b/.exec(String(hook.command));
         found.push({
           event: HOOK_EVENTS[event],
@@ -269,15 +312,21 @@ export function readClaudeMcp(
 
 /** Codex's `[mcp_servers.hotline]` table, if present, with its `tool_timeout_sec` (Codex's default when unset). */
 export function readCodexMcp(text: string | undefined): { installed: boolean; toolTimeoutSeconds: number } {
-  const lines = (text ?? "").split("\n");
-  const start = lines.findIndex((line) =>
-    /^\s*\[\s*mcp_servers\s*\.\s*"?hotline"?\s*\]\s*(#.*)?$/.test(line),
-  );
-  if (start === -1) return { installed: false, toolTimeoutSeconds: CODEX_DEFAULT_TOOL_TIMEOUT_SECONDS };
-  for (const line of lines.slice(start + 1)) {
-    if (/^\s*\[/.test(line)) break;
-    const match = /^\s*tool_timeout_sec\s*=\s*(\d+(?:\.\d+)?)\s*(#.*)?$/.exec(line);
-    if (match) return { installed: true, toolTimeoutSeconds: Number(match[1]) };
+  const installed = definesHotlineServer(text ?? "");
+  let table = "";
+  for (const line of (text ?? "").split("\n")) {
+    const header = /^\s*\[\[?([^\]]*)\]\]?/.exec(line);
+    if (header) {
+      table = bareKey(header[1] ?? "");
+      continue;
+    }
+    const inHotline = table === "mcp_servers.hotline";
+    // `tool_timeout_sec = N` in the table, or inside an inline `hotline = { ... }`.
+    const inline = (table === "mcp_servers" && /^\s*["']?hotline["']?\s*=/.test(line)) || table === "";
+    if (!inHotline && !inline) continue;
+    if (inline && !/\bhotline\b/.test(line)) continue;
+    const match = /\btool_timeout_sec\s*=\s*(\d+(?:\.\d+)?)/.exec(line);
+    if (match) return { installed, toolTimeoutSeconds: Number(match[1]) };
   }
-  return { installed: true, toolTimeoutSeconds: CODEX_DEFAULT_TOOL_TIMEOUT_SECONDS };
+  return { installed, toolTimeoutSeconds: CODEX_DEFAULT_TOOL_TIMEOUT_SECONDS };
 }

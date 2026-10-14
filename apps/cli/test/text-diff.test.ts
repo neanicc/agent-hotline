@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { lineDiff } from "../src/text-diff.js";
+import { lineDiff, MAX_TABLE_CELLS } from "../src/text-diff.js";
 
 describe("lineDiff", () => {
   it("is empty for equal texts", () => {
@@ -22,6 +22,16 @@ describe("lineDiff", () => {
       " 9",
       "+10",
     ]);
+  });
+
+  it("shows a large reformatted file as a block replacement instead of building a huge table", () => {
+    const size = Math.ceil(Math.sqrt(MAX_TABLE_CELLS)) + 10;
+    const before = Array.from({ length: size }, (_, i) => `  line ${i}`).join("\n");
+    const after = Array.from({ length: size }, (_, i) => `    line ${i}`).join("\n");
+    const lines = lineDiff("f", before, after).split("\n");
+    expect(lines.filter((line) => line.startsWith("-"))).toHaveLength(size + 1);
+    expect(lines.filter((line) => line.startsWith("+"))).toHaveLength(size + 1);
+    expect(lines.indexOf("-  line 0")).toBeLessThan(lines.indexOf("+    line 0"));
   });
 
   it("shows a new file as all additions", () => {

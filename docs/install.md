@@ -61,10 +61,12 @@ users can open is made private.
   (`hotlineToolConfigs`, pointing at `<public URL>/hooks/el/tools/*`) and the agent
   (`hotlineAgentConfig`, tagged `definition-v<AGENT_DEFINITION_VERSION>`). The ids
   go into the config (`voice.toolSecretId`, `voice.toolIds`, `voice.agentId`) as
-  each is created, so a failure part way never leaves an orphan. Run it again
-  after changing the public URL or upgrading Hotline.
-- `hotline voice list` lists the voices in your ElevenLabs account and marks
-  the current one.
+  each is created, so a failure part way never leaves an orphan. Every run
+  also sends the current local tool secret to the existing workspace secret, so
+  a new store or a re-run `init` cannot leave ElevenLabs with a stale one. Run
+  it again after changing the public URL, the secret store or upgrading Hotline.
+- `hotline voice list` lists the voices in your ElevenLabs account (up to 10
+  pages of 100, and says so when there are more) and marks the current one.
 - `hotline voice set <voice id>` checks the id with `isVoiceId` before anything
   is saved or sent, saves `voice.voiceId`, and re-applies the agent. See
   [voice.md](voice.md) for choosing or cloning a voice.
@@ -93,7 +95,12 @@ Writes the entries from [mcp.md](mcp.md#config-snippets) and
   (`0600`) first, and the change is printed as a diff. `--dry-run` prints the
   diff only.
 - Running it again changes nothing. An older Hotline hook (another launcher, a
-  different wait) is replaced, not duplicated.
+  different wait) is replaced, not duplicated. A hook counts as Hotline's when
+  its command is exactly one program (or `node <file>.js`), then `hook <agent>
+  <event>` and only `--wait-seconds` or `--port`, whatever the launcher.
+- A Codex config that already defines `mcp_servers.hotline` in any TOML form
+  (a table, a quoted name, `hotline = {...}` under `[mcp_servers]`, dotted or
+  inline keys) is refused, never edited.
 - It never changes permission modes, allow lists or any other setting, and it
   never touches a `[mcp_servers.hotline]` table you wrote by hand (it says so).
   A symlinked config file is refused: add the entries by hand.
@@ -124,7 +131,7 @@ fails.
 | away mode | | the state file is unusable (it then reads as off) |
 | Claude Code and Codex installs (user, and the current project) | a hook's `--wait-seconds` is not below its `timeout`; Codex `tool_timeout_sec` is not above `policy.askTimeoutMinutes`; a Claude per-server `timeout` shorter than that | not installed; a hook or the MCP server is missing; less than 30 s between wait and timeout; a wait shorter than the ask timeout |
 | Claude Code idle timeout | `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` is not above the ask timeout | it is not set in this shell |
-| ElevenLabs agent | no phone number id or agent; the deployed agent's `definition-v<n>` tag is not `AGENT_DEFINITION_VERSION` | its voice or tools differ from the config |
+| ElevenLabs agent | no phone number id or agent; the deployed agent's `definition-v<n>` tag is not `AGENT_DEFINITION_VERSION`; it lacks one of the four tools, or their ids are not recorded | its voice differs from the config |
 | webhooks | `tunnel.publicUrl` is unset while a real provider needs it | |
 
 The monthly cost estimate from plan section 8 is not in `doctor` yet.

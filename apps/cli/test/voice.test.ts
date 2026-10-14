@@ -53,6 +53,11 @@ function fakeElevenLabs() {
   let tools = 0;
   return fakeFetch(
     route("POST", "/v1/convai/secrets", 200, { type: "stored", secret_id: "sec_fake_1", name: "x" }),
+    route("PATCH", "/v1/convai/secrets/sec_fake_1", 200, {
+      type: "stored",
+      secret_id: "sec_fake_1",
+      name: "x",
+    }),
     route("POST", "/v1/convai/tools", 200, () => ({ id: `tool_fake_${++tools}` })),
     route("PATCH", /^\/v1\/convai\/tools\/tool_fake_\d$/, 200, {}),
     route("POST", "/v1/convai/agents/create", 200, { agent_id: "agent_fake_1" }),
@@ -127,9 +132,27 @@ describe("hotline voice apply", () => {
     const again = fakeElevenLabs();
     expect((await cli(["voice", "apply"], testContext(setup, { fetch: again }))).code).toBe(0);
     expect(paths(again.requests)).toEqual([
+      "PATCH /v1/convai/secrets/sec_fake_1",
       ...[1, 2, 3, 4].map((n) => `PATCH /v1/convai/tools/tool_fake_${n}`),
       "PATCH /v1/convai/agents/agent_fake_1",
     ]);
+  });
+
+  it("sends the current local tool secret on every apply, so a changed store keeps answers working", async () => {
+    await writeSetup({ toolSecretId: "sec_fake_1" });
+    const rotated = "rotated-tool-secret-0123456789abcdefghijklmnopq";
+    await new FileSecretStore(join(setup.hotlineHome, "secrets.json")).set("elevenlabs.toolSecret", rotated);
+    const fetch = fakeElevenLabs();
+    expect((await cli(["voice", "apply"], testContext(setup, { fetch }))).code).toBe(0);
+    expect(fetch.requests[0]?.method).toBe("PATCH");
+    expect(fetch.requests[0]?.body).toEqual({
+      type: "update",
+      name: "agent-hotline-tool-secret",
+      value: rotated,
+    });
+    expect(fetch.requests.some((r) => r.method === "POST" && r.url.endsWith("/v1/convai/secrets"))).toBe(
+      false,
+    );
   });
 
   it("records ids created before a failure, so a retry does not duplicate them", async () => {
@@ -209,6 +232,34 @@ describe("hotline voice list", () => {
       "AbCdEfGh0123456789xy  Calm Voice with newline [premade]",
       "MyCl0neId0000000000a  Me [cloned]  (current)",
     ]);
+  });
+
+  it("follows next_page_token and says when the list was cut short", async () => {
+    await writeSetup();
+    const page = (n: number) => ({
+      voices: [{ voice_id: `Voice${String(n).padStart(15, "0")}`, name: `Voice ${n}` }],
+      has_more: true,
+      next_page_token: `page${n + 1}`,
+    });
+    const paged = fakeFetch(
+      route("GET", "/v2/voices?page_size=100", 200, page(1)),
+      route("GET", "/v2/voices?page_size=100&next_page_token=page2", 200, { ...page(2), has_more: false }),
+    );
+    const two = await cli(["voice", "list"], testContext(setup, { fetch: paged }));
+    expect(two.stdout.split("\n")).toEqual([
+      "Voice000000000000001  Voice 1",
+      "Voice000000000000002  Voice 2",
+    ]);
+
+    const endless = fakeFetch(
+      route("GET", /^\/v2\/voices\?page_size=100(&next_page_token=page(\d+))?$/, 200, (request: Recorded) => {
+        const n = Number(/page(\d+)/.exec(request.url)?.[1] ?? "1");
+        return page(n);
+      }),
+    );
+    const cut = await cli(["voice", "list"], testContext(setup, { fetch: endless }));
+    expect(endless.requests).toHaveLength(10);
+    expect(cut.stdout).toContain("more voices not shown");
   });
 });
 

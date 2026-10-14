@@ -1494,6 +1494,22 @@ Template:
     the fake provider and `install codex --uninstall`. No model calls, no
     Codex `/hooks` trust step, no real ElevenLabs or Twilio request.
   - Live call: not done (human, docs/live-check.md).
+- Greptile review fixes on PR #45:
+  - `voice apply` now PATCHes the existing workspace secret with the current
+    local tool secret on every run (`PATCH /v1/convai/secrets/{id}`), so
+    changing stores or re-running `init` cannot strand a stale secret.
+  - Hook ownership no longer depends on the launcher: any command shaped
+    exactly `<program> hook <agent> <event>` plus Hotline's own options is
+    Hotline's, for install, uninstall and doctor alike.
+  - The Codex check recognises `mcp_servers.hotline` in every TOML form
+    (quoted names, `hotline = {...}` under `[mcp_servers]`, dotted and inline
+    keys) and refuses to edit; doctor reads `tool_timeout_sec` from them.
+  - `doctor` fails when the agent lacks any of the four tools or their ids
+    are not recorded; `voice list` follows `next_page_token` (10 pages at
+    most, then says so); a cancelled prompt rejects instead of hanging; the
+    diff falls back to a block replacement past 1,000,000 table cells.
+  - Each fix has a test; `scripts/ci/run.sh build` and `test` pass after
+    catching up with main (HL-14b, definition v3): 1297 tests in 53 files.
 - Open issues or follow-ups:
   - `doctor` does not show the monthly cost estimate from plan section 8 yet.
   - Move the ElevenLabs management client into `packages/providers` once

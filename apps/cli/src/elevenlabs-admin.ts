@@ -6,7 +6,8 @@
 //
 // Endpoints (checked 2026-10-14):
 //   POST  /v1/convai/secrets            {type: "new", name, value} -> {secret_id}
-//         https://elevenlabs.io/docs/api-reference/workspace/secrets/create
+//   PATCH /v1/convai/secrets/{secret_id} {type: "update", name, value}
+//         https://elevenlabs.io/docs/api-reference/workspace/secrets/create, .../secrets/update
 //   POST  /v1/convai/tools              {tool_config} -> {id}
 //   PATCH /v1/convai/tools/{tool_id}    {tool_config}
 //         https://elevenlabs.io/docs/api-reference/tools/create, .../tools/update
@@ -14,7 +15,8 @@
 //   PATCH /v1/convai/agents/{agent_id}  agent body
 //   GET   /v1/convai/agents/{agent_id}  -> {agent_id, tags, conversation_config, ...}
 //         https://elevenlabs.io/docs/api-reference/agents/create, .../agents/update, .../agents/get
-//   GET   /v2/voices?page_size=100      -> {voices: [{voice_id, name, category}], has_more}
+//   GET   /v2/voices?page_size=100[&next_page_token=...]
+//                                       -> {voices: [{voice_id, name, category}], has_more, next_page_token}
 //         https://elevenlabs.io/docs/api-reference/voices/search
 import {
   AGENT_DEFINITION_VERSION,
@@ -28,6 +30,8 @@ import type { CliFetch } from "./setup.js";
 export const ELEVENLABS_ORIGIN = "https://api.elevenlabs.io";
 const TIMEOUT_MS = 15_000;
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
+/** `voice list` reads at most this many pages of 100 voices, then says the list was cut short. */
+export const MAX_VOICE_PAGES = 10;
 /** Name of the workspace secret holding `elevenlabs.toolSecret`. */
 export const TOOL_SECRET_NAME = "agent-hotline-tool-secret";
 
@@ -133,6 +137,12 @@ export class ElevenLabsAdmin {
     return ElevenLabsAdmin.id(body.secret_id, "store the tool secret");
   }
 
+  /** Replaces the value of an existing workspace secret, keeping its id. */
+  async updateSecret(secretId: string, name: string, value: string): Promise<void> {
+    const path = `/v1/convai/secrets/${ElevenLabsAdmin.id(secretId, "the tool secret")}`;
+    await this.call("PATCH", path, "update the tool secret", { type: "update", name, value });
+  }
+
   async createTool(toolConfig: unknown): Promise<string> {
     const body = await this.call("POST", "/v1/convai/tools", "create a tool", { tool_config: toolConfig });
     return ElevenLabsAdmin.id(body.id, "create a tool");
@@ -172,14 +182,24 @@ export class ElevenLabsAdmin {
     };
   }
 
-  async listVoices(): Promise<VoiceSummary[]> {
-    const body = await this.call("GET", "/v2/voices?page_size=100", "list voices");
-    const voices = Array.isArray(body.voices) ? body.voices : [];
-    return voices.flatMap((voice) => {
-      const { voice_id: voiceId, name, category } = record(voice);
-      if (typeof voiceId !== "string" || !isVoiceId(voiceId)) return [];
-      return [{ voiceId, name: printable(name) || "(no name)", category: printable(category, 20) }];
-    });
+  /** Every voice in the account, page by page, up to `MAX_VOICE_PAGES` pages. */
+  async listVoices(): Promise<{ voices: VoiceSummary[]; complete: boolean }> {
+    const voices: VoiceSummary[] = [];
+    let token: string | undefined;
+    for (let page = 0; page < MAX_VOICE_PAGES; page++) {
+      const query = token === undefined ? "" : `&next_page_token=${encodeURIComponent(token)}`;
+      const body = await this.call("GET", `/v2/voices?page_size=100${query}`, "list voices");
+      for (const voice of Array.isArray(body.voices) ? body.voices : []) {
+        const { voice_id: voiceId, name, category } = record(voice);
+        if (typeof voiceId !== "string" || !isVoiceId(voiceId)) continue;
+        voices.push({ voiceId, name: printable(name) || "(no name)", category: printable(category, 20) });
+      }
+      const next = body.next_page_token;
+      if (body.has_more !== true || typeof next !== "string" || next === "")
+        return { voices, complete: true };
+      token = next;
+    }
+    return { voices, complete: false };
   }
 }
 
@@ -211,6 +231,11 @@ export async function deployAgent(options: DeployOptions): Promise<string> {
     toolSecretId = await admin.createSecret(TOOL_SECRET_NAME, options.toolSecret);
     await options.save({ toolSecretId });
     log("created the tool secret in the ElevenLabs workspace");
+  } else {
+    // The local secret may have changed since (another store, a new init), and the
+    // daemon checks every tool call against the local one: always send it again.
+    await admin.updateSecret(toolSecretId, TOOL_SECRET_NAME, options.toolSecret);
+    log("updated the tool secret in the ElevenLabs workspace");
   }
   const toolIds: Record<string, string> = { ...options.toolIds };
   const configs = hotlineToolConfigs({ publicUrl: options.publicUrl, toolSecretId });

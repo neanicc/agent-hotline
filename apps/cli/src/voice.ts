@@ -129,7 +129,8 @@ export async function voiceCommand(
     }
     if (action === "list") {
       const { config, secrets } = await loadSetup(context);
-      const voices = await (await admin(context, await secrets.get("elevenlabs.apiKey"))).listVoices();
+      const client = await admin(context, await secrets.get("elevenlabs.apiKey"));
+      const { voices, complete } = await client.listVoices();
       if (voices.length === 0) out.stdout("No voices found in your ElevenLabs account.");
       for (const voice of voices) {
         const current = voice.voiceId === config.voice.voiceId ? "  (current)" : "";
@@ -137,6 +138,7 @@ export async function voiceCommand(
           `${voice.voiceId}  ${voice.name}${voice.category ? ` [${voice.category}]` : ""}${current}`,
         );
       }
+      if (!complete) out.stdout("(more voices not shown; find the rest in My Voices in the ElevenLabs app)");
       return 0;
     }
     out.stderr(`hotline voice: unknown action "${action}"\n\n${voiceUsage()}`);
