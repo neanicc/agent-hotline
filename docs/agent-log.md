@@ -340,11 +340,13 @@ Template:
   call. Sends stamped after `now` keep counting against the rate limits when the
   clock moves back. A voice answer counts only while its ask is on the call in
   progress, not after that call ended, and an `unclear` report only while the ask
-  is on a call or awaiting a text reply (not during a retry wait).
+  is on a call or awaiting a text reply (not during a retry wait). An ask that
+  expires or is cancelled mid-call is resolved at once; `docs/contracts.md` tells
+  the daemon to drop it from the live call.
 - Dependency: fast-check 4.10.2 (released 2026-09-19; its one dependency
   pure-rand 8.4.2 is from 2026-07-10) as a core dev dependency for property tests.
 - Evidence (automated, worktree, Node 24.11.0 locally; CI covers Node 22):
-  `pnpm --filter @hotline/core test` passes 106 tests in 8 files. Three
+  `pnpm --filter @hotline/core test` passes 107 tests in 8 files. Three
   properties of 400/400/100 runs each cover about 34,000 steps, 1,070 calls, 680
   given-up calls, 1,430 texts and 480 answered outcomes per run of the suite. Every answered outcome is
   re-checked against `answerProblem` and the channel. The silent property asserts

@@ -440,6 +440,26 @@ describe("expiry and cancellation", () => {
     });
   });
 
+  it("resolves an ask that expires mid-call, keeps the call for the rest, and ignores a late answer", () => {
+    const h = new Harness(settings);
+    h.ask({ id: "q1", ttlMs: 2 * MINUTE });
+    h.ask({ id: "q2", text: "Other?", ttlMs: HOUR });
+    h.advance(20 * SECOND);
+    const callId = h.callId;
+    const [expired] = ofType(h.advance(2 * MINUTE), "resolve");
+    expect(expired).toMatchObject({ askId: "q1", outcome: { outcome: "no-answer", reason: "timeout" } });
+    expect(h.state.call?.id).toBe(callId);
+    const late = makeAnswer("q1", { type: "option", option: 1 }, h.now);
+    expect(h.send({ type: "answer", answer: late })).toEqual([
+      { type: "ignored", event: "answer", askId: "q1", reason: "no open ask with this id" },
+    ]);
+    const answered = h.send({
+      type: "answer",
+      answer: makeAnswer("q2", { type: "option", option: 2 }, h.now),
+    });
+    expect(ofType(answered, "resolve")[0]?.outcome.outcome).toBe("answered");
+  });
+
   it("cancels an ask in a call and ignores it when the call ends", () => {
     const h = new Harness(settings);
     h.ask({ id: "q1" });

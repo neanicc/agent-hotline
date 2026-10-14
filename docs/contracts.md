@@ -251,7 +251,7 @@ does I/O; `packages/core/test/purity.test.ts` scans the sources to keep it so.
 | `place-call {callId, askIds}` | One call covering these asks, read in this order |
 | `end-call {callId}` | Hang up this call if it is still live: it was never reported as ended and has been given up on |
 | `send-text {askId, reason}` | Text the owner this ask; `reason` is `notify`, `quiet-hours`, `call-limit` or `after-call` |
-| `resolve {askId, outcome, status}` | Final: return the `AskOutcome` to the agent, store the ask with `status` (`answered`, `cancelled`, or `expired` for every other no-answer) |
+| `resolve {askId, outcome, status}` | Final: return the `AskOutcome` to the agent, store the ask with `status` (`answered`, `cancelled`, or `expired` for every other no-answer). If the ask is on the live call (it expired or was cancelled mid-call), tell the voice side to drop it; a later answer for it is ignored |
 | `delivered {askId}` | Final for a `notify` ask, after `text-sent` |
 | `ignored {event, reason}` | The event changed nothing; log it, never treat it as an answer |
 
