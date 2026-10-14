@@ -127,17 +127,12 @@ the `twilio.accountSid` and `twilio.authToken` secrets exist. Otherwise it logs
 
 - **Precheck:** an `X-Twilio-Signature` header and a form content type, or `403`
   before the body is read.
-- **Bounded:** at most 32 texts are read or handled at once
-  (`MAX_SMS_IN_FLIGHT`, HL-13b), each given 2 seconds to deliver its body;
-  more get the `403` before their body is read. Anyone can send a signature
-  header, and the signature can only be checked over the body, so this caps
-  what unauthenticated senders can make the daemon hold. Trade-off: a sender
-  that keeps all 32 slots busy (many connections at once, each cut off after
-  2 seconds) makes a genuine owner text get the `403` too. Hotline cannot
-  count on Twilio delivering it again, so the asks it would have answered end
-  as no answer at their timeout (fails closed), and the owner has to text
-  again or wait for the call. Reserving capacity for genuine Twilio requests
-  is a follow-up.
+- **Not bounded yet:** unlike the post-call and server-tool routes, this
+  route has no in-flight cap or body deadline. Anyone can send a signature
+  header, and the signature can only be checked over the body, so a plain cap
+  would let an unauthenticated sender hold every slot and shut out the
+  owner's texts. HL-13b tried one and took it out for that reason. Bounding
+  it while reserving room for genuine Twilio requests is a follow-up.
 - **Verify:** the signature is recomputed with Twilio's documented algorithm
   (`validTwilioSignature` in `@hotline/providers`) over the exact public URL
   (`publicUrl` origin plus the raw path and query) and the form parameters, and

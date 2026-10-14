@@ -3,9 +3,7 @@
 //
 // Fails closed at every step:
 // - before the body is read, the request must carry `X-Twilio-Signature` and a
-//   form content type (`precheck`), and at most `MAX_SMS_IN_FLIGHT` requests
-//   are read or handled at once, each given `SMS_BODY_TIMEOUT_MS` to deliver
-//   its body;
+//   form content type (`precheck`);
 // - the body is parsed strictly, and a parse error is the same bare 403;
 // - the signature is checked against the exact public URL and the form
 //   parameters, in constant time, and the account SID must be ours (`verify`);
@@ -42,17 +40,6 @@ export const TWILIO_SMS_PATH = "/twilio/sms";
 /** All anyone but the owner ever hears back. Says nothing about Hotline, agents or the owner. */
 export const GENERIC_SMS_REPLY = "Sorry, this number does not accept messages.";
 export const OTHER_SENDER_REPLIES_PER_HOUR = 5;
-/**
- * Texts being read or handled at once. Anyone can send a request with a
- * signature header, and the signature can only be checked once the body is
- * read, so this caps what unauthenticated senders can make the daemon hold
- * (32 bodies of at most 256 KiB). A sender that keeps every slot busy can
- * still delay the owner's texts: generous, so that takes many connections at
- * once, each cut off after `SMS_BODY_TIMEOUT_MS`.
- */
-export const MAX_SMS_IN_FLIGHT = 32;
-/** How long an SMS sender may take to deliver its body; Twilio's form bodies (a few KiB) take far less. */
-export const SMS_BODY_TIMEOUT_MS = 2_000;
 /**
  * The reply to an owner's text Twilio could not confirm. It goes back only to
  * whoever posted the webhook: through Twilio to the owner, or to a forger.
@@ -114,8 +101,6 @@ export interface TwilioSmsRouteOptions {
   lookup: (messageSid: string) => Promise<PulledMessage>;
   /** A signed owner's text that Twilio's records do not confirm. It never reaches `onOwnerMessage`. */
   onUnverified?: (messageSid: string, failure: Unverified) => void | Promise<void>;
-  /** How long a sender may take to deliver its body (default 2 s); tests shorten it. */
-  bodyTimeoutMs?: number;
 }
 
 function escapeXml(text: string): string {
@@ -173,8 +158,6 @@ export function twilioSmsRoute(options: TwilioSmsRouteOptions): WebhookRoute {
   return {
     method: "POST",
     url: TWILIO_SMS_PATH,
-    maxInFlight: MAX_SMS_IN_FLIGHT,
-    bodyTimeoutMs: options.bodyTimeoutMs ?? SMS_BODY_TIMEOUT_MS,
     precheck: (request) =>
       header(request, "x-twilio-signature") !== undefined &&
       (header(request, "content-type") ?? "").toLowerCase().startsWith("application/x-www-form-urlencoded"),

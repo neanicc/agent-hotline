@@ -3190,8 +3190,9 @@ Template:
   the inbound line deleted the call's held instructions when it handled the
   event and `addInstruction` is idempotent by id (new test in
   `inbound-line.test.ts`), and the inbound call record is an upsert.
-- Decision (issue P3, done here): the SMS route and each server tool get
-  `maxInFlight` 8 and a 5 second body deadline, as the post-call route has.
+- Decision (issue P3, partly done here): each server tool gets `maxInFlight`
+  8 and a 5 second body deadline, as the post-call route has. The SMS route's
+  cap was tried and removed after review (see below).
   The other P3 (count texts sent outside the queue against `textsPerHour`
   and `textsPerDay`) touches call policy and is left as a follow-up.
 - `docs/security.md` is not on main yet (HL-13, PR #77, is open), so the
@@ -3267,6 +3268,16 @@ Template:
     after a restart.
   - (P3) Saving new session numbers in `get_status` cannot fail the status
     any more.
-- Open issues or follow-ups: security.md update after #77; count out-of-queue
+- Staff review of 6404cf2 (P2): any cap on the SMS route lets an
+  unauthenticated sender crowd out the owner's only text channel, which is a
+  new availability limit compared with main. The SMS cap and its tests are
+  removed, so the route is as it was on main. The server-tool caps stay,
+  because only a holder of the tool secret can take a slot there. Bounding the
+  SMS route with capacity reserved for genuine Twilio requests is a
+  follow-up. (P3s: the saved PIN time widening the owner-turn window goes into
+  security.md with #77; splitting `SavedCall` out of `inbound-line.ts` waits
+  for HL-13c.)
+- Open issues or follow-ups: bound `/hooks/twilio/sms` with reserved capacity
+  for genuine Twilio requests; security.md update after #77; count out-of-queue
   texts against the text rate limits; HL-13c (#80) retries processing records
   and normalises the SMS body comparison in the same files.
