@@ -1695,3 +1695,41 @@ Template:
   pre-existing queue or test bug that random seeds rarely hit, not this refactor.
   It is not fixed here (out of lane); the rerun passed. Tracked in #50
   (`lane:core`), after the staff review on ff58e6a (P2) asked for an issue.
+
+## 2026-10-14 — HL-50 Queue property failure, seed -763136370 (#50)
+
+- Root cause: a test bug, not a queue bug. In the shrunk counterexample a question
+  (`a1`) joined the first call 1 ms into its 10 ms batch window, so its `readyAt`
+  was still the window's end (start + 11 ms) when the call was placed at
+  start + 10 ms. That call ended `no-pickup` at start + 10 ms; `endCall` set both
+  asks' `readyAt` to start + 10 ms + `retryDelayMs` (0), and the same step placed
+  the retry, which is what the contract says ("retried once after the retry
+  delay"; "new asks still in their batch window join"). The invariant read
+  `readyAt` from `entry.before`, the state before the `call-ended` event, so it saw
+  the stale batch-window end. Only a zero retry delay with the call ending inside
+  a joined ask's window hits it, hence about one CI failure in many. The two
+  `call-me` events in the sequence were ignored (a call was in progress) and the
+  step was correctly not owner-asked; the classification was not the problem.
+- Decision / change: the queue is unchanged, so `docs/contracts.md` is unchanged.
+  The property check is stricter, not looser. It now tracks how and when each
+  ask's latest call ended from the events alone (`call-ended` for the call in
+  progress, or `end-call` for a stuck call, counted as dropped). A non-owner-asked
+  call may include an ask already called only if that call ended `no-pickup` or
+  `failed`, and only once `retryDelayMs` has passed since it ended. The old
+  `readyAt <= now` check stays for every step except the one whose event ended
+  the ask's last call. The owner-asked exemption and quiet-hours checks are as
+  before. Not taken: clamping `readyAt` to the call time in `placeCall` (as HL-03b
+  did for call-me). It changes no behavior and would only have hidden the stale
+  read.
+- Evidence (automated, worktree, Node 24 locally): new tests replay the seed and
+  path through `fc.assert`, run the shrunk counterexample as a fixed command
+  list, and two unit tests in `queue.test.ts` cover the minimal sequence (zero
+  delay: the retry goes out in the step that ended the call; 1 ms delay: it waits
+  1 ms). With the old check restored, both replay tests fail with the original
+  `expected 1767225600011 to be less than or equal to 1767225600010`. Mutation
+  check on `queue.ts`, each reverted: retries joining any call (killed by the new
+  bound), ignoring the retry delay (killed), retrying after a dropped or stuck call
+  (killed by the result check), and a delay 1 ms short (survives the property
+  suite, killed by three unit tests). The queue property file passed 60 runs in a
+  row with random seeds (900 cases each, 54,000 in all).
+- Open issues or follow-ups: none.
