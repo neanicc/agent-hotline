@@ -1190,3 +1190,20 @@ Template:
     | Reply timed by arrival instead of first sighting | 1 |
     | Unknown send time binds | 1 |
     | Codes only for high-risk texts | 6 |
+- Bot staff review on 289e223 (approve with nits, score 88):
+  - P2, fixed: the approval vocabulary missed refusals without a "no" and
+    questions, so "fine, skip it" or "okay, what does it do" (speech
+    recognition drops the "?") could confirm a low-risk allow. Refusal words
+    (`skip`, `decline`, `pass`, `block`, `veto`, `rather`, ...) now count as
+    doubt everywhere. Questions (a `?` or a question word) count as doubt in the
+    matched words and anything after them. Decision: a question before the
+    answer ("what does it push?" and then "yes, push it") does not block the
+    yes, since asking is not refusing.
+  - Tests: eight more phrasings never approve; a question before a yes stands;
+    a question after it takes the yes back. Mutation checks, each reverted:
+    questions not doubt (4 tests fail), no refusal words (3), earlier questions
+    blocking a later yes (2).
+  - P3, fixed: after a wrong code, the reply now says the codes in earlier
+    texts no longer work.
+  - P2 (split the orchestrator before HL-10) and P3 (measure false "no answer"
+    in the live check) stay follow-ups.

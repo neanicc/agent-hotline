@@ -344,8 +344,12 @@ store, the providers and the webhooks through core's pure queue
   any `n't` (apostrophe look-alikes such as `’`, `ʼ`, `` ` ``, `´` and `′` are
   normalised first) and the same forms typed without it (`dont`, `wouldnt`,
   `cant`, ...), hedges and conditions (`unsure`, `whether`, `if`, `probably`,
-  `think`, `hmm`, ...), and the phrases "hang on", "hold on", "not yet", "no
-  way" and "never mind".
+  `think`, `hmm`, ...), refusals without a "no" (`skip`, `decline`, `pass`,
+  `block`, `veto`, `rather`, ...), the phrases "hang on", "hold on", "not yet",
+  "no way" and "never mind", and questions (a `?`, or `what`, `why`, `how`,
+  `which`, ..., since speech recognition often drops the question mark). A
+  question asked before the owner's answer ("what does it push?") does not
+  count against a later yes; one in the answer itself or after it does.
   A `deny` needs only the owner's words in a window; nothing else can block a
   refusal. The stored `ownerExcerpt` is the matching owner turns, verbatim, not
   the model's `owner_words`. An unconfirmed answer is dropped

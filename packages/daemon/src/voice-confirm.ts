@@ -66,6 +66,8 @@ const DOUBT_WORDS = wordSet(
     "unless but cannot nevermind scratch forget actually instead",
     // Hedges and conditions: "I'm unsure whether to approve", "yes if the tests pass".
     "unsure uncertain doubt dunno idk whether if perhaps probably possibly might guess think hmm",
+    // Refusals without a "no": "fine, skip it", "go ahead and decline it".
+    "decline declined skip pass block disallow veto rather away",
     "dont doesnt didnt wont wouldnt cant couldnt shouldnt isnt arent wasnt werent",
     "havent hasnt hadnt aint mustnt neednt mightnt shant",
   ].join(" "),
@@ -84,6 +86,8 @@ const DONE_PHRASES = [
   "all good",
   "no more",
 ];
+/** Words that make a turn a question. */
+const QUESTION_WORDS = wordSet("what why how which when where who whose explain wonder curious question");
 /** Doubt that only shows as a phrase. */
 const DOUBT_PHRASES = ["hang on", "hold on", "not yet", "no way", "never mind", "dont do"];
 /** Apostrophe look-alikes a transcript may use for "don't". */
@@ -104,10 +108,15 @@ function tokens(text: string): string[] {
  * `n't` (and the bare `t` it leaves when split) counts, so "okay, I wouldn't"
  * or "sure, I can't" is never a clear yes.
  */
-export function soundsDoubtful(text: string): boolean {
-  if (normalized(text).includes("n't")) return true;
+export function soundsDoubtful(text: string, questions = true): boolean {
+  const plain = normalized(text);
+  if (plain.includes("n't")) return true;
   const words = tokens(text);
   if (words.some((word) => word === "t" || DOUBT_WORDS.has(word))) return true;
+  // A question is never an approval ("okay, what does it do"; speech recognition
+  // often drops the question mark). `questions: false` is for turns before the
+  // owner's answer, where asking what something does is not a refusal.
+  if (questions && (/[?？¿]/u.test(plain) || words.some((word) => QUESTION_WORDS.has(word)))) return true;
   const joined = ` ${words.join(" ")} `;
   return DOUBT_PHRASES.some((phrase) => joined.includes(` ${phrase} `));
 }
@@ -184,13 +193,15 @@ export function answerWindows(
 function matchingTurns(
   excerpt: string,
   windows: readonly (readonly TranscriptTurn[])[],
-): { window: number; end: number; text: string } | undefined {
+): { window: number; start: number; end: number; text: string } | undefined {
   for (const [window, turns] of windows.entries()) {
     for (let end = 0; end < turns.length; end++) {
       if (turns[end]?.role !== "owner") continue;
       for (let start = end; start >= 0 && turns[start]?.role === "owner"; start--) {
         const run = turns.slice(start, end + 1);
-        if (ownerSaid(excerpt, run)) return { window, end, text: run.map((turn) => turn.message).join(" ") };
+        if (ownerSaid(excerpt, run)) {
+          return { window, start, end, text: run.map((turn) => turn.message).join(" ") };
+        }
       }
     }
   }
@@ -264,14 +275,19 @@ export function confirmVoiceDecision({
   if (decision.type === "allow") {
     // Strict on purpose: any doubt anywhere about this ask, even "no... okay, yes",
     // and the owner's last words about it must be a yes.
-    const all = windows.flatMap(ownerTurns);
+    // Before the answer, a refusal or hesitation counts against it; a question
+    // ("what does it push?") does not, since the owner may then say yes.
+    const earlier = [
+      ...windows.slice(0, match.window).flatMap(ownerTurns),
+      ...ownerTurns((windows[match.window] ?? []).slice(0, match.start)),
+    ];
     const last = ownerTurns(windows[windows.length - 1] ?? []).at(-1);
     const clearYes = (text: string) =>
       tokens(text).some((word) => YES_WORDS.has(word)) && !soundsDoubtful(text);
     // The last words are a yes when they hold one, or when they close the matched yes ("yes", "push it").
     const endsMatch = last !== undefined && last === windows[match.window]?.[match.end];
     if (
-      all.some((turn) => soundsDoubtful(turn.message)) ||
+      earlier.some((turn) => soundsDoubtful(turn.message, false)) ||
       !clearYes(match.text) ||
       last === undefined ||
       !(endsMatch || clearYes(last.message))

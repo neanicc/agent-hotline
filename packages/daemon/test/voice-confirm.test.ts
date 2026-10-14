@@ -195,6 +195,20 @@ describe("confirmVoiceDecision", () => {
     );
   });
 
+  it("lets a question before the yes stand, but a question after it takes the yes back", () => {
+    const reRead = agent("Just to confirm: git push origin main via Bash?");
+    expect(
+      confirm(
+        [GREETING, READ_PUSH, owner("what does it push?"), reRead, owner("yes, push it")],
+        0,
+        "yes push it",
+      ).confirmed,
+    ).toBe(true);
+    expect(confirm([GREETING, READ_PUSH, owner("yes"), owner("what does it push")], 0, "yes").confirmed).toBe(
+      false,
+    );
+  });
+
   it("is strict about a change of mind: 'no... okay, yes' is not an approval", () => {
     const reRead = agent("Just to confirm: git push origin main via Bash?");
     expect(
@@ -289,6 +303,14 @@ describe("confirmVoiceDecision", () => {
     "I think so, yes",
     "probably okay",
     "hmm, okay",
+    "okay, what does it do",
+    "okay, what does it do?",
+    "fine, skip it",
+    "go ahead and decline it",
+    "I'd rather you didn't",
+    "allow? why",
+    "pass on that one, okay",
+    "sure, which one is it",
   ])("refusals and hedges such as %j never approve", (said) => {
     expect(confirm([GREETING, READ_PUSH, owner(said)], 0, said).confirmed).toBe(false);
   });

@@ -124,7 +124,7 @@ export const TEXT_REPLIES = {
   calling: "Hotline: calling you now.",
   nothingWaiting: "Hotline: nothing is waiting for an answer right now.",
   codeMismatch:
-    "Hotline: that code does not match a waiting request, so nothing was approved. Text CALL ME to answer by phone.",
+    "Hotline: that code does not match a waiting request, so nothing was approved, and the codes in earlier texts no longer work. Text CALL ME to answer by phone.",
   answered: "Hotline: got it.",
   notRecorded: "Hotline: that answer could not be recorded.",
   notHandled: "Hotline: something went wrong and your text was not recorded. Please send it again.",
