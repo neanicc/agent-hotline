@@ -22,7 +22,9 @@ timeout), the server lists them (`GET /v1/sessions/:id/instructions`),
 acknowledges them just before it returns (`POST .../instructions/ack`,
 `via: "ask"`) and adds the acknowledged ones to the result as
 `instructions: [{"text", "receivedAt"}]` with a note that they are not the
-answer to the question. `check_inbox` hands them over too. Each instruction is
+answer to the question. `check_inbox` hands them over too: the inbox route only
+lists them, and the server acknowledges them (`via: "inbox"`) just before it
+returns, never once the client gave up. Each instruction is
 handed over once; if fetching them fails, the answer is still returned and the
 instructions stay queued. A cancelled `ask_human`, or one whose client gave up
 before the instructions were acknowledged, takes none. Delivery is at most

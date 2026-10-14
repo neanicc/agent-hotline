@@ -81,6 +81,9 @@ export const INBOUND_TEXTS = {
       : "Hotline: too many wrong PINs were given on calls Hotline placed to you. PIN approvals by phone are locked for up to an hour.",
   notQueued: (count: number) =>
     `Hotline: ${count === 1 ? "an instruction" : `${count} instructions`} from your call ${count === 1 ? "was" : "were"} not passed on: ${count === 1 ? "it" : "they"} could not be confirmed from the call, or the session ended. Call again if it still matters.`,
+  queued: (count: number) =>
+    `Hotline: ${count === 1 ? "your instruction is" : `your ${count} instructions are`} queued. ${count === 1 ? "It reaches" : "Each reaches"} its agent at its next question or when it finishes its turn.`,
+  othersQueued: (count: number) => `${count === 1 ? "The other one was" : `The other ${count} were`} queued.`,
 } as const;
 
 /** One plain line: no control or format characters, no fence or variable delimiters. */
@@ -374,6 +377,7 @@ export class InboundLine {
       return;
     }
     let notQueued = 0;
+    let queued = 0;
     // All of the call's instructions are judged together against the same
     // transcript (only one confirmed on its own can excuse a turn), every time,
     // so a retry after a failure reaches the same verdicts. Each is crossed off
@@ -394,13 +398,25 @@ export class InboundLine {
         notQueued += 1;
       } else if (!this.#queue(held, check.text, check.excerpt, event.conversationId, receivedAt)) {
         notQueued += 1;
+      } else {
+        queued += 1;
       }
       held.done = true;
     }
     this.#calls.delete(event.conversationId);
     this.#saveHeld();
-    if (notQueued > 0)
-      await this.#text(INBOUND_TEXTS.notQueued(notQueued), "instruction-not-queued", receivedAt);
+    // One text closes the loop either way: the voice agent said "queued" before
+    // the transcript was checked. Counts only, never the words.
+    if (notQueued > 0) {
+      const text = INBOUND_TEXTS.notQueued(notQueued);
+      await this.#text(
+        queued > 0 ? `${text} ${INBOUND_TEXTS.othersQueued(queued)}` : text,
+        "instruction-not-queued",
+        receivedAt,
+      );
+    } else if (queued > 0) {
+      await this.#text(INBOUND_TEXTS.queued(queued), "instruction-queued", receivedAt);
+    }
   }
 
   #queue(

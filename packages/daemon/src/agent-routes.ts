@@ -136,7 +136,7 @@ export interface InboxInstruction {
 }
 
 const AckInstructionsBody = z.strictObject({
-  via: InstructionDelivery.exclude(["inbox"]),
+  via: InstructionDelivery,
   ids: z.array(Id).min(1).max(20),
 });
 
@@ -157,7 +157,8 @@ export type OutcomeResponse =
 
 export interface InboxResponse {
   session: Session;
-  instructions: InboxInstruction[];
+  /** Queued, not handed over: acknowledge them by id to deliver them. */
+  instructions: (InboxInstruction & { id: string })[];
   asks: { ask: Ask; outcome?: AskOutcome }[];
 }
 
@@ -528,14 +529,10 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
     const asks = store.listSessionAsks(session.id, INBOX_ASK_LIMIT).map(outcomeOf);
     const seen = { ...(store.getSession(session.id) ?? session), lastSeenAt: clock().toISOString() };
     store.putSession(seen);
-    // Reading the inbox is one way an agent picks up the owner's instructions:
-    // the response carries them, so they are acknowledged at once.
-    const queued = queuedInstructions(session.id);
-    const instructions = ackInstructions(
-      session.id,
-      queued.map((instruction) => instruction.id),
-      "inbox",
-    );
+    // The inbox lists the owner's queued instructions but hands nothing over:
+    // its reader acknowledges what it passes on (`.../instructions/ack`), so a
+    // lost response never loses an instruction.
+    const instructions = queuedInstructions(session.id).map(listedInstruction);
     const response: InboxResponse = { session: seen, instructions, asks };
     return response;
   });

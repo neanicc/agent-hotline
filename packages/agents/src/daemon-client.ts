@@ -55,7 +55,8 @@ export type ListedInstruction = z.infer<typeof ListedInstruction>;
 
 export const Inbox = z.object({
   session: Session,
-  instructions: z.array(OwnerInstruction),
+  // Queued, not handed over: acknowledge them by id to deliver them.
+  instructions: z.array(ListedInstruction),
   asks: z.array(z.object({ ask: Ask, outcome: AskOutcome.optional() })),
 });
 export type Inbox = z.infer<typeof Inbox>;
@@ -89,7 +90,7 @@ export interface HotlineDaemon {
   ackInstructions(
     sessionId: string,
     ids: readonly string[],
-    via: "ask" | "stop",
+    via: "ask" | "stop" | "inbox",
   ): Promise<OwnerInstruction[]>;
   /** Marks the session ended and cancels its open asks. */
   endSession(sessionId: string): Promise<boolean>;
@@ -199,7 +200,7 @@ export class DaemonClient implements HotlineDaemon {
   ackInstructions(
     sessionId: string,
     ids: readonly string[],
-    via: "ask" | "stop",
+    via: "ask" | "stop" | "inbox",
   ): Promise<OwnerInstruction[]> {
     return this.call({
       method: "POST",

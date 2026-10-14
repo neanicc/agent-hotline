@@ -601,8 +601,15 @@ describe("owner instructions (HL-10)", () => {
         })
       ).json,
     ).toEqual({ instructions: [] });
+    // The inbox lists them with ids but hands nothing over: reading it twice shows them twice.
     const inbox = (await api(daemon, "GET", `/v1/sessions/${other.id}/inbox`)).json as InboxResponse;
     expect(inbox.instructions.map((i) => i.text)).toEqual(["rebase on main"]);
+    const again = (await api(daemon, "GET", `/v1/sessions/${other.id}/inbox`)).json as InboxResponse;
+    expect(again.instructions).toEqual(inbox.instructions);
+    await api(daemon, "POST", `/v1/sessions/${other.id}/instructions/ack`, {
+      via: "inbox",
+      ids: inbox.instructions.map((i) => i.id),
+    });
     expect(
       ((await api(daemon, "GET", `/v1/sessions/${other.id}/inbox`)).json as InboxResponse).instructions,
     ).toEqual([]);
@@ -622,7 +629,6 @@ describe("owner instructions (HL-10)", () => {
     for (const body of [
       {},
       { via: "stop" },
-      { via: "inbox", ids: ["a"] },
       { via: "stop", ids: [] },
       { via: "stop", ids: ["a"], extra: 1 },
     ]) {

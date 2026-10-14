@@ -50,7 +50,7 @@ adapters in [hooks.md](hooks.md) are the clients):
 | `GET /v1/asks/:askId/outcome?waitSeconds=0..30` | `{state: "waiting", ask}` or `{state: "final", ask, outcome}`, waiting up to `waitSeconds` for a change |
 | `POST /v1/asks/:askId/cancel` | Cancels an ask that is still open: `{cancelled}` |
 | `POST /v1/sessions/:sessionId/end` | Marks the session `ended`, cancels its open asks and drops its queued instructions: `{ended}`. An ended session takes no new asks, and its inbox and instruction routes answer `404` too, so its client registers again |
-| `GET /v1/sessions/:sessionId/inbox` | `{session, instructions, asks}`: the owner's queued instructions for this session ([inbound line](#inbound-line)), handed over once, and the 20 newest asks with their outcomes |
+| `GET /v1/sessions/:sessionId/inbox` | `{session, instructions, asks}`: the owner's queued instructions for this session ([inbound line](#inbound-line)) with their ids, listed but not handed over (the reader acknowledges them), and the 20 newest asks with their outcomes |
 | `GET /v1/sessions/:sessionId/instructions` | Lists the session's queued instructions, oldest first, without handing them over: `{instructions: [{id, text, receivedAt}]}` |
 | `POST /v1/sessions/:sessionId/instructions/ack` | `{via: "ask" \| "stop", ids}` marks those of `ids` still queued (and within their 6 hours) delivered and returns them: `{instructions: [{text, receivedAt}]}`. A reader acknowledges only what it is about to pass on: the MCP server just before it returns `ask_human`, the Stop hook once away mode and its count are settled |
 
@@ -670,8 +670,10 @@ anyone else's text the generic SMS reply.
   (`instructions` table) with the owner's utterance as its excerpt and the
   conversation id, under an id fixed when it was held, so a retried post-call
   event stores it once. Anything else is dropped
-  (`voice.instruction-unconfirmed` with the reason), and the owner gets one
-  text saying it was not passed on. The held instructions and the call's
+  (`voice.instruction-unconfirmed` with the reason). After the call the owner
+  gets one text either way, with counts only: that it was queued, or that it
+  was not passed on (and how many others were queued), since the voice agent
+  said `queued` before the transcript was checked. The held instructions and the call's
   numbering live in memory for an hour. Past that without a post-call event
   they are dropped, audited (`no post-call event`) and the owner gets the same
   "not passed on" text. A restart before the post-call event drops them too
@@ -683,7 +685,8 @@ anyone else's text the generic SMS reply.
   throwaway session to look.
 - **Delivery.** Each instruction is handed over once, oldest first, to the
   session's next reader: the MCP server after `ask_human` returns (it adds
-  them to the result), `check_inbox` (the inbox route), or the Stop hook, which
+  them to the result), `check_inbox` (which reads the inbox, then acknowledges
+  what it lists just before it returns), or the Stop hook, which
   takes them before it asks the owner anything and continues the agent with
   them (`decision: block`, one instruction per line) within the usual loop
   guards. A stop already waiting on the owner is cancelled when an instruction

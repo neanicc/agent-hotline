@@ -2405,6 +2405,16 @@ Template:
   "session 2" means; the stale doc comment above `isReference` is gone.
   P3s left as notes: the SMS status's latest-ask text and the yes words in
   `FILLER`.
+- Review fixes, tenth round (bot staff review of 3e52c7b, two P2s): the inbox
+  route only lists queued instructions (with ids), and `check_inbox`
+  acknowledges them just before it returns and not once the client gave up,
+  like `ask_human`, so a lost inbox response never loses an instruction. And
+  the owner now gets one text after every call that gave instructions, with
+  counts only: that they were queued, or which were not passed on, since the
+  voice agent said `queued` before the transcript was checked. P3s left: the
+  confirmation heuristics (the live check should watch the drop rate) and a
+  `MAX_REASON` guard that the caps make unreachable. Evidence: 58 files, 1712
+  tests pass.
 - Decision: sessions are named by number. `get_status` numbers live sessions
   by registration and remembers, per call, which number is which session;
   `send_instruction` takes only a number that call's status read out

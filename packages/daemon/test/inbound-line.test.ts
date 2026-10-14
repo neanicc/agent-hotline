@@ -279,7 +279,7 @@ describe("send_instruction", () => {
       ["run the tests", "session 1, run the tests", "queued"],
     ]);
     expect(sms.sent.map((s) => s.text)).toEqual([
-      "Hotline: an instruction from your call was not passed on: it could not be confirmed from the call, or the session ended. Call again if it still matters.",
+      "Hotline: an instruction from your call was not passed on: it could not be confirmed from the call, or the session ended. Call again if it still matters. The other one was queued.",
     ]);
     // Handled once: a replay of the event queues nothing more.
     await line.postCall(transcript("conv-1", "session 1, run the tests"), now, false);
@@ -332,7 +332,11 @@ describe("send_instruction", () => {
     // A call handled to the end leaves nothing to report.
     await line.postCall(transcript("conv-1", "session 1, run the tests"), now, false);
     await new InboundLine({ store, clock: () => now, redact: (text) => text, sms }).recover();
-    expect(sms.sent).toHaveLength(1);
+    // (The call itself texts that its instruction is queued; the restart adds nothing.)
+    expect(sms.sent.map((s) => s.text.slice(0, 30))).toEqual([
+      "Hotline: an instruction from y",
+      "Hotline: your instruction is q",
+    ]);
   });
 
   it("stores the owner's own words, never the model's text", async () => {

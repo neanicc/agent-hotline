@@ -24,7 +24,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { DaemonError, type HotlineDaemon, type Inbox } from "./daemon-client.js";
+import { DaemonError, type HotlineDaemon, type Inbox, type OwnerInstruction } from "./daemon-client.js";
 
 export const MCP_SERVER_NAME = "hotline";
 
@@ -149,10 +149,10 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-function summarizeInbox(inbox: Inbox) {
+function summarizeInbox(inbox: Inbox, instructions: readonly OwnerInstruction[]) {
   return {
     session: { nickname: inbox.session.nickname, state: inbox.session.state },
-    instructions: inbox.instructions,
+    instructions: instructions.map(({ text, receivedAt }) => ({ text, receivedAt })),
     asks: inbox.asks.map(({ ask, outcome }) => ({
       askId: ask.id,
       kind: ask.kind,
@@ -419,8 +419,26 @@ export function createHotlineMcpServer(options: HotlineMcpOptions): HotlineMcpSe
       inputSchema: {},
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    async () => {
-      const read = async () => json(summarizeInbox(await daemon.inbox(await ensureSession())));
+    async (_args, extra) => {
+      const read = async () => {
+        const sessionId = await ensureSession();
+        const inbox = await daemon.inbox(sessionId);
+        // The inbox only lists instructions; acknowledged just before the
+        // result is returned, and not at all once the client gave up, so
+        // they stay queued. Without the acknowledgement none are shown.
+        const listed = inbox.instructions;
+        const instructions =
+          listed.length === 0 || extra.signal.aborted
+            ? []
+            : await daemon
+                .ackInstructions(
+                  sessionId,
+                  listed.map((instruction) => instruction.id),
+                  "inbox",
+                )
+                .catch(() => []);
+        return json(summarizeInbox(inbox, instructions));
+      };
       try {
         try {
           return await read();
