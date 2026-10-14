@@ -158,8 +158,9 @@ Switches away mode, which lets the permission and Stop hooks phone you
 
 ## `hotline doctor`
 
-One `PASS`, `WARN` or `FAIL` line per check, then a count. Exits 1 if anything
-fails.
+One `PASS`, `WARN` or `FAIL` line per check, then `INFO` lines with the monthly
+cost estimate, then a count of the checks. Exits 1 if anything fails; `INFO`
+lines never pass, warn or fail.
 
 | Check | Fails when | Warns when |
 | --- | --- | --- |
@@ -172,7 +173,35 @@ fails.
 | ElevenLabs agent | no phone number id or agent; the deployed agent's `definition-v<n>` tag is not `AGENT_DEFINITION_VERSION`; it lacks one of the four tools, or their ids are not recorded; a tool calls another URL than `<tunnel.publicUrl>/hooks/el/tools/<name>` or uses another secret id than `voice.toolSecretId` | its voice differs from the config |
 | webhooks | `tunnel.publicUrl` is unset while a real provider needs it | |
 
-The monthly cost estimate from plan section 8 is not in `doctor` yet.
+### Monthly cost estimate
+
+The `INFO  cost` lines estimate a month's bill from the last 30 days in the
+daemon's store (`hotline.db` in the hotline home), computed locally with no
+network call. The store is opened read-only: doctor never creates, migrates or
+writes it. A missing or unreadable store is named and priced as no usage.
+
+- **Calls:** every call that ended in the window, placed or received, with its
+  duration rounded up to whole minutes (as Twilio bills). Each billed minute
+  pays the Twilio call leg and the LLM; minutes past the ElevenLabs plan's
+  included ones pay ElevenLabs' per-minute rate.
+- **Texts:** Hotline's own texts (`text.sent` and the crash notice in the audit
+  log), one reply for each text you sent (an upper bound: an empty text gets
+  none), and every text received, yours or another number's. Each counts as one
+  segment at the Twilio rate plus carrier fees.
+- **Fixed fees:** the Twilio number and the ElevenLabs plan count every month,
+  even with no usage.
+
+The rates are assumptions, not quotes. Their defaults are the README's cost
+table (`DEFAULT_COST_RATES` in `packages/core/src/config.ts`); override any of
+them under `costs` in `config.json`, in dollars, each a non-negative number:
+
+```json
+{ "costs": { "llmPerMinute": 0.05, "elevenLabsPlanPerMonth": 22, "elevenLabsIncludedMinutes": 250 } }
+```
+
+The estimate does not include Twilio's inbound call rate (calls you place are
+priced like outbound ones), multi-segment texts, taxes or anything the store did
+not record, such as rejected inbound calls.
 
 ## `hotline test-call`
 

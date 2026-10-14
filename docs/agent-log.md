@@ -1911,3 +1911,53 @@ Template:
   $12–14 within the plan's USD 10–15. Not changed: the check keeps the
   caller's `PATH` so it can find `node`; the copy sits outside the workspace,
   so the workspace `node_modules` is not on its resolution path.
+
+## 2026-10-14 — HL-11b Monthly cost estimate in hotline doctor
+
+- Decision / change: `hotline doctor` ends with `INFO  cost` lines (new
+  `info` status, never counted as pass, warn or fail and never affecting the
+  exit code): an estimated monthly cost from the last 30 days in the daemon's
+  store, with the usage, a Twilio and an ElevenLabs breakdown, and the words
+  "assumed rates, not a bill; computed locally". No network call.
+  - Rates: new `costs` section in core's config schema, eight dollar rates,
+    each `z.number().min(0)` with defaults from `DEFAULT_COST_RATES`
+    (`packages/core/src/config.ts`), the single source the README cost table
+    quotes. A test (`apps/cli/test/cost.test.ts`) fails if the README table
+    and the constants drift apart, and checks that the README's 60 minutes
+    and 200 texts price inside its stated $12–14 ($12.85).
+  - Usage (`apps/cli/src/cost.ts`): the store is opened with
+    `DatabaseSync(path, { readOnly: true, timeout: 2000 })`, never through
+    `openStore`, so doctor never creates, migrates or writes it; the store's
+    schema is unchanged. Calls: rows of `calls` started in the window,
+    outbound counted as placed and inbound as received, each duration rounded
+    up to whole minutes. Texts: there is no texts table, so they come from
+    audit events: `text.sent` and `sms.interrupted` as sent, one reply per
+    `sms.received` (an upper bound), and `sms.received` plus
+    `sms.other-sender` as received; each one segment.
+  - Pricing: Twilio number and ElevenLabs plan always count; every billed
+    minute pays the Twilio leg and the LLM; minutes past the plan's 75 pay
+    $0.08. Each line is rounded to cents and the total is their sum.
+- Decisions (no human available):
+  - LLM rate: the README gave only "about $1–3" for 60 minutes, so the
+    estimate assumes $0.03 a minute ($1.80 for 60 minutes) and the README row
+    now says so. Labelled as an assumption.
+  - Doctor reprices call durations with `config.costs` and ignores the stored
+    `costEstimateCents` (HL-09's flat 12 cents a minute); `docs/contracts.md`
+    says so. The daemon's `CALL_CENTS_PER_MINUTE` is left alone to stay out
+    of `packages/daemon`, where HL-09c and HL-10 are running.
+  - Thirty days stand for a month; a store younger than that underestimates.
+- Evidence (worktree, Node 24.11.0):
+  - `scripts/ci/run.sh build` and `test` pass: 1431 tests in 55 files. New:
+    cost (12), doctor cost estimate (4), core config cost rates (1).
+  - `scripts/ci/run.sh package` passes (all checks, doctor included).
+  - Built CLI on a scratch `HOTLINE_HOME` with fake providers: doctor printed
+    $7.15 with no store (and did not create one), then $7.35 after seeding two
+    calls (95 s and 0 s) and six text events.
+  - Scenario suite: not built yet (HL-12). Real agent integration: not
+    affected. Live call: not done (owner only).
+- Open issues or follow-ups:
+  - Derive the daemon's `CALL_CENTS_PER_MINUTE` from `DEFAULT_COST_RATES`, or
+    drop `costEstimateCents` from new call records.
+  - Record replies to the owner's texts (and HL-09c's confirmation texts, if
+    they use another event) in the audit log, so the estimate counts them
+    exactly instead of one per received text.

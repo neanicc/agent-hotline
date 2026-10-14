@@ -105,7 +105,7 @@ denies a permission request and reports a question unanswered.
 | `outcome` | `answered` \| `no-answer` \| `failed` \| `rejected` | |
 | `startedAt`, `endedAt?` | timestamp | `endedAt` not before `startedAt` |
 | `durationSeconds` | ≥ 0 | |
-| `costEstimateCents` | ≥ 0 | US cents, for the `hotline doctor` monthly estimate |
+| `costEstimateCents` | ≥ 0 | US cents, at the daemon's flat `CALL_CENTS_PER_MINUTE`. `hotline doctor` does not read it: it prices `durationSeconds` with `config.costs` |
 
 ## Config (`config.ts`)
 
@@ -137,6 +137,8 @@ users can read or write (it holds the PIN hash), so it must be mode `0600`.
 | `daemon.port` | 7341 | The agent API always binds 127.0.0.1 |
 | `secrets.store` | `auto` | `auto` = Keychain on macOS, file elsewhere; or `keychain`, `file` |
 | `nicknames` | `{}` | Repo folder name to spoken nickname |
+| `costs.twilioNumberPerMonth`, `twilioCallPerMinute`, `twilioTextPerSegment`, `twilioCarrierFeePerSegment` | 1.15, 0.014, 0.0083, 0.007 | Dollar rate assumptions for the `hotline doctor` cost estimate ([install guide](install.md#monthly-cost-estimate)). Each a number ≥ 0 |
+| `costs.elevenLabsPlanPerMonth`, `elevenLabsIncludedMinutes`, `elevenLabsPerMinute`, `llmPerMinute` | 6, 75, 0.08, 0.03 | Same; the defaults are `DEFAULT_COST_RATES`, which the README cost table quotes |
 
 The PIN hash's scrypt cost is capped so a hostile or corrupt config cannot hang
 or crash the inbound-call PIN check; `parsePinHash` returns `undefined` outside

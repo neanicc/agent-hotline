@@ -2,6 +2,7 @@ import { scryptSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   ConfigError,
+  DEFAULT_COST_RATES,
   MAX_PIN_SCRYPT_LOG_N,
   MAX_PIN_SCRYPT_P,
   MAX_PIN_SCRYPT_R,
@@ -43,8 +44,23 @@ describe("parseConfig", () => {
       tunnel: {},
       daemon: { port: 7341 },
       secrets: { store: "auto" },
+      costs: { ...DEFAULT_COST_RATES },
       nicknames: {},
     });
+  });
+
+  it("takes cost rate overrides and refuses negative or non-numeric rates", () => {
+    const costs = parseConfig({ ...minimal, costs: { llmPerMinute: 0, elevenLabsPlanPerMonth: 22 } }).costs;
+    expect(costs).toEqual({ ...DEFAULT_COST_RATES, llmPerMinute: 0, elevenLabsPlanPerMonth: 22 });
+    expect(issuesOf({ ...minimal, costs: { twilioCallPerMinute: -0.01 } })).toEqual([
+      expect.stringMatching(/^costs\.twilioCallPerMinute:/),
+    ]);
+    expect(issuesOf({ ...minimal, costs: { twilioNumberPerMonth: "1.15" } })).toEqual([
+      expect.stringMatching(/^costs\.twilioNumberPerMonth:/),
+    ]);
+    expect(issuesOf({ ...minimal, costs: { textPerSegment: 0.01 } })).toEqual([
+      "costs.textPerSegment: unknown setting",
+    ]);
   });
 
   it("keeps explicit settings", () => {
