@@ -1765,3 +1765,13 @@ Template:
     could import `node:sqlite` lazily, only where the store opens.
   - `hotline install` recognises a packaged `node .../lib/main.mjs` launcher
     only through `--command`; the docs point at `bin/hotline` instead.
+  - `docs/contracts.md` (Secrets, HL-02) still says same-user access "does not
+    let an agent approve anything". As Greptile found on #51, a same-user
+    process can read the Twilio auth token and a pending request's text code,
+    forge a signed `YES <code>` webhook and approve. HL-13's threat model should
+    correct it there and in `docs/security.md`.
+- Greptile review fixes on #51: the README now treats same-user processes as
+  trusted (they can forge owner replies and approve, not only misuse the
+  provider keys); the setup sequence passes `--public-url`, `--sms-from` and
+  `--agent-phone-number-id`, which `init` never prompts for; demo scene 8
+  replies `YES <code>` to a permission text, since a bare `yes` is no answer.

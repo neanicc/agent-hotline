@@ -55,10 +55,14 @@ copy the folder elsewhere and link its `bin/hotline`. If `hotline` is not on the
 `PATH` your agents start with, give `hotline install` the launcher's absolute path
 with `--command`.
 
-Then, in order ([docs/install.md](docs/install.md) has every flag and check):
+Then, in order ([docs/install.md](docs/install.md) has every flag and check).
+`init` asks for your number, PIN and credentials; the tunnel URL, the Twilio
+number and its ElevenLabs phone-number id (**Phone Numbers** in ElevenLabs) have
+no prompt, so pass them as flags:
 
 ```sh
-hotline init                    # your number, PIN, quiet hours, credentials
+hotline init --public-url https://<your-tunnel-domain> \
+  --sms-from <your Twilio number> --agent-phone-number-id <ElevenLabs id>
 hotline voice apply             # create the ElevenLabs agent and its tools
 hotline install claude          # and/or: hotline install codex (backup + diff)
 hotline daemon                  # in its own terminal; start your tunnel too
@@ -124,11 +128,13 @@ so the rules are strict:
 
 Known limits, accepted for Tier 1:
 
-- **Same-user secret access.** Any process running as you, coding agents
-  included, can read Hotline's Keychain items and `0600` files. That cannot
-  approve anything (approvals need your voice or text, and high risk your PIN),
-  but an agent could misuse the Twilio or ElevenLabs keys to place calls or texts
-  on your account. Use narrowly scoped keys
+- **Same-user processes are trusted.** Any process running as you, coding
+  agents included, can read Hotline's Keychain items, `0600` files and local
+  database. With the Twilio or ElevenLabs secrets and a pending request's
+  confirmation code, such a process could forge a signed webhook that looks like
+  your reply and approve a request without your voice or PIN, or place calls and
+  texts on your account. The rules above protect against other people and other
+  accounts, not against code running as you. Use narrowly scoped keys
   ([contracts.md](docs/contracts.md#secrets-secretsts)).
 - **One install token for every agent.** All local sessions share the agent API
   token, so one session can read or cancel another's asks. No agent-API route can

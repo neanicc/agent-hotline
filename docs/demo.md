@@ -156,8 +156,9 @@ confirming text."
 
 ## Scene 8: no pickup, so a text [phone: owner]
 
-Let the next call ring out. A text arrives with the ask; reply `1` (or `yes` to
-a permission). Show the agent continuing. Say: "If I don't pick up, it texts. If
+Let the next call ring out. A text arrives with the ask; reply `1` to choose an
+option, or, for a permission, `YES` followed by the code in that text (a bare
+`yes` is not an approval). Show the agent continuing. Say: "If I don't pick up, it texts. If
 I never answer, the agent hears 'no answer'."
 
 ## Scene 9: away mode keeps the agent going [phone: owner]
