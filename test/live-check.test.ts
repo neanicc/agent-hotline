@@ -6,6 +6,8 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, normalize } from "node:path";
 import { describe, expect, it } from "vitest";
+// The workspace root does not depend on @hotline/core, so import its source directly.
+import { parseConfig } from "../packages/core/src/index.js";
 
 const root = new URL("../", import.meta.url);
 const read = (path: string) => readFileSync(new URL(path, root), "utf8");
@@ -172,6 +174,44 @@ describe("docs/live-check.md", () => {
     ];
     const problems = docs.flatMap((path) => brokenLinks(path, (target) => target === LIVE));
     expect(problems).toEqual([]);
+  });
+
+  it("only tells the owner to set config keys the config schema accepts", () => {
+    // Fenced JSON blocks and inline settings such as `"judge": {"backend": "codex"}`.
+    const snippets = [
+      ...[...live.matchAll(/```json\n([\s\S]*?)```/g)].map((m) => m[1] as string),
+      ...[...live.matchAll(/`("[a-zA-Z]+": ?\{[^`]*\})`/g)].map((m) => `{${m[1]}}`),
+    ];
+    expect(snippets.length).toBeGreaterThanOrEqual(4);
+    const minimal = {
+      version: 1,
+      owner: { phoneNumber: "+15555550100", pinHash: `scrypt$15$8$1$${"s".repeat(22)}$${"h".repeat(43)}` },
+      quietHours: { timeZone: "America/Toronto" },
+    };
+    for (const snippet of snippets) {
+      const settings = JSON.parse(snippet) as Record<string, Record<string, unknown>>;
+      const parsed = parseConfig({ ...minimal, ...settings }) as unknown as Record<string, unknown>;
+      for (const [section, values] of Object.entries(settings)) {
+        expect(parsed[section], snippet).toMatchObject(values);
+      }
+    }
+  });
+
+  it("only uses hotline flags the CLI knows", () => {
+    const source = readdirSync(new URL("apps/cli/src/", root))
+      .filter((name) => name.endsWith(".ts"))
+      .map((name) => read(`apps/cli/src/${name}`))
+      .join("\n");
+    const flags = new Set<string>();
+    for (const line of live.split("\n")) {
+      for (const command of line.matchAll(
+        /\bhotline [a-z-]+(?: [a-z<>|-]+)*(?: --[a-z-]+(?: [^\s`-][^\s`]*)?)+/g,
+      )) {
+        for (const flag of command[0].matchAll(/--[a-z-]+/g)) flags.add(flag[0]);
+      }
+    }
+    expect(flags.size).toBeGreaterThan(5);
+    expect([...flags].filter((flag) => !source.includes(`"${flag}"`))).toEqual([]);
   });
 
   it("writes no phone number but the fake 555-01xx ones", () => {

@@ -2868,3 +2868,9 @@ Template:
   - L24 also posts an unsigned post-call webhook and expects 403.
   - R1 says the scratch PIN is throwaway.
   - The doc test also catches formatted and bare-digit phone numbers.
+  - Second review round: P10 shows the undo command next to the edit, and
+    cleanup checks the restore with `cmp` and records it in the results.
+  - The doc test now parses every config snippet in the doc with core's
+    `parseConfig`, and checks every `hotline` flag it uses against the CLI
+    source. A misspelled key, a refused value and an unknown flag each failed
+    it.

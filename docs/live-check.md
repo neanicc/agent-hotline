@@ -260,7 +260,13 @@ Then edit `~/.hotline/config.json` and set, keeping everything else:
 - `maxConsecutiveContinuations: 2` (default 5) lets L16 reach the cap in two
   continuations.
 
-Record these values in the results header.
+Record these values in the results header. They loosen the limits on a
+daemon that can phone and text you, so they must not outlive the run. The
+undo, which [section 6](#6-cleanup-and-rollback) step 2 runs and checks, is:
+
+```sh
+cp -p ~/.hotline/config.json.before-live-check ~/.hotline/config.json
+```
 
 ### P11. Quiet hours off for now
 
@@ -953,6 +959,7 @@ Plans: Twilio (upgraded) yes/no; ElevenLabs plan:
 Voice: library / clone / default      Voice model (doctor):
 Agent definition (doctor):            Reply judge (P7, P12): backend or off; judge credential (P14): login / API key
 Session settings (P10): rateLimits= askTimeoutMinutes= maxConsecutiveContinuations=
+Config restored afterwards (section 6, step 2, cmp clean): yes/no
 Doctor summary (P13):                 WARN lines:
 Latency (L25), typical seconds:       Sonnet 5.5 comparison:
 False no-answer (L27): misses / plain yeses =
@@ -1018,9 +1025,12 @@ After every run:
 
 1. `hotline away off`. Expected: `hotline away status` says off.
 2. Restore the session settings:
-   `cp -p ~/.hotline/config.json.before-live-check ~/.hotline/config.json`,
-   then delete the copy. If you switched `voice.llm` or the voice, run
-   `hotline voice apply` again.
+   `cp -p ~/.hotline/config.json.before-live-check ~/.hotline/config.json`.
+   Check it: `cmp ~/.hotline/config.json ~/.hotline/config.json.before-live-check`
+   prints nothing. Only then delete the copy, and record "config restored:
+   yes" in the results header. If you switched `voice.llm` or the voice, run
+   `hotline voice apply` again. Restart the daemon (or leave it stopped, step
+   3) so it no longer runs with the run's limits.
 3. Stop the daemon (Ctrl-C) and the tunnel (Ctrl-C in the ngrok terminal).
 4. Remove the scratch home from section 2: `rm -rf "$EV/fake-home"`.
 5. Review `$EV`. Keep what an open issue needs; delete the rest, and delete
