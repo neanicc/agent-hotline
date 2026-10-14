@@ -1561,6 +1561,89 @@ Template:
   - Clearing `voice.voiceId` does not reset the deployed agent's voice: the
     agent body omits `tts` when no voice is set.
 
+## 2026-10-14 — HL-14c Conversational approval in the voice persona (#49)
+
+- Owner direction (autopilot session, quoted on #44): approving should be "as
+  natural as possible"; when the voice agent thinks it heard a yes it confirms
+  ("is that a yes?"), when it thinks it may be a no it asks, it "should never
+  stay quiet", it "should text u after two unclear replies", and "the reason for
+  this change is I want the least friction/irritation for user", confirming
+  "any chill way possible that isn't ambiguous". On #44 the owner chose option
+  (b): after two unclear replies submit nothing and let the ask fall back to a
+  text. HL-14b (#40) had been refused this prompt edit twice by the local
+  permission system before that decision existed; this time the edit went
+  through.
+- Decision / change: `AGENT_DEFINITION_VERSION` is 4. In the outbound steps,
+  with step numbers kept: step 2 takes any clear phrasing, requires a one-sentence
+  read-back with the ask's key words before any allow ("Allow pnpm test in
+  demo-app? Yes?"), submits the allow only on the owner's yes to it with that
+  reply as `owner_words`, and submits a no at once without a read-back; step 5
+  asks for the PIN at most once per call; step 6 asks once ("Sorry, is that a
+  yes or a no?" plus the read-back for a permission request), then after a
+  second unclear reply says out loud it will text, submits nothing and moves on,
+  and never goes quiet. Only one HL-08 sentence changed (the `unclear`
+  submission), and `SAFETY_RULES` was updated for that sentence only; the
+  snapshot diff is the three step edits and the `definition-v4` tag.
+- Decisions (no human available):
+  - `submit_answer` no longer offers `unclear` to the model (the tool enum and
+    description), so the tool and the prompt agree; the daemon still parses
+    `unclear` from an agent on an older definition and still ends the ask as no
+    answer. Both paths are safe; neither approves.
+  - A clear yes to the yes-or-no question counts as the reply to the read-back,
+    since that question carries the read-back; this avoids asking for two yeses.
+  - No daemon code changed: an ask left without a decision when the owner spoke
+    already ends the call as `dropped` and texts the ask at once (queue
+    `textOnly: "after-call"`). An unanswered text expires as no answer
+    (reason `dropped`), which denies a permission request.
+  - The fake voice provider gets `read-back` and `unsure` steps and the
+    `confirms()` and `unsureTwice()` scripts; `answer`, `allows()` and
+    `unclear()` are unchanged so existing daemon tests (HL-09b's area) keep
+    their meaning. `unclear` now documents itself as definition v3 behaviour.
+- Evidence (automated, worktree, Node 24 locally): `scripts/ci/run.sh build`
+  passes; `CI=true scripts/ci/run.sh test` passes (1325 tests in 54 files). New:
+  prompt tests for the read-back, the immediate no, the yes-or-no question, the
+  PIN-once rule, the text-fallback sentence and the trimmed tool enum
+  (`elevenlabs-agent.test.ts`); fake flows for read-back, a no to the
+  read-back, a plain no, and unsure twice for a permission and a question
+  (`fake-voice.test.ts`); `readings()` recognising the read-back and the
+  yes-or-no question as the same ask, with the reply confirming the allow
+  (`persona-readings.test.ts`); end to end through the daemon, a confirmed
+  read-back allows (low risk, and high risk after one PIN), a no to it denies,
+  and unsure twice texts the ask at once and expires to a deny, or is answered
+  by the text reply (`conversational-approval.test.ts`). Scenario suite: not
+  built yet (HL-12). No ElevenLabs request was made and no real call was
+  placed; whether the real model follows the protocol is a live-check item
+  (added to `docs/live-check.md`).
+- Open issues or follow-ups:
+  - HL-09c (#42): require the read-back exchange in the transcript, and accept
+    a natural yes after the read-back even when an earlier turn was a hedge.
+    Today `voice-confirm.ts` refuses an allow when any earlier owner turn about
+    the ask sounds doubtful, so "hmm" then "is that a yes or a no?" then "yes"
+    is not confirmed and the ask is texted (fails closed).
+  - A read-back too short to share half of a long ask's key words is not
+    recognised as a reading, so the yes after it is not counted and the ask is
+    texted. HL-09c may want to match read-backs on fewer key words.
+  - The call log records an undecided call as `dropped` and the expired ask's
+    reason as `dropped`; a distinct reason would read better in the log.
+- Bot staff review on #49 (no P0 or P1). The P3 on the fake's read-back depending on the `asks` line layout is answered
+  with a comment naming `describeAsk`'s fence order; the fake-voice tests pin
+  the read-back's exact words. The P2s go to follow-ups, not this PR:
+  enforcing that the read-back names the request (its command or tool words)
+  and that the allow's words come from the reply to it is HL-09c's
+  `voice-confirm.ts` change. Until then the daemon still confirms an allow
+  from the owner's yes in the original reading's window. Real-model
+  behaviour stays a live-check item. Unconfirmed allows are already audited
+  as `voice.answer-unconfirmed` with their reason. The docs say plainly
+  that the read-back is a prompt rule, not a daemon control, until HL-09c
+  (which should also bind the confirming yes to a turn naming the request).
+- Greptile P2 on #49 fixed: the fake's read-back dropped the tool, so two asks
+  differing only by tool (`Read` and `Write` on the same text) read back
+  identically and tied in `readings()`. It now says "Allow <tool> to <text>
+  for <session>? Yes?", with a two-ask test that both read-backs are
+  recognised and both allows confirm. The prompt's read-back rule is
+  unchanged (what it wants to do and the session name); step 1 already
+  lists the tool among an ask's key words. 1326 tests in 54 files pass.
+
 ## 2026-10-14 — HL-09b Split the call orchestrator (#41)
 
 - Decision / change: pure refactor of `packages/daemon/src/orchestrator.ts`
@@ -1590,7 +1673,9 @@ Template:
   catching up with main (HL-06, HL-14b, HL-11, which did not touch the
   orchestrator), `scripts/ci/run.sh build` passes and `test` passed 53 files,
   1308 tests, three times in a row, including HL-14b's
-  `persona-readings.test.ts`. Mutation
+  `persona-readings.test.ts`. After a second catch-up (HL-14c, #49, which
+  added daemon tests but no daemon source), build passes and `test` passed 54
+  files, 1326 tests, three times in a row. Mutation
   checks on moved code, each reverted: high-risk allow without the PIN
   accepted (1 test fails), a maybe-placed call not failed on recovery (1),
   a wrong code not burning the waiting codes (1). Scenario suite not built yet
