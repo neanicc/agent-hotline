@@ -69,9 +69,12 @@ export interface CallVariables {
 }
 
 function cut(text: string, max: number): string {
-  // Angle brackets go, so agent text cannot close its own `<agent_text>` fence,
-  // and braces, so it cannot spell a `{{dynamic_variable}}` reference.
+  // Control and invisible format characters (bidi overrides, zero-width
+  // spaces) and newlines go, so agent text is one plain line; angle brackets go,
+  // so it cannot close its own `<agent_text>` fence; braces go, so it cannot
+  // spell a `{{dynamic_variable}}` reference.
   const flat = text
+    .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ")
     .replace(/[<>{}]/g, " ")
     .replace(/\s+/g, " ")
     .trim();

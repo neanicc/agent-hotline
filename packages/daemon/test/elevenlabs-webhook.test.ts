@@ -195,6 +195,7 @@ describe("submit_answer", () => {
       {
         conversationId: "conv_1",
         callSid: `CA${"0".repeat(31)}1`,
+        direction: "outbound",
         receivedAt: now,
         askNumber: 1,
         decision: { type: "allow" },
@@ -234,6 +235,26 @@ describe("submit_answer", () => {
   ])("maps %j", async (body, decision) => {
     await answer(body);
     expect(answers[0]?.decision).toEqual(decision);
+  });
+
+  it("refuses an answer on an inbound call until the PIN, since caller ID can be spoofed", async () => {
+    const inbound = { caller_id: OWNER, called_number: AGENT_NUMBER };
+    expect((await answer({ ...inbound, decision: "deny" })).json()).toMatchObject({ result: "pin-required" });
+    // A call claiming the owner on both ends counts as inbound too.
+    expect((await answer({ caller_id: OWNER, called_number: OWNER })).json()).toMatchObject({
+      result: "pin-required",
+    });
+    expect(answers).toEqual([]);
+    await tool("verify_pin", { ...binding(), ...inbound, pin: PIN });
+    expect((await answer({ ...inbound, decision: "deny" })).json()).toEqual({ result: "recorded" });
+    expect(answers.map((a) => [a.direction, a.decision, a.confirmation])).toEqual([
+      ["inbound", { type: "deny" }, "pin"],
+    ]);
+  });
+
+  it("accepts a low-risk answer on an outbound call without the PIN", async () => {
+    expect((await answer()).json()).toEqual({ result: "recorded" });
+    expect(answers.map((a) => [a.direction, a.confirmation])).toEqual([["outbound", "none"]]);
   });
 
   it("passes the handler's verdict back to the voice agent", async () => {
@@ -292,6 +313,7 @@ describe("get_status and send_instruction", () => {
       {
         conversationId: "conv_1",
         callSid: `CA${"0".repeat(31)}1`,
+        direction: "outbound",
         receivedAt: now,
         sessionNumber: 2,
         instruction: "now write the tests",
@@ -418,6 +440,35 @@ describe("post-call webhook", () => {
     expect((await postCall(transcription())).statusCode).toBe(500);
     expect((await postCall(transcription())).statusCode).toBe(200);
     expect(postCalls).toHaveLength(1);
+  });
+
+  const inboundTranscript = (from: string, conversation: string) => {
+    const body = transcription(conversation);
+    body.data.metadata.phone_call = { direction: "inbound", external_number: from, call_sid: "CAy" };
+    return body;
+  };
+  const roles = () => (postCalls.at(-1) as { transcript: { role: string }[] }).transcript.map((t) => t.role);
+
+  it("labels the person's turns as the owner's only on a call known to be with the owner", async () => {
+    // A stranger calling in, and the owner's number calling in without the PIN.
+    await postCall(inboundTranscript(STRANGER, "conv_in_stranger"));
+    expect(roles()).toEqual(["agent", "caller"]);
+    await postCall(inboundTranscript(OWNER, "conv_in_nopin"));
+    expect(roles()).toEqual(["agent", "caller"]);
+    // An outbound call whose other end is not the owner.
+    const elsewhere = transcription("conv_out_other");
+    elsewhere.data.metadata.phone_call.external_number = STRANGER;
+    await postCall(elsewhere);
+    expect(roles()).toEqual(["agent", "caller"]);
+    // The owner's number calling in after the PIN.
+    await tool("verify_pin", {
+      ...binding("conv_in_pin"),
+      caller_id: OWNER,
+      called_number: AGENT_NUMBER,
+      pin: PIN,
+    });
+    await postCall(inboundTranscript(OWNER, "conv_in_pin"));
+    expect(roles()).toEqual(["agent", "owner"]);
   });
 
   it("ignores another agent's events and other webhook types", async () => {

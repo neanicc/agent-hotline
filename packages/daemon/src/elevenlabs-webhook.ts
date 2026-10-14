@@ -44,6 +44,12 @@ const SEEN_EVENTS = 1000;
 export interface ToolCall {
   conversationId: string;
   callSid?: string;
+  /**
+   * `outbound` when the call went to the owner's number (Hotline dialled it);
+   * `inbound` when it came from the owner's number, which caller ID alone
+   * cannot prove.
+   */
+  direction: "outbound" | "inbound";
   receivedAt: Date;
 }
 
@@ -170,9 +176,10 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
         response = { result: "refused", end_call: true };
       } else {
         const { conversation_id, call_sid } = parsed.data;
-        const call = {
+        const call: ToolCall = {
           conversationId: conversation_id,
           ...(call_sid ? { callSid: call_sid } : {}),
+          direction: callDirection(parsed.data),
           receivedAt: options.clock(),
         };
         response = await serve(parsed.data as ToolBodies[N], call);
@@ -184,11 +191,19 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
 
   const ownerOnCall = (body: GetStatusBody) =>
     body.caller_id === options.ownerNumber || body.called_number === options.ownerNumber;
+  // Only a call to the owner's number from somewhere else is one Hotline placed;
+  // anything else that passed `ownerOnCall` came in from (what claims to be) the owner.
+  const callDirection = (body: GetStatusBody): ToolCall["direction"] =>
+    body.called_number === options.ownerNumber && body.caller_id !== options.ownerNumber
+      ? "outbound"
+      : "inbound";
 
   const pinRequired = { result: "pin-required", say: "Ask for the PIN and call verify_pin first." };
 
   const routes: WebhookRoute[] = [
     toolRoute("submit_answer", async (body, call) => {
+      // Caller ID can be spoofed: on an inbound call nothing is answered before the PIN.
+      if (call.direction === "inbound" && !pins.isVerified(call.conversationId)) return pinRequired;
       const decision = toDecision(body);
       if (decision === undefined) return { result: "invalid" };
       const result = await handlers.submitAnswer({
@@ -243,7 +258,11 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
     },
     handler: async (request, reply) => {
       const receivedAt = options.clock();
-      const event = parsePostCallEvent(parseJson(rawBody(request)));
+      // Turns count as the owner's only on a call known to be with the owner.
+      const event = parsePostCallEvent(parseJson(rawBody(request)), {
+        ownerNumber: options.ownerNumber,
+        pinVerified: (conversationId) => pins.isVerified(conversationId),
+      });
       if (event === undefined || event.type === "other" || event.agentId !== options.agentId) {
         request.log.info({ kind: event?.type ?? "malformed" }, "post-call webhook ignored");
         return reply.code(200).send({});

@@ -71,7 +71,7 @@ describe("FakeVoiceProvider", () => {
     await voice.callOwner(call);
     await voice.playPending();
     expect(recorded.tools).toEqual([]);
-    expect(recorded.postCalls.map(parsePostCallEvent)).toEqual([
+    expect(recorded.postCalls.map((body) => parsePostCallEvent(body))).toEqual([
       {
         type: "initiation-failure",
         agentId: "agent_fake",
@@ -114,7 +114,7 @@ describe("FakeVoiceProvider", () => {
       },
     ]);
     expect(played?.endedEarly).toBe(false);
-    const event = parsePostCallEvent(recorded.postCalls[0]);
+    const event = parsePostCallEvent(recorded.postCalls[0], { ownerNumber: OWNER, pinVerified: () => false });
     expect(event).toMatchObject({ type: "transcription", direction: "outbound", externalNumber: OWNER });
     expect(event?.type === "transcription" && event.transcript).toContainEqual({
       role: "owner",

@@ -264,8 +264,11 @@ calling) and `asks`, one line per ask with its number, the session nickname,
 the kind (`HIGH RISK (PIN required)` for high-risk permission requests) and the
 text inside `<agent_text>...</agent_text>`. Each string is redacted whole
 first, then cut: ask text to 300 characters, options to 80, nicknames to 60.
-Angle brackets and braces are removed from agent text, so it cannot close its
-fence or spell a `{{variable}}`.
+Control and invisible format characters, line breaks, angle brackets and
+braces are removed, so agent text is one plain line that cannot close its
+fence or spell a `{{variable}}`. The prompt tells the model that fenced text is
+a question to read out and must never decide which tool it calls, which
+decision it submits or what `owner_words` it sends.
 
 - `ElevenLabsVoiceProvider`: one JSON `POST` to
   `https://api.elevenlabs.io/v1/convai/twilio/outbound-call` with `xi-api-key`,
@@ -299,8 +302,12 @@ once more, then reported as `unclear`.
 
 `owner_words` is written by the voice model. `ownerSaid(excerpt, transcript)`
 checks it against the owner's turns of the post-call transcript (case and
-punctuation ignored, whole words, never agent turns). Call orchestration should
-confirm a voice decision with it before trusting it.
+punctuation ignored, whole words, never agent or caller turns). Call
+orchestration should confirm a voice decision with it before trusting it.
+`parsePostCallEvent(body, {ownerNumber, pinVerified})` labels the person's
+turns `owner` only on an outbound call to the owner's number or an inbound call
+from it that passed the PIN; any other person, and every call parsed without
+that context, is a `caller`.
 
 `validPostCallSignature`, `postCallSignature` and `postCallSignatureHeader`
 implement the `ElevenLabs-Signature` HMAC; `parsePostCallEvent` reduces a

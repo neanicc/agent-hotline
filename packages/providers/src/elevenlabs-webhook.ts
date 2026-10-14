@@ -89,8 +89,36 @@ const InitiationFailure = z.object({
 });
 
 export interface TranscriptTurn {
-  role: "owner" | "agent";
+  /**
+   * `owner` only for a call known to be with the owner (see `OwnerContext`);
+   * any other person on the line is a `caller`, whose words never count.
+   */
+  role: "owner" | "caller" | "agent";
   message: string;
+}
+
+/** What the daemon knows that makes a caller's turns the owner's. */
+export interface OwnerContext {
+  /** `config.owner.phoneNumber`. */
+  ownerNumber: string;
+  /** Whether this conversation passed `verify_pin` (the daemon's PinGate). */
+  pinVerified: (conversationId: string) => boolean;
+}
+
+/**
+ * Whether the person on the line was the owner: an outbound call to the owner's
+ * number (Hotline dialled it), or an inbound call from the owner's number that
+ * passed the PIN, since caller ID can be spoofed. Anything else is not.
+ */
+function withOwner(
+  owner: OwnerContext | undefined,
+  conversationId: string,
+  direction: "inbound" | "outbound" | undefined,
+  externalNumber: string | null | undefined,
+): boolean {
+  if (owner === undefined || externalNumber !== owner.ownerNumber) return false;
+  if (direction === "outbound") return true;
+  return direction === "inbound" && owner.pinVerified(conversationId);
 }
 
 /** A verified post-call webhook, reduced to what the daemon uses. Transcripts stay on this machine. */
@@ -118,8 +146,12 @@ export type PostCallEvent =
   /** Another webhook type (such as `post_call_audio`), acknowledged and ignored. */
   | { type: "other" };
 
-/** Reduces a verified, parsed post-call body to a `PostCallEvent`, or undefined if it is malformed. */
-export function parsePostCallEvent(body: unknown): PostCallEvent | undefined {
+/**
+ * Reduces a verified, parsed post-call body to a `PostCallEvent`, or undefined if
+ * it is malformed. Without `owner`, or when the call is not known to be with the
+ * owner, the person's turns are labelled `caller`.
+ */
+export function parsePostCallEvent(body: unknown, owner?: OwnerContext): PostCallEvent | undefined {
   const type = (body as { type?: unknown } | null)?.type;
   if (type === "post_call_transcription") {
     const parsed = Transcription.safeParse(body);
@@ -128,6 +160,9 @@ export function parsePostCallEvent(body: unknown): PostCallEvent | undefined {
     const phone = data.metadata?.phone_call;
     const direction =
       phone?.direction === "inbound" || phone?.direction === "outbound" ? phone.direction : undefined;
+    const person = withOwner(owner, data.conversation_id, direction, phone?.external_number)
+      ? "owner"
+      : "caller";
     return {
       type: "transcription",
       agentId: data.agent_id,
@@ -141,7 +176,7 @@ export function parsePostCallEvent(body: unknown): PostCallEvent | undefined {
         : {}),
       transcript: data.transcript.flatMap((turn): TranscriptTurn[] =>
         (turn.role === "user" || turn.role === "agent") && typeof turn.message === "string"
-          ? [{ role: turn.role === "user" ? "owner" : "agent", message: turn.message }]
+          ? [{ role: turn.role === "agent" ? "agent" : person, message: turn.message }]
           : [],
       ),
     };
@@ -175,7 +210,7 @@ function words(text: string): string {
  * owner said, ignoring case and punctuation: within one owner turn, or across
  * consecutive owner turns. The voice model writes `owner_words`, so the daemon
  * (HL-09) confirms a decision against the post-call transcript with this before
- * it trusts it; agent turns never count.
+ * it trusts it; agent and `caller` turns never count.
  */
 export function ownerSaid(excerpt: string, transcript: readonly TranscriptTurn[]): boolean {
   const wanted = words(excerpt);

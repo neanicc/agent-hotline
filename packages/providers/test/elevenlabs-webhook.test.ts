@@ -92,9 +92,11 @@ const transcription = {
   },
 };
 
+const OWNER_CONTEXT = { ownerNumber: "+15555550100", pinVerified: (id: string) => id === "conv_pin" };
+
 describe("parsePostCallEvent", () => {
   it("reduces a transcription to the fields the daemon uses", () => {
-    expect(parsePostCallEvent(transcription)).toEqual({
+    expect(parsePostCallEvent(transcription, OWNER_CONTEXT)).toEqual({
       type: "transcription",
       agentId: "agent_fake",
       conversationId: "conv_fake_1",
@@ -108,6 +110,59 @@ describe("parsePostCallEvent", () => {
         { role: "owner", message: "Yes, go ahead." },
       ],
     });
+  });
+
+  const call = (direction: string, external: string, conversation = "conv_fake_1") => ({
+    ...transcription,
+    data: {
+      ...transcription.data,
+      conversation_id: conversation,
+      metadata: { phone_call: { direction, external_number: external } },
+    },
+  });
+  const personRoles = (body: unknown, context: typeof OWNER_CONTEXT | undefined = OWNER_CONTEXT) => {
+    const event = parsePostCallEvent(body, context);
+    return event?.type === "transcription"
+      ? event.transcript.filter((t) => t.role !== "agent").map((t) => t.role)
+      : [];
+  };
+
+  it.each([
+    ["an outbound call to the owner", call("outbound", "+15555550100"), "owner"],
+    ["an outbound call to another number", call("outbound", "+15555550199"), "caller"],
+    [
+      "an inbound call from the owner's number after the PIN",
+      call("inbound", "+15555550100", "conv_pin"),
+      "owner",
+    ],
+    ["an inbound call from the owner's number without the PIN", call("inbound", "+15555550100"), "caller"],
+    [
+      "an inbound call from a stranger, even with the PIN",
+      call("inbound", "+15555550199", "conv_pin"),
+      "caller",
+    ],
+    [
+      "a call with no phone metadata",
+      { ...transcription, data: { ...transcription.data, metadata: null } },
+      "caller",
+    ],
+  ])("labels the person's turns on %s as %s", (_name, body, role) => {
+    expect(personRoles(body)).toEqual([role]);
+  });
+
+  it("labels every person's turn a caller's without the owner context", () => {
+    const event = parsePostCallEvent(transcription);
+    expect(event?.type === "transcription" && event.transcript.map((t) => t.role)).toEqual([
+      "agent",
+      "caller",
+    ]);
+  });
+
+  it("never lets a stranger's words confirm a decision", () => {
+    const stranger = parsePostCallEvent(call("inbound", "+15555550199", "conv_pin"), OWNER_CONTEXT);
+    expect(stranger?.type === "transcription" && ownerSaid("yes go ahead", stranger.transcript)).toBe(false);
+    const owner = parsePostCallEvent(call("outbound", "+15555550100"), OWNER_CONTEXT);
+    expect(owner?.type === "transcription" && ownerSaid("yes go ahead", owner.transcript)).toBe(true);
   });
 
   it.each([
@@ -174,6 +229,7 @@ describe("ownerSaid", () => {
     expect(ownerSaid("es go ahead", turns)).toBe(false);
     expect(ownerSaid("...", turns)).toBe(false);
     expect(ownerSaid("yes", [{ role: "agent", message: "yes" }])).toBe(false);
+    expect(ownerSaid("yes", [{ role: "caller", message: "yes" }])).toBe(false);
   });
 
   it("does not join owner turns across an agent turn", () => {
