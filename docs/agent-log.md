@@ -25,7 +25,7 @@ Template:
   scaffold. No product code exists yet.
 - Open issues: plan section 12 open questions.
 
-## 2026-10-13 — HL-01 Workspace foundation (#PR)
+## 2026-10-13 — HL-01 Workspace foundation (#18)
 
 - Decision / change: pnpm workspace with `packages/{core,daemon,providers,agents}`
   and `apps/cli` (`hotline --version` / `--help` only). Exact pins, each at least
