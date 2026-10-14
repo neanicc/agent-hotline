@@ -127,12 +127,17 @@ the `twilio.accountSid` and `twilio.authToken` secrets exist. Otherwise it logs
 
 - **Precheck:** an `X-Twilio-Signature` header and a form content type, or `403`
   before the body is read.
-- **Bounded:** at most 8 texts are read or handled at once
-  (`MAX_SMS_IN_FLIGHT`, HL-13b), each given 5 seconds to deliver its body;
+- **Bounded:** at most 32 texts are read or handled at once
+  (`MAX_SMS_IN_FLIGHT`, HL-13b), each given 2 seconds to deliver its body;
   more get the `403` before their body is read. Anyone can send a signature
   header, and the signature can only be checked over the body, so this caps
-  what unauthenticated senders can make the daemon hold. A flood can still
-  delay a genuine text until it passes.
+  what unauthenticated senders can make the daemon hold. Trade-off: a sender
+  that keeps all 32 slots busy (many connections at once, each cut off after
+  2 seconds) makes a genuine owner text get the `403` too. Hotline cannot
+  count on Twilio delivering it again, so the asks it would have answered end
+  as no answer at their timeout (fails closed), and the owner has to text
+  again or wait for the call. Reserving capacity for genuine Twilio requests
+  is a follow-up.
 - **Verify:** the signature is recomputed with Twilio's documented algorithm
   (`validTwilioSignature` in `@hotline/providers`) over the exact public URL
   (`publicUrl` origin plus the raw path and query) and the form parameters, and
@@ -262,13 +267,11 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
   `{"result": "busy"}` and does not run. `get_status` only
   reads, after the PIN, and runs every time. Remembered deliveries are kept in
   the store (`tool_deliveries`), so a replay after a restart also gets the
-  first response (HL-13b); deliveries still running are in memory. Residual
-  risk: the key is a plain SHA-256 of the body, and a `verify_pin` body holds
-  the PIN, so for two hours a process that can read the database could find
-  the PIN by trying every 4 to 8 digit value against bodies it can guess
-  (the conversation id and call SID are also in the database). Such a
-  process can already read the config's scrypt `pinHash`, which a 4-digit
-  PIN does not resist either, so this adds little.
+  first response (HL-13b); deliveries still running are in memory. The key
+  is an HMAC-SHA256 of the tool name and body under the tool secret, which
+  lives in the Keychain or the `0600` secrets file and never in the
+  database. A `verify_pin` body holds the PIN, and a plain hash in the
+  database could be reversed by trying every 4 to 8 digit PIN.
 - **Owner on the call:** the body's `caller_id` or `called_number`, which
   ElevenLabs fills from `system__caller_id` and `system__called_number`, must be
   `owner.phoneNumber`. Otherwise the answer is `{"result": "refused",

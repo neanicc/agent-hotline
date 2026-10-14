@@ -1,3 +1,4 @@
+import { createHash, createHmac } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
@@ -1766,6 +1767,23 @@ describe("a daemon restart in the middle of things (HL-13b)", () => {
     await restart();
     expect((await guess()).json()).toMatchObject({ verified: false, attempts_left: 1 });
     expect(store.pinFailureTimes("inbound")).toHaveLength(1);
+  });
+
+  it("never stores a key the PIN could be found from without the tool secret", async () => {
+    unplaced.add("conv_k");
+    const body = { ...inbound("conv_k"), pin: "7391" };
+    await tool("verify_pin", body);
+    store.close();
+    const raw = new DatabaseSync(path);
+    const stored = raw
+      .prepare("SELECT key FROM tool_deliveries")
+      .all()
+      .map((row) => String(row.key));
+    raw.close();
+    const text = `verify_pin\0${JSON.stringify(body)}`;
+    expect(stored).toEqual([createHmac("sha256", TOOL_SECRET).update(text, "utf8").digest("base64url")]);
+    expect(stored).not.toContain(createHash("sha256").update(text, "utf8").digest("base64url"));
+    await start();
   });
 
   it("refuses a delivery whose saved response is damaged, rather than run it again", async () => {

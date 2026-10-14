@@ -396,7 +396,14 @@ export class InboundLine {
     // A call is saved only once it holds an instruction (`#hold`); after that,
     // new numbers are saved with it. A call that holds none is not worth a
     // write per status: after a restart it hears the status again (fails closed).
-    if (numbered && memory.held.length > 0) this.#save(call.conversationId, memory);
+    if (numbered && memory.held.length > 0) {
+      try {
+        this.#save(call.conversationId, memory);
+      } catch (error) {
+        // The status is still read out; only the new numbers are not saved.
+        this.#options.log?.().warn({ err: error }, "could not save an inbound call's session numbers");
+      }
+    }
     return text;
   }
 

@@ -3253,6 +3253,20 @@ Template:
   risk of the `tool_deliveries` key (a plain SHA-256 of a `verify_pin` body
   that holds the PIN, kept two hours) is written up in `docs/daemon.md`. It
   adds little over the scrypt `pinHash` such a reader already has.
+- Staff review of 9495874:
+  - (P2) The `tool_deliveries` key was an unsalted hash of a body that holds
+    the PIN, so the database alone gave the PIN away in milliseconds. It is
+    now an HMAC under the tool secret, which never enters the database. Test:
+    no stored key equals the plain hash of the body.
+  - (P2) An unauthenticated sender could hold all 8 SMS slots and starve the
+    owner's texts. The cap is now 32 with a 2 second body deadline, so that
+    takes many more connections; the trade-off and its fail-closed outcome are
+    documented. Reserving capacity for genuine Twilio requests is a
+    follow-up.
+  - (P3) A comment states that a saved PIN time covers this call's turns
+    after a restart.
+  - (P3) Saving new session numbers in `get_status` cannot fail the status
+    any more.
 - Open issues or follow-ups: security.md update after #77; count out-of-queue
   texts against the text rate limits; HL-13c (#80) retries processing records
   and normalises the SMS body comparison in the same files.

@@ -41,7 +41,7 @@
 // (call orchestration, HL-09; the inbound line, HL-10), like the SMS route.
 //
 // Logs carry the tool name and result only: never bodies, PINs, words or numbers.
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { Confirmation, Decision } from "@hotline/core";
 import {
   type ConversationRecord,
@@ -378,7 +378,12 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
     const once = (raw: string) => {
       const busy = { response: Promise.resolve<Record<string, unknown>>({ result: "busy" }), repeat: false };
       const now = options.clock().getTime();
-      const key = createHash("sha256").update(`${name}\0${raw}`, "utf8").digest("base64url");
+      // Keyed with the tool secret (Keychain or the 0600 file, never the
+      // database): a `verify_pin` body holds the PIN, and a plain hash of it
+      // in `tool_deliveries` could be reversed by trying every PIN.
+      const key = createHmac("sha256", options.toolSecret)
+        .update(`${name}\0${raw}`, "utf8")
+        .digest("base64url");
       const current = running.get(key);
       if (current !== undefined) return { response: current, repeat: true };
       let full: boolean;
@@ -464,7 +469,10 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
     ownerNumber: options.ownerNumber,
     // The earlier of this run's PIN and one a previous run saved with held
     // instructions: both are this call passing the PIN. The saved one only
-    // labels a finished call's transcript; it never serves a tool.
+    // labels a finished call's transcript; it never serves a tool. Turns
+    // after a restart but before the PIN is given again therefore count as
+    // the owner's on this call, as they would have without the restart: the
+    // person on it had already proved the PIN.
     pinVerifiedAt: (conversationId) => {
       const times = [pins.verifiedAt(conversationId), options.savedPinVerifiedAt?.(conversationId)].filter(
         (at): at is Date => at !== undefined && !Number.isNaN(at.getTime()),
