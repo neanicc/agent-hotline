@@ -256,7 +256,10 @@ by a probe or the fuzzer and none a current leak:
   deadline, unlike the ElevenLabs routes, because its signature can only be
   checked over the body and a cap would let an unauthenticated sender shut out
   the owner's texts. The 64 KiB body limit still applies. Since HL-13c every
-  text, a stranger's included, costs one Twilio lookup before anything else.
+  text, a stranger's included, costs one Twilio lookup before anything else;
+  other senders' lookups are limited to 4 at once and 60 an hour (after the
+  signature check, never the owner's), so a signer claiming other numbers
+  can silence strangers' generic replies but not the owner.
 - **Forged post-call events can use up a processing call's retries (HL-13c).**
   A process holding the post-call webhook secret can send signed events for a
   real conversation after its call ended, while ElevenLabs' record is still

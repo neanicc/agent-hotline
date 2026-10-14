@@ -12,6 +12,8 @@ import {
   createRedactor,
   GENERIC_SMS_REPLY,
   type LogOptions,
+  OTHER_SENDER_LOOKUPS_IN_FLIGHT,
+  OTHER_SENDER_LOOKUPS_PER_HOUR,
   OTHER_SENDER_REPLIES_PER_HOUR,
   type OwnerSms,
   parseFormBody,
@@ -634,30 +636,85 @@ describe("every text path is pulled before any effect (HL-13c)", () => {
 
   it("keeps the generic-reply limit when lookups finish out of order", async () => {
     await app.close();
+    let hold = false;
     const pending: (() => void)[] = [];
     app = server({
       lookup: async (messageSid) => {
-        await new Promise<void>((resolve) => pending.push(resolve));
+        if (hold) await new Promise<void>((resolve) => pending.push(resolve));
         return twilioLog.get(messageSid) as PulledMessage;
       },
     });
-    const count = OTHER_SENDER_REPLIES_PER_HOUR + 1;
+    // Two replies spent one after the other, then as many lookups at once as allowed.
+    const before = OTHER_SENDER_REPLIES_PER_HOUR + 1 - OTHER_SENDER_LOOKUPS_IN_FLIGHT;
+    const bodies: string[] = [];
+    for (let i = 0; i < before; i++) {
+      bodies.push((await post({ params: message({ From: STRANGER }) })).body);
+      now = new Date(now.getTime() + 1000);
+    }
+    hold = true;
     const responses = [];
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < OTHER_SENDER_LOOKUPS_IN_FLIGHT; i++) {
       responses.push(post({ params: message({ From: STRANGER }) }));
       while (pending.length <= i) await ticks(1);
       now = new Date(now.getTime() + 1000);
     }
     // The newest lookup finishes first, the oldest last.
-    for (let i = count - 1; i >= 0; i--) {
+    for (let i = OTHER_SENDER_LOOKUPS_IN_FLIGHT - 1; i >= 0; i--) {
       pending[i]?.();
       await ticks();
     }
-    const bodies = await Promise.all(responses.map(async (response) => (await response).body));
+    for (const response of responses) bodies.push((await response).body);
+    expect(bodies).toHaveLength(OTHER_SENDER_REPLIES_PER_HOUR + 1);
     expect(bodies.filter((body) => body.includes(GENERIC_SMS_REPLY))).toHaveLength(
       OTHER_SENDER_REPLIES_PER_HOUR,
     );
-    expect(others).toHaveLength(count);
+    expect(others).toHaveLength(OTHER_SENDER_REPLIES_PER_HOUR + 1);
+  });
+
+  it("limits lookups for other numbers, never for the owner", async () => {
+    await app.close();
+    const pending: (() => void)[] = [];
+    app = server({
+      lookup: async (messageSid) => {
+        lookups.push(messageSid);
+        await new Promise<void>((resolve) => pending.push(resolve));
+        return twilioLog.get(messageSid) as PulledMessage;
+      },
+    });
+    // As many strangers' lookups at once as allowed; one more is not looked up.
+    const held = [];
+    for (let i = 0; i < OTHER_SENDER_LOOKUPS_IN_FLIGHT; i++) {
+      held.push(post({ params: message({ From: STRANGER }) }));
+      while (pending.length <= i) await ticks(1);
+    }
+    const over = await post({ params: message({ From: STRANGER }) });
+    expect([over.statusCode, over.body]).toEqual([200, BARE]);
+    expect(lookups).toHaveLength(OTHER_SENDER_LOOKUPS_IN_FLIGHT);
+    // The owner's text is still looked up and handled.
+    ownerReply = "Hotline: got it.";
+    const owner = post({ params: message() });
+    while (pending.length <= OTHER_SENDER_LOOKUPS_IN_FLIGHT) await ticks(1);
+    for (const release of pending) release();
+    expect((await owner).body).toContain("Hotline: got it.");
+    await Promise.all(held);
+    expect(received).toHaveLength(1);
+    expect(others).toHaveLength(OTHER_SENDER_LOOKUPS_IN_FLIGHT);
+  });
+
+  it(`looks up at most ${OTHER_SENDER_LOOKUPS_PER_HOUR} texts from other numbers an hour`, async () => {
+    for (let i = 0; i < OTHER_SENDER_LOOKUPS_PER_HOUR; i++) {
+      await post({ params: message({ From: STRANGER }), unknownAtTwilio: true });
+    }
+    expect(lookups).toHaveLength(OTHER_SENDER_LOOKUPS_PER_HOUR);
+    expect((await post({ params: message({ From: STRANGER }) })).body).toBe(BARE);
+    expect(lookups).toHaveLength(OTHER_SENDER_LOOKUPS_PER_HOUR);
+    expect(others).toEqual([]);
+    // The owner is never limited.
+    expect((await post({ params: message() })).statusCode).toBe(200);
+    expect(received).toHaveLength(1);
+    // An hour later strangers are looked up again.
+    now = new Date(now.getTime() + 60 * 60 * 1000);
+    expect((await post({ params: message({ From: STRANGER }) })).body).toContain(GENERIC_SMS_REPLY);
   });
 
   it("never lets forged texts from other numbers spend the generic replies", async () => {

@@ -45,6 +45,15 @@ export const TWILIO_SMS_PATH = "/twilio/sms";
 /** All anyone but the owner ever hears back. Says nothing about Hotline, agents or the owner. */
 export const GENERIC_SMS_REPLY = "Sorry, this number does not accept messages.";
 export const OTHER_SENDER_REPLIES_PER_HOUR = 5;
+/**
+ * Twilio lookups for texts from numbers other than the owner's (HL-13c):
+ * at most this many at once and this many an hour. A text over either limit
+ * gets the bare empty TwiML and has no effect. Only other senders are
+ * limited: a sender claiming another number can use these up, but that only
+ * costs strangers their generic reply, never the owner a text.
+ */
+export const OTHER_SENDER_LOOKUPS_IN_FLIGHT = 4;
+export const OTHER_SENDER_LOOKUPS_PER_HOUR = 60;
 /** How many message SIDs to remember, to drop Twilio retries and replays of a recent message. */
 const SEEN_MESSAGES = 1000;
 const HOUR_MS = 60 * 60 * 1000;
@@ -164,6 +173,19 @@ export function twilioSmsRoute(options: TwilioSmsRouteOptions): WebhookRoute {
     return true;
   };
 
+  /** Twilio lookups for other senders: how many run now, and when each this hour started. */
+  let otherSenderLookupsRunning = 0;
+  let otherSenderLookups: number[] = [];
+  /** Takes a lookup slot for another sender's text, or says it is over a limit. */
+  const mayLookUpOtherSender = (now: number): boolean => {
+    otherSenderLookups = otherSenderLookups.filter((at) => now - at < HOUR_MS && at <= now);
+    if (otherSenderLookupsRunning >= OTHER_SENDER_LOOKUPS_IN_FLIGHT) return false;
+    if (otherSenderLookups.length >= OTHER_SENDER_LOOKUPS_PER_HOUR) return false;
+    otherSenderLookups.push(now);
+    otherSenderLookupsRunning += 1;
+    return true;
+  };
+
   return {
     method: "POST",
     url: TWILIO_SMS_PATH,
@@ -257,14 +279,26 @@ export function twilioSmsRoute(options: TwilioSmsRouteOptions): WebhookRoute {
     // Every path, the owner's commands, opt-out keywords and free text and any
     // other sender alike, is pulled before it has any effect (HL-13c): a
     // forged webhook must not place a call, spend the generic-reply budget or
-    // get a reply.
-    const check = await confirmed(messageSid, {
-      body: params.get("Body") ?? "",
-      fromNumber: fromOwner ? options.ownerNumber : from,
-      toNumber: fromOwner ? options.smsNumber : to,
-      fromOwner,
-      receivedAt,
-    });
+    // get a reply. Other senders' lookups are limited; the owner's never are.
+    if (!fromOwner && !mayLookUpOtherSender(receivedAt.getTime())) {
+      request.log.warn(
+        { messageSid, sender },
+        "sms from another number not looked up: over the lookup limit",
+      );
+      return { text: undefined, handled: false };
+    }
+    let check: Awaited<ReturnType<typeof confirmed>>;
+    try {
+      check = await confirmed(messageSid, {
+        body: params.get("Body") ?? "",
+        fromNumber: fromOwner ? options.ownerNumber : from,
+        toNumber: fromOwner ? options.smsNumber : to,
+        fromOwner,
+        receivedAt,
+      });
+    } finally {
+      if (!fromOwner) otherSenderLookupsRunning -= 1;
+    }
     if ("failure" in check) {
       const { failure } = check;
       request.log.warn(

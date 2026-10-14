@@ -3523,3 +3523,16 @@ Template:
     webhook secret) and written into `docs/security.md`'s accepted residual
     risks. (P3, one lookup per stranger's text) noted there too; (P3, the
     bound) addressed by the change to 4.
+- Staff review of 94c2213 (P2): other senders' lookups were unbounded, so a
+  flood of strangers' texts (or a signer claiming other numbers) could drive
+  unlimited Twilio REST calls. Now at most 4 run at once and 60 an hour
+  (`OTHER_SENDER_LOOKUPS_IN_FLIGHT`, `OTHER_SENDER_LOOKUPS_PER_HOUR`); a text
+  over either gets the bare TwiML and no effect. This is deliberately not the
+  route cap HL-13b removed: it applies only after the signature check and
+  only to other senders, so the owner's texts are never held up. Tests: the
+  in-flight limit with the owner's text still handled while strangers hold
+  every slot, and the hourly limit with the owner unaffected and strangers
+  looked up again an hour later. The out-of-order reply test now runs within
+  the in-flight limit and still fails with the arrival time. (P3s: the PR
+  body's stale bound was updated; moving the other TwiML replies to texts is
+  left to the conductor as a follow-up issue.)
