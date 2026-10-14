@@ -71,6 +71,19 @@ describe("parseConfig", () => {
     expect(config.nicknames).toEqual({ "demo-app": "the demo" });
   });
 
+  it("keeps the ElevenLabs deployment ids hotline voice apply records", () => {
+    const voice = {
+      provider: "elevenlabs",
+      agentId: "agent_fake_1",
+      toolSecretId: "sec_fake_1",
+      toolIds: { submit_answer: "tool_fake_1", verify_pin: "tool_fake_2" },
+    };
+    expect(parseConfig({ ...minimal, voice }).voice).toEqual(voice);
+    expect(issuesOf({ ...minimal, voice: { toolIds: { "Not A Name": "x" } } })).toEqual([
+      expect.stringMatching(/^voice\.toolIds/),
+    ]);
+  });
+
   it("requires the owner number, PIN hash and quiet-hours time zone", () => {
     expect(issuesOf({ version: 1 })).toEqual(
       expect.arrayContaining([expect.stringMatching(/^owner:/), expect.stringMatching(/^quietHours:/)]),

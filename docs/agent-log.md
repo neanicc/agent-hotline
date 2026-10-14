@@ -1208,6 +1208,359 @@ Template:
   - P2 (split the orchestrator before HL-10) and P3 (measure false "no answer"
     in the live check) stay follow-ups.
 
+## 2026-10-14 — HL-06 Hook adapters (#7)
+
+- Decision / change: `hotline hook <claude|codex> <permission|stop>` reads the
+  agent's payload on stdin and prints its documented output or nothing
+  (`packages/agents/src/hook-adapter.ts`, `apps/cli/src/hook.ts`); see
+  `docs/hooks.md`. Outside away mode, or for a payload it cannot parse, it
+  prints nothing, so the agent shows its own prompt or stops. In away mode a
+  permission is allowed only through core's `permissionVerdict`; every no-answer,
+  timeout, unreachable or unset daemon, refused or malformed outcome, approval
+  of another ask, unconfirmed high-risk approval, or kill by the agent denies
+  with the fixture's message. A Stop continues only with the owner's own `text`
+  answer (new core `stopInstruction`). Never `updatedInput`,
+  `updatedPermissions`, `interrupt` or a permission suggestion. Exit code is
+  always 0 (usage errors 1), never 2, since exit 2 from a Stop hook means
+  "keep going".
+- Away mode: `hotline away on|off|status` writes `away.json` in the hotline home
+  under the private-file rules (0600 in 0700, no symlinks, own user). Anything
+  unreadable is off. HL-11 still owns `init`, `install` and `doctor`; it only
+  needs to call these.
+- Loop guards: `stop_hook_active: false` resets the count; `true` without a
+  count of Hotline's own (another hook continued the turn) lets the agent stop;
+  at `policy.maxConsecutiveContinuations` the agent stops and a notification is
+  queued. Counts are `hook-state/<agent>-<sha256>.json` (0600). A count that
+  cannot be read or saved lets the agent stop. `away on|off` clears them.
+- Risk classes (plan question 6, recommended default): `classifyPermission` in
+  `@hotline/core` (pure). High: deleting files, git push or history rewrites,
+  network installs and downloads, writes outside the project, credentials or
+  agent settings (`.env`, `.ssh`, `.hotline`, `.claude`, `.codex`,
+  `.git/config`, ...). Added as fail-closed cases: `sudo`, nested shell code,
+  `WebFetch` (sends data off the machine), every MCP or unknown tool, and input
+  it cannot read. Inside the project only the path below the root counts
+  (worktrees live under `.claude/`). The hook judges outcomes with the stricter
+  of its own class and the stored one.
+- Security review fixes (coordinator review of ce62b97):
+  - The first version used a denylist, which `/bin/rm`, `$(...)`, backticks,
+    `command rm`, `env rm`, `xargs rm`, `git -c alias.x=push x`, `r\m` and
+    variable-built commands slipped past.
+  - Shell commands now fail closed. `splitShell` splits on `;`, `&&`, `||`, `|`
+    and newlines with quotes, and refuses `$`, backticks, backslashes,
+    subshells, background jobs, here-documents, comments and unbalanced quotes.
+  - A command is low risk only if every simple command is on a read-only
+    allowlist (`ls`, `cat`, `grep`, `rg`, `find` without `-delete`/`-exec`/
+    `-fprint`, read-only `git`, package-manager `test`/`build`/`lint`/
+    `typecheck`) with arguments and redirections inside the project. Otherwise
+    the owner hears the denylist reason, or "runs a command Hotline does not
+    recognise as read-only".
+  - `projectRoot` treats an empty, relative, `/`, top-level or home-directory
+    `cwd` as no project, so every path there counts as outside.
+  - The owner's line now reads the risk first. A preview cut at 200 characters
+    says "command shortened, N more characters" and forces high risk.
+  - The agent's description is labelled `The agent says: "..."`, never stands
+    in for the command, and is dropped when it has no letters or digits. The
+    hook cannot see the daemon's redaction, so "empty after redaction" is
+    approximated by that cleaning step.
+- Greptile and staff review fixes on PR #34:
+  - Text is cut only between words, so a secret is never left as a fragment
+    the redactor misses.
+  - Unknown and MCP tools show argument names, never values.
+  - Each outcome poll ends at the hook's deadline, and a late answer denies.
+  - The Stop hook rechecks away mode before continuing.
+  - Every non-continuing Stop exit clears the count.
+  - `hotline away` and `.hotline/` paths are high risk.
+- Second security review (coordinator, of f85b69b):
+  - Expansions were not modelled: `cat {/etc/passwd,x}` and `cat .e*` passed.
+    The tokenizer now allows only `[A-Za-z0-9_./:@%+,-]` and a non-leading `=`
+    outside quotes. Single quotes may hold anything else. Double quotes may not
+    hold `!`. `$`, backticks, backslashes and C0/C1 controls are refused
+    everywhere. zsh numeric globs (`<1-10>`) are refused.
+  - Attached option values (`grep -f/home/u/.ssh/id_rsa`, `head -c1/etc/x`)
+    are checked as paths, and are high when they do not split cleanly.
+  - Writes to `.git/`, `.gitattributes`, `.gitmodules`, `.husky/`,
+    `package.json`, `node_modules/` and package-manager rc files are high even
+    inside the project, because git and the allowlisted package scripts honour
+    them. Reads stay low.
+  - Package scripts stay low. The module comment and `docs/hooks.md` say they
+    run project code, and that the owner's explicit "yes" is the protection.
+  - Parser-differential tests cover each class: brace, glob, tilde, zsh `=cmd`,
+    numeric glob, qualifier, `^` and `#`, ANSI-C `$'..'`, double-quote `$`, `!`
+    and backticks, CR, NUL, other C0 and C1 controls, Unicode lookalike
+    separators and spaces, and `&!`, `>!`, `|&`, `<>`.
+- Third security review (coordinator and push review, of baa90d5/2976ba2):
+  - Sensitive names are matched case-insensitively after NFC normalisation
+    (macOS APFS ignores both), so `.GIT/config`, `.Env` and `Package.json`
+    count.
+  - A `.git` component at any depth is sensitive.
+  - Every git argument is checked as a path. `--git-dir`, `--work-tree`,
+    `--exec-path`, `--no-index` and `--namespace` are refused, as are options
+    before the subcommand (`-C`, `-c`) and any `VAR=` prefix.
+  - Option values are checked in every form: `--opt=VALUE`, a long option
+    with a path character, and every suffix of a short cluster (`-rf/etc/x`,
+    `-fsecrets`). A separate value is covered by checking each following word.
+  - Tests cover each form for grep, rg, head, tail, diff, find and git.
+    Mutations: skipping the suffix check fails 15 tests; case-sensitive matching
+    fails 6.
+  - `grep -f./patterns.txt` moved from low to high (the suffix `/patterns.txt`
+    is outside).
+  - Stopping point: the classifier only decides how much proof an approval
+    needs (PIN or confirming text vs. a spoken "yes"), never whether one is
+    needed. Every request still needs the owner's own approval, and failures
+    deny. Remaining bypass classes go to HL-13's fuzz tests (the coordinator is
+    recording them on HL-13), and HL-06 stops hardening the classifier here.
+- Daemon: `POST /v1/sessions/:id/asks` accepts `permission` (requires
+  `toolName`, identifier characters up to 100, and `risk`) and `stop`; text and
+  tool name are redacted before storage. Caps per session / total: permission
+  3 / 10, stop 1 / 10, and a new stop cancels the session's stale open stop. A
+  session is `waiting-on-human` while it has an open question, permission or
+  stop. `HotlinePaths` gained `away` and `hookState`.
+- Waiting (plan question 2, recommended default: synchronous wait with a long
+  hook timeout): the hook waits up to `--wait-seconds` (default 540, under both
+  agents' 600 s default `timeout`, which discards output), then cancels the ask
+  and denies or lets the agent stop. `docs/hooks.md` snippets set
+  `timeout: 1900` with `--wait-seconds 1830` to cover the 30-minute ask timeout.
+  SIGTERM or SIGINT cancels the ask.
+- Fixture recheck (carried over on #7), offline, no model calls: the Codex
+  0.146.0 binary embeds the four generated hook schemas, identical to
+  `codex/schema/`. The Claude Code 2.1.299 bundle's zod schemas match the
+  fixtures, plus new optional input fields (`prompt_id`, `agent_id`,
+  `agent_type`, `mcp_server`) the loose schemas already allow. Notes in the
+  fixtures README.
+- Evidence (worktree, Node 24.11.0):
+  - `scripts/ci/run.sh setup`, `build` and `test` pass: 682 tests in 34 files
+    at ce62b97, 766 at f85b69b, 824 at baa90d5, 1070 (41 files) after the
+    third review, and 1222 (45 files) after catching up with HL-09.
+  - The security fixes have a bypass test for each case the review listed,
+    plus unknown-project, shortened-preview and reassuring-description tests.
+    Earlier expectations only moved from low to high. Mutations: treating
+    unknown commands as read-only fails 29 risk tests; counting `/` as a
+    project fails 2.
+  - Golden tests: every HL-02 input fixture for both agents through `runHook`
+    against a real daemon on 127.0.0.1 (temporary store, fake clock), with the
+    owner's answer written by `recordAnswer`; outputs equal the allow, deny and
+    stop-block fixtures. Fake-daemon tests cover every failure path. CLI tests
+    run `hotline hook` and `hotline away` against a temporary HOTLINE_HOME.
+  - Mutation checks: allowing on any answered outcome fails 6 tests; dropping
+    the stricter-risk rule fails 2; dropping the "continuation not ours" guard
+    fails 1.
+  - Manual: the built CLI as child processes (daemon, `away on`, then hooks)
+    with a temporary HOTLINE_HOME: allow with PIN printed the allow output, a
+    Codex stop printed the block output, SIGTERM printed a deny and left the ask
+    `cancelled`, `--wait-seconds 2` denied, and the daemon exited 0 without the
+    token in its stderr.
+  - Not run: the scenario suite (HL-12); real Claude Code or Codex sessions
+    (that would call their model APIs); live call.
+- Open issues or follow-ups:
+  - HL-09: read permission asks out with their risk and require the PIN or a
+    confirming text for `high`; send the cap notification.
+  - HL-10: deliver queued owner instructions at the next Stop hook.
+  - HL-11: install the snippets in `docs/hooks.md` and have `doctor` check that
+    `--wait-seconds` stays below the hook `timeout`.
+  - A human should check one real Claude Code and one real Codex session with
+    the hooks installed and fake providers, including Codex's `/hooks` trust step.
+
+## 2026-10-14 — HL-14b Persona reads each ask on its own turn (#40)
+
+- Decision / change: the voice agent prompt now tells the model how to read
+  asks so the daemon's voice confirmation (`voice-confirm.ts`) can match the
+  owner's answers. `AGENT_DEFINITION_VERSION` is 3. Additions only, in the
+  outbound steps: step 1 reads each ask in its own turn in the ask's own words
+  (key words, session name, tool), never two asks in one turn, waiting for the
+  answer before the next, and says why (a reworded or combined reading may get
+  no answer); step 3 sends a `text` decision as the owner's words verbatim, never
+  summed up, shortened, corrected or added to; step 6 re-reads the same ask, not
+  a paraphrase, to ask again or check what the owner meant. The `submit_answer`
+  tool's `text` description also says "their own words, verbatim". No existing
+  sentence changed: the snapshot diff is the three appended sentences and the
+  `definition-v3` tag, and `SAFETY_RULES` passes unchanged.
+- Decisions (no human available):
+  - The rules sit in the outbound steps, after the untrusted-text rule, not in
+    the persona section, since they serve the decision check rather than tone.
+    Steps keep their numbers, so the diff stays additive.
+  - Reading an ask in its own words may run past the persona's "one or two
+    short sentences"; the prompt says that is fine, and still excludes what is
+    never read out (ids, paths, URLs), so a path-heavy ask may fall below the
+    match threshold and fail closed.
+  - The fake voice provider is unchanged: it already reads each ask's `asks`
+    line as its own agent turn and submits scripted text verbatim. It does not
+    model re-reads.
+- Evidence (automated, worktree, Node 24.11.0 locally): `scripts/ci/run.sh
+  build` passes; `CI=true scripts/ci/run.sh test` passes (1233 tests in 46
+  files after bringing in main with HL-06). New `packages/daemon/test/persona-readings.test.ts` plays the fake
+  voice agent for one, two and four asks (permission, question with options,
+  high-risk permission, finished turn) and checks `readings()` finds each ask
+  exactly once, in order, and that each answer confirms; also an
+  out-of-order answer, a free-text answer confirming only verbatim, and a
+  turn combining two asks reading neither (both answers fail closed). New
+  prompt tests in `elevenlabs-agent.test.ts`. Mutation checks on the fake, each
+  reverted: reading all asks in one turn (4 of 6 new tests fail); reading only
+  "Ask N, from <session>, <kind>" without the ask's text (4 fail; the one-ask
+  case still matches on session and tool words, which is the existing
+  threshold). Scenario suite: not built yet (HL-12). No ElevenLabs request was
+  made and no real call was placed: whether the real model follows these rules
+  is a live-check item (added to `docs/live-check.md`).
+- Open issues or follow-ups:
+  - HL-11: re-apply the agent and tools (version 3) on `hotline init`;
+    `hotline doctor` compares the version.
+  - Live check (HL-16): count `voice.answer-unconfirmed` on real calls with two
+    or more asks before tuning the reading threshold.
+  - Two asks in one call whose key words are one inside the other (such as
+    `git push origin main` and `git push origin main --force` from one session)
+    tie on the longer one's reading and fail closed.
+- Bot staff review (approve with nits, score 92, P3s only) and Greptile on
+  #40: Greptile's P2 is fixed. The prompt and `docs/voice.md` said a reworded
+  reading gets no answer, but `readings()` still recognises a paraphrase that
+  keeps most key words, so both now say it "may" get no answer. The stale test
+  count in this entry was corrected. The new prompt `toContain` tests stay as
+  cheap deletion guards next to the snapshot. The owner direction below stays
+  here as a note for a human, as the review suggested, not as an agreed
+  decision.
+- Owner direction relayed mid-ticket (not applied in this PR): approvals should
+  feel like a natural conversation. (1) Any natural phrasing counts as an
+  answer ("of course", "go for it", "yeah sure"). (2) Before any allow, read
+  the exact request back and ask a closed confirmation question that names it
+  with the reading's key words ("Just to confirm: allow <nickname> to
+  <action>. Yes?"), and submit allow only after the reply. (3) If an answer is
+  unclear or might be a no, ask "Sorry, is that a yes or a no?"; after two
+  unclear replies, say you will text instead and submit nothing. (4) A clear
+  no needs no confirmation. The direction also said to keep every safety
+  sentence word for word, bump the version, make the fake's flows follow the
+  protocol and leave `voice-confirm.ts` alone, since a separate ticket will
+  switch the daemon check to the confirmation exchange. The implementing
+  session's permission system refused the prompt edit twice as a security
+  weakening: once for the full direction, and once for a strengthening-only
+  subset (2, 4 and the clarifying question, keeping the `unclear` outcome).
+  Item 3's "submit nothing" contradicts the kept rule that a still-unclear
+  answer is submitted as `unclear`. That submission ends the ask as no answer
+  at once; submitting nothing leaves it open to be texted. Item 1 loosens what
+  the model treats as a yes. A human must decide on both and apply the change.
+  Today's daemon check would also refuse some of these flows, for example a
+  "hmm" before the confirmed yes, until that separate ticket lands.
+
+## 2026-10-14 — HL-11 Installer and doctor
+
+- Decision / change: `hotline init`, `install`, `doctor`, `voice list|set|apply`
+  and `test-call` in `apps/cli` (setup guide: `docs/install.md`); `away on|off`
+  from HL-06 is listed in the usage and the guide.
+  - `init` writes the 0700 home, the 0600 config with the PIN's scrypt hash
+    (`hashPin`), and credentials in the secret store. Settings come from flags
+    or prompts; the PIN and credentials only from no-echo prompts or
+    `HOTLINE_*` environment variables, never flags, because process arguments
+    are visible to other users. A PIN shorter than 6 digits warns. `init`
+    generates `elevenlabs.toolSecret`. It makes no network call.
+  - ElevenLabs provisioning is a separate `hotline voice apply` (carry-over
+    from HL-08): workspace secret, four tools and the agent from
+    `hotlineToolConfigs` and `hotlineAgentConfig`, created once and updated
+    (PATCH) afterwards. The ids are saved in the config as each is created
+    (new optional `voice.toolSecretId` and `voice.toolIds` in core's config
+    schema), so a failure part way never orphans one. `voice set` validates
+    with `isVoiceId` before saving or sending, then re-applies. The client
+    lives in `apps/cli/src/elevenlabs-admin.ts`, not `packages/providers`,
+    to stay clear of HL-14b's files; moving it is a follow-up.
+  - `install` edits only Hotline's entries (identified by the
+    `hook <agent> <event>` command or the `hotline` server name), with a
+    timestamped 0600 backup and a printed diff, `--dry-run` and `--uninstall`.
+    Idempotent: an entry that is already right stays in place. Codex's MCP
+    table sits in a marked TOML block (no TOML dependency); a hand-written
+    `[mcp_servers.hotline]` is refused, never edited. Symlinked configs are
+    refused. Under the test runner or `HOTLINE_TEST_MODE=1`, `--home` is
+    required and `--project` must sit inside it; the Keychain needs an
+    injected exec and HTTP an injected fetch, otherwise the command fails.
+  - `doctor` checks the config, secret presence (never values), the daemon's
+    `/v1/health` with the token on 127.0.0.1, away mode, hook waits against
+    hook timeouts, Codex `tool_timeout_sec` and Claude's per-server timeout
+    and `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` against `policy.askTimeoutMinutes`,
+    the deployed agent's `definition-v<n>` tag against
+    `AGENT_DEFINITION_VERSION`, its voice and tools, and `tunnel.publicUrl`.
+    Exit 1 on any FAIL. A stopped daemon is a WARN.
+  - `test-call` refuses without config, agent id, phone number id and API
+    key, prints that it will ring the owner's phone (last four digits), and
+    asks for `yes` unless `--yes`. With `voice.provider: fake` it uses the
+    fake provider and nothing rings.
+- Evidence (worktree, Node 24.11.0):
+  - `scripts/ci/run.sh build` and `test` pass: 1277 tests in 51 files. New:
+    agent-config (14), install (11), init (9), voice and test-call (11),
+    doctor (6), text-diff (3), core config (1).
+  - The scenario suite does not exist yet (HL-12); the eval stage prints
+    NOT RUN.
+  - Real agent integration, temporary home only (`HOME` / `CODEX_HOME`
+    pointed at a scratch directory): after `hotline install` from the built
+    CLI, `codex mcp get hotline` (Codex 0.146.0) shows the server with
+    `tool_timeout_sec: 2100`, and `claude mcp get hotline` (Claude Code
+    2.1.299) shows it at user scope and connected. A second install reported
+    both Codex files unchanged. The built CLI ran `init`, `away on`, `doctor`
+    (12 pass, 2 warn for the not-yet-started daemon, exit 0), `test-call` on
+    the fake provider and `install codex --uninstall`. No model calls, no
+    Codex `/hooks` trust step, no real ElevenLabs or Twilio request.
+  - Live call: not done (human, docs/live-check.md).
+- Greptile review fixes on PR #45:
+  - `voice apply` now PATCHes the existing workspace secret with the current
+    local tool secret on every run (`PATCH /v1/convai/secrets/{id}`), so
+    changing stores or re-running `init` cannot strand a stale secret.
+  - Hook ownership no longer depends on the launcher: any command shaped
+    exactly `<program> hook <agent> <event>` plus Hotline's own options is
+    Hotline's, for install, uninstall and doctor alike.
+  - The Codex check recognises `mcp_servers.hotline` in every TOML form
+    (quoted names, `hotline = {...}` under `[mcp_servers]`, dotted and inline
+    keys) and refuses to edit; doctor reads `tool_timeout_sec` from them.
+  - `doctor` fails when the agent lacks any of the four tools or their ids
+    are not recorded; `voice list` follows `next_page_token` (10 pages at
+    most, then says so); a cancelled prompt rejects instead of hanging; the
+    diff falls back to a block replacement past 1,000,000 table cells.
+  - Each fix has a test; `scripts/ci/run.sh build` and `test` pass after
+    catching up with main (HL-14b, definition v3): 1297 tests in 53 files.
+- Staff review fixes on PR #45 (heads 517d927 and a4ddf9a):
+  - `doctor` reads each tool (`GET /v1/convai/tools/{id}`) and fails when its
+    URL is not `<tunnel.publicUrl>/hooks/el/tools/<name>` or its header uses
+    another secret id than `voice.toolSecretId`.
+  - `test-call` bypasses the daemon's call policy by design, so it keeps a
+    two-minute cooldown (`test-call.json`); the bypass is documented. The
+    daemon already ignores and audits a post-call for an unknown conversation
+    (`voice.post-call-ignored`, covered in `orchestration.test.ts`).
+  - Hook ownership needs `hook` after a launcher that is `hotline`, an
+    absolute path or `node <file>.js`; a bare `myguard hook ...` is never
+    Hotline's.
+  - `init --force` refuses an unreadable config instead of dropping its ids;
+    `voice set` says "saved, but not applied" when the re-apply fails;
+    backups are created 0600 with `wx` instead of copy-then-chmod.
+  - Not changed: `doctor` still sends the token to whatever holds the
+    daemon's port on 127.0.0.1, the same trust the MCP server and hooks
+    already place in that port (docs/mcp.md).
+- Staff review fixes on PR #45 (head 0c7d791):
+  - The printed install diff masks credential-looking values (JSON and TOML
+    keys like `token`, `secret`, `key`, `auth`; anything after `Bearer`), so
+    a reformatted `~/.claude.json` never shows other servers' tokens.
+  - `install` re-reads each file just before replacing it and aborts that
+    file if it changed (Claude Code rewrites `~/.claude.json` while running).
+    No automated test covers the race itself: there is no seam between the
+    two reads, and adding one only for a test was not worth it.
+  - An absolute-path launcher is Hotline's only when its file name contains
+    `hotline` or it is this run's `--command`.
+  - The test-call cooldown fails closed on an untrusted or unreadable stamp.
+  - 1304 tests in 53 files pass (`scripts/ci/run.sh build` and `test`).
+- Staff review fixes on PR #45 (head 7182d3c):
+  - Hook ownership is exact: `hotline`, this run's `--command`, an absolute
+    path to a file named `hotline`, or `node .../apps/cli/dist/main.js`.
+    Other wrappers need the same `--command` again; `doctor` takes it too.
+  - `install` checks for a concurrent write before writing the backup, so
+    an aborted run leaves no stray backup.
+  - `init --force` names the old store when `--secret-store` changes, and
+    the docs say the `HOTLINE_*` variables are for scripted setup only.
+- Staff review fixes on PR #45 (head 7558af3): `init` tells the owner to
+  run `hotline voice apply` when it generates a new tool secret for an
+  already deployed agent (doctor can compare only the secret id, not its
+  value); `deployAgent` names an id it created but could not record. Left as
+  is: a failed real test call still starts the 2-minute cooldown (safe).
+- Open issues or follow-ups:
+  - `doctor` does not show the monthly cost estimate from plan section 8 yet.
+  - Move the ElevenLabs management client into `packages/providers` once
+    HL-14b has landed.
+  - Importing the Twilio number into ElevenLabs is manual
+    (`--agent-phone-number-id`); `voice apply` could do it.
+  - Clearing `voice.voiceId` does not reset the deployed agent's voice: the
+    agent body omits `tts` when no voice is set.
+
 ## 2026-10-14 — HL-09b Split the call orchestrator (#41)
 
 - Decision / change: pure refactor of `packages/daemon/src/orchestrator.ts`
@@ -1232,7 +1585,11 @@ Template:
   the logger through a getter, so `attachLog` still reaches them. Statement
   order (saves, audit entries, provider calls) is the same as before.
 - Evidence: no test file changed. `pnpm run lint`, `pnpm run typecheck` pass;
-  `pnpm run test` 41 files, 907 tests, passed three times in a row. Mutation
+  `pnpm run test` 41 files, 907 tests, passed three times in a row. After
+  catching up with main (HL-06, HL-14b, HL-11, which did not touch the
+  orchestrator), `scripts/ci/run.sh build` passes and `test` passed 53 files,
+  1308 tests, three times in a row, including HL-14b's
+  `persona-readings.test.ts`. Mutation
   checks on moved code, each reverted: high-risk allow without the PIN
   accepted (1 test fails), a maybe-placed call not failed on recovery (1),
   a wrong code not burning the waiting codes (1). Scenario suite not built yet

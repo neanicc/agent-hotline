@@ -39,21 +39,28 @@ on first start in the configured secret store (the Keychain on macOS, else the
 `0600` secrets file) and reused after that. The MCP server and hook adapters read
 it from the same store.
 
-Routes today (`agent-routes.ts`; the MCP server in [mcp.md](mcp.md) is the client):
+Routes today (`agent-routes.ts`; the MCP server in [mcp.md](mcp.md) and the hook
+adapters in [hooks.md](hooks.md) are the clients):
 
 | Route | Does |
 | --- | --- |
 | `GET /v1/health` | `{"ok": true, "version": "..."}` |
 | `POST /v1/sessions` | Registers `{agent, cwd, agentSessionId?}` and returns `{session}` (201). A live session with the same agent and `agentSessionId` is reused (200) |
-| `POST /v1/sessions/:sessionId/asks` | Queues `{kind: "question" \| "notify", text, options?, urgent?}` and returns `{ask}` (201). Text and options are redacted before they are stored. The ask expires after `policy.askTimeoutMinutes`. A session with 3 open questions or 10 open notifications, or all sessions with 10 or 30, gets `429` (audited as `ask.refused`). `urgent` is the agent's request only; call policy decides |
+| `POST /v1/sessions/:sessionId/asks` | Queues `{kind, text, options?, toolName?, risk?, urgent?}` and returns `{ask}` (201). `kind` is `question`, `notify`, `permission` or `stop`. Only questions carry `options`; `permission` requires `toolName` (identifier characters, up to 100) and `risk` (`low` or `high`), and no other kind may send them. Text, options and the tool name are redacted before they are stored. The ask expires after `policy.askTimeoutMinutes`. Open-ask caps per session / across all sessions: questions 3 / 10, notifications 10 / 30, permission requests 3 / 10, stops 1 / 10; past them `429` (audited as `ask.refused`). A new `stop` cancels the session's older open `stop` first. `urgent` is the agent's request only; call policy decides |
 | `GET /v1/asks/:askId/outcome?waitSeconds=0..30` | `{state: "waiting", ask}` or `{state: "final", ask, outcome}`, waiting up to `waitSeconds` for a change |
 | `POST /v1/asks/:askId/cancel` | Cancels an ask that is still open: `{cancelled}` |
 | `POST /v1/sessions/:sessionId/end` | Marks the session `ended` and cancels its open asks: `{ended}`. An ended session takes no new asks (`404`) |
 | `GET /v1/sessions/:sessionId/inbox` | `{session, instructions, asks}`: owner instructions (always empty until HL-10 adds the queue) and the 20 newest asks with their outcomes |
 
-Bodies are strict: an unknown field, a relative `cwd`, a `permission` or `stop`
-kind (HL-06 adds them) or more than 9 options gets `400` with the failing paths,
-never the values. An unknown session or ask gets `404`.
+Bodies are strict: an unknown field, a relative `cwd`, more than 9 options,
+options on anything but a question, or a `toolName` or `risk` that is missing
+from a permission request or sent with another kind gets `400` with the failing
+paths, never the values. An unknown session or ask gets `404`.
+
+The `risk` of a permission request is the hook's classification of the full
+tool input (`classifyPermission`, see [hooks.md](hooks.md#risk-classes-plan-question-6)).
+Any token holder can send it, so the hook also judges the outcome with the
+stricter of its own class and the stored one.
 
 Before counting against the caps, every open ask past its `expiresAt` is marked
 `expired`, so asks nobody polls (a killed agent, an undelivered notification)
@@ -70,7 +77,8 @@ read and reported as `no-answer` with reason `timeout`, and `cancelled` as
 The store tells listeners about every committed status change
 (`onAskChange`), so a waiting outcome request returns as soon as the ask is
 answered, expires or is cancelled, and the session's state follows its asks
-(`waiting-on-human` while it has an open question, else `working`). On
+(`waiting-on-human` while it has an open question, permission request or stop,
+else `working`). On
 shutdown, waiting requests return at once. Agent API connections still open
 2 seconds later are closed: a client that aborted a long poll could otherwise
 hold the shutdown until the keep-alive timeout.

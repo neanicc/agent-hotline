@@ -3,8 +3,8 @@
 How the hotline sounds on the phone, how it names your agent sessions, and how
 to give it a voice from the ElevenLabs library or a clone of your own.
 
-Nothing in this document is automated by Hotline yet: `hotline init` and
-`hotline voice set` arrive with HL-11. Hotline never uploads, records or stores
+`hotline voice list`, `hotline voice set` and `hotline voice apply` are in
+[install.md](install.md#hotline-voice). Hotline never uploads, records or stores
 audio, and the repository never contains voice samples or recordings.
 
 ## The persona
@@ -12,12 +12,23 @@ audio, and the repository never contains voice samples or recordings.
 The voice agent is an ElevenLabs Agents conversational agent whose prompt, first
 message and tools live in code:
 [`packages/providers/src/elevenlabs-agent.ts`](../packages/providers/src/elevenlabs-agent.ts)
-(`AGENT_PROMPT`, `AGENT_FIRST_MESSAGE`, `AGENT_DEFINITION_VERSION`, currently 2).
+(`AGENT_PROMPT`, `AGENT_FIRST_MESSAGE`, `AGENT_DEFINITION_VERSION`, currently 3).
 
 It sounds like a calm, friendly teammate with a quick heads-up:
 
 - Short, casual sentences; one or two per turn, one ask at a time, then it
   listens. If you talk over it, it stops.
+- It reads each ask on its own turn, in the ask's own words (its key words,
+  the session name and the tool), and waits for your answer before the next
+  ask. It never reads two asks in one turn, and when it asks again or checks
+  what you meant it reads the same ask again rather than rewording it. The
+  daemon only counts your answer when it follows a turn it recognises as that
+  ask's reading. A light paraphrase that keeps most of the ask's key words is
+  still recognised, but a heavier rewording or a reading of two asks at once
+  can leave your answer uncounted
+  ([daemon.md](daemon.md#call-orchestration)). Free-text answers (your answer
+  to a question, or what an agent should do next) are sent on in your own
+  words, verbatim, never summed up.
 - It says which session is calling before each ask ("Claude in demo-app has a
   question"), reads options as numbers ("option 1, ...; option 2, ..."),
   repeats your decision back, and before hanging up sums up what you decided.
@@ -49,8 +60,9 @@ silence is not a yes. The prompt also says the persona can never bend them.
 
 To change the persona, edit the prompt, bump `AGENT_DEFINITION_VERSION`,
 review the snapshot diff and update it (`pnpm exec vitest run --project
-providers -u`), then re-apply the agent definition (HL-11). A changed safety
-sentence fails the rule test on purpose; changing one is a security change.
+providers -u`), then re-apply the agent definition (`hotline voice apply`). A
+changed safety sentence fails the rule test on purpose; changing one is a
+security change.
 
 ## Session names
 
@@ -102,7 +114,7 @@ pick one without it. An English voice suits the English prompt best.
    { "voice": { "voiceId": "AbCdEfGh0123456789xy" } }
    ```
 
-   `hotline voice set <voice id>` will do both once HL-11 lands. Without a
+   `hotline voice set <voice id>` does both. Without a
    voice id the agent uses ElevenLabs' default voice. A malformed id is refused
    (`isVoiceId`), before anything is sent to ElevenLabs.
 

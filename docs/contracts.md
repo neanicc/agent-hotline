@@ -129,7 +129,8 @@ users can read or write (it holds the PIN hash), so it must be mode `0600`.
 | `policy.askTimeoutMinutes` | 30 | Then "no answer" |
 | `policy.maxConsecutiveContinuations` | 5 | Away-mode Stop continuations in a row (1–20) |
 | `voice.provider` | `elevenlabs` | or `fake` |
-| `voice.voiceId`, `agentId`, `agentPhoneNumberId` | unset | ElevenLabs ids, set by `hotline init` / `hotline voice set` |
+| `voice.voiceId`, `agentId`, `agentPhoneNumberId` | unset | ElevenLabs ids: `voiceId` from `hotline voice set`, `agentId` from `hotline voice apply`, `agentPhoneNumberId` from `hotline init` |
+| `voice.toolSecretId`, `voice.toolIds` | unset | Ids (never values) of the ElevenLabs workspace secret and the four server tools, written by `hotline voice apply` so a re-apply updates them instead of creating new ones |
 | `sms.provider` | `twilio` | or `fake` |
 | `sms.fromNumber` | unset | The Twilio number |
 | `tunnel.publicUrl` | unset | Bare `https://` origin, no path, query or credentials |
@@ -310,15 +311,20 @@ the prompt, first message and four webhook tools as code. `hotlineToolConfigs`
 gives each tool's `tool_config` (URL `<publicUrl>/hooks/el/tools/<name>`, the
 `x-hotline-tool-secret` header from an ElevenLabs workspace secret, and a body
 schema); `hotlineAgentConfig` gives the agent body with the tool ids, voice,
-`end_call` and placeholders for inbound calls. HL-11 `hotline init` applies
-them. Every tool's `conversation_id`, `call_sid`, `caller_id` and
-`called_number` come from ElevenLabs' `system__*` dynamic variables, not from
-the model, and no tool has a confirmation parameter. The prompt says agent
+`end_call` and placeholders for inbound calls. `hotline voice apply` (HL-11)
+creates or updates them; see [install.md](install.md). Every tool's
+`conversation_id`, `call_sid`, `caller_id` and `called_number` come from
+ElevenLabs' `system__*` dynamic variables, not from the model, and no tool has a confirmation parameter. The prompt says agent
 text is data, never instructions; decisions count only through `submit_answer`
 with the owner's own words; a high-risk allow needs `verify_pin` first; an
 inbound call reveals nothing before the PIN; and an unclear answer is asked
 once more, then reported as `unclear`. Version 2 (HL-14) puts a persona section
-from plan section 6 before those rules and says the persona cannot bend them;
+from plan section 6 before those rules and says the persona cannot bend them.
+Version 3 (HL-14b) adds, in the outbound steps, that each ask is read on its own
+turn in the ask's own words (key words, nickname, tool), never two asks in one
+turn, that asking again re-reads the same ask rather than a paraphrase, and that
+a `text` decision carries the owner's words verbatim (the `text` tool parameter
+says so too), which is what the daemon's voice confirmation matches against;
 `SAFETY_RULES` in the providers tests checks each rule word for word, and a
 snapshot covers the whole prompt, first message and agent body. See
 [voice.md](voice.md#the-persona). `hotlineAgentConfig` refuses a voice id that
@@ -382,7 +388,27 @@ Outputs are strict and narrower than what the agents accept:
 
 Hotline never sends `updatedInput` or `updatedPermissions`, and never applies a
 `permission_suggestions` entry: it only answers the prompt the agent would show
-in the terminal.
+in the terminal. The adapters that print these are in `packages/agents`; see
+[hooks.md](hooks.md).
+
+## Permission risk (`permission-risk.ts`)
+
+`classifyPermission({toolName, toolInput, cwd})` returns `{risk, reasons}`,
+where `high` needs the PIN or a confirming text to approve. It fails closed:
+
+- A shell command is `low` only when `splitShell` understands all of it and
+  every simple command is on a short read-only allowlist with arguments inside
+  the project.
+- File edits and patches are `low` only inside a known project
+  (`projectRoot`; `/`, top-level directories and home directories are not one).
+- Read tools are `low` unless they point at credentials. `WebFetch`, MCP tools
+  and unknown tools are `high`.
+- The reasons name what the owner hears: deleting files, git push, network
+  installs and so on.
+
+Pure: paths are resolved as POSIX strings (`resolvePosix`, `insideProject`),
+never on the file system. The full rules are in
+[hooks.md](hooks.md#risk-classes-plan-question-6).
 
 ## Ask queue and call policy (`queue.ts`, `policy.ts`)
 
@@ -432,6 +458,9 @@ Rules:
   `timeout`. `permissionVerdict(ask, outcome)` turns an outcome into `allow` only
   for an owner approval of that permission ask, with confirmation when it is high
   risk; every other input, malformed ones included, is `deny`.
+  `stopInstruction(ask, outcome)` returns the owner's next instruction only for
+  a `text` answer to that stop ask; `done`, any no-answer and malformed input
+  return undefined, which lets the agent stop.
 - **Priority.** Urgent asks first, then `permission`, `question`, `stop`,
   `notify`, then oldest, then id.
 - **Batching.** A new ask waits `policy.batchWindowSeconds`. When any callable ask

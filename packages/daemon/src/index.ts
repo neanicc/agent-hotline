@@ -6,6 +6,7 @@ export * from "./agent-routes.js";
 export * from "./api-token.js";
 export * from "./config-file.js";
 export * from "./elevenlabs-webhook.js";
+export * from "./hook-state.js";
 export * from "./lock.js";
 export * from "./logger.js";
 export * from "./orchestrator.js";

@@ -2,7 +2,10 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import type { Readable, Writable } from "node:stream";
 import { type AgentKind, productName } from "@hotline/core";
-import type { LogDestination, SignalSource } from "@hotline/daemon";
+import type { Exec, LogDestination, SignalSource } from "@hotline/daemon";
+import { awayCommand, hookCommand } from "./hook.js";
+import { type Prompter, terminalPrompter } from "./prompt.js";
+import { type CliFetch, loadDaemonSetup } from "./setup.js";
 
 export interface Output {
   stdout(text: string): void;
@@ -19,12 +22,21 @@ export interface CliContext {
   logDestination: LogDestination;
   /** The working directory; `hotline mcp` registers its session there. Defaults to `process.cwd()`. */
   cwd?: string;
-  /** The MCP protocol streams for `hotline mcp`. Default to the process's own. */
+  /** The MCP protocol streams for `hotline mcp`, and the hook payload for `hotline hook`. Default to the process's own. */
   stdin?: Readable;
   stdout?: Writable;
+  /** Asks the owner questions (init, test-call). Undefined when there is no terminal. */
+  prompt?: Prompter;
+  /** Runs `security` for the Keychain. Tests inject a fake; in test mode one is required. */
+  exec?: Exec;
+  /** HTTP for the daemon health check and ElevenLabs. Tests inject a fake; in test mode one is required. */
+  fetch?: CliFetch;
+  /** Current time, for backup names. */
+  now?: () => Date;
 }
 
 export function processContext(): CliContext {
+  const prompt = terminalPrompter();
   return {
     env: process.env,
     homeDir: homedir(),
@@ -34,6 +46,7 @@ export function processContext(): CliContext {
     cwd: process.cwd(),
     stdin: process.stdin,
     stdout: process.stdout,
+    ...(prompt === undefined ? {} : { prompt }),
   };
 }
 
@@ -49,13 +62,19 @@ export function usage(): string {
     "Usage: hotline <command>",
     "",
     "Commands:",
+    "  init        Set up the hotline home, config, PIN and credentials",
+    "  install     Add the MCP server and hooks to Claude Code or Codex (claude, codex)",
+    "  doctor      Check the setup: pass, warn or fail for each part",
+    "  voice       List voices, pick one, or apply the ElevenLabs agent (list, set, apply)",
+    "  test-call   Ring your phone once to check the voice line",
+    "  away        Switch away mode on or off (on, off, status)",
     "  daemon      Run the Hotline daemon (agent API and webhook listener)",
+    "  hook        The Claude Code and Codex permission and Stop hook (stdin JSON)",
     "  mcp         Run the MCP server for Claude Code or Codex (stdio)",
     "  help        Show this message",
     "  version     Print the hotline version",
     "",
-    "More commands (init, install, away, doctor, voice, test-call, hook)",
-    "arrive with later tickets; see docs/plan.md.",
+    "Run hotline <command> --help for details. Setup guide: docs/install.md.",
   ].join("\n");
 }
 
@@ -170,17 +189,8 @@ async function mcpCommand(args: readonly string[], out: Output, context: CliCont
   const daemon = new DaemonClient({
     // Read on first use and again after a failure, so the daemon may start later.
     connection: async () => {
-      const { hotlinePaths, loadConfig, openSecretStore } = await import("@hotline/daemon");
       try {
-        const paths = hotlinePaths({ env: context.env, homeDir: context.homeDir });
-        const config = await loadConfig(paths.config);
-        const secrets = openSecretStore({
-          choice: config.secrets.store,
-          platform: context.platform,
-          filePath: paths.secrets,
-        });
-        const token = await secrets.get("daemon.apiToken");
-        if (token === undefined) throw new Error('no API token yet; start "hotline daemon" first');
+        const { config, token } = await loadDaemonSetup(context);
         return { port: port ?? config.daemon.port, token };
       } catch (error) {
         const message = (error as Error).message;
@@ -217,6 +227,21 @@ export async function run(
   switch (command) {
     case "daemon":
       return daemonCommand(args, out, context);
+    case "hook":
+      return hookCommand(args, out, context);
+    case "away":
+      return awayCommand(args, out, context);
+    // Setup commands load on demand, so the hooks and the MCP server start fast.
+    case "init":
+      return (await import("./init.js")).initCommand(args, out, context);
+    case "install":
+      return (await import("./install.js")).installCommand(args, out, context);
+    case "doctor":
+      return (await import("./doctor.js")).doctorCommand(args, out, context);
+    case "voice":
+      return (await import("./voice.js")).voiceCommand(args, out, context);
+    case "test-call":
+      return (await import("./voice.js")).testCallCommand(args, out, context);
     case "mcp":
       return mcpCommand(args, out, context);
     case "help":

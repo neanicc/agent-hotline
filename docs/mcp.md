@@ -79,8 +79,9 @@ so the daemon can start after the agent. It never creates the token.
 
 ## Config snippets
 
-`hotline install claude|codex` (HL-11) writes these entries, keeps a backup and
-prints a diff. Until then, add them by hand. Until packaging (HL-15) puts
+`hotline install claude|codex` writes these entries, keeps a backup and prints
+a diff, and `hotline doctor` checks the timeouts below; see
+[install.md](install.md). To add them by hand before packaging (HL-15) puts
 `hotline` on your `PATH`, use `node` as the command and put
 `/absolute/path/to/apps/cli/dist/main.js` first in the arguments.
 
@@ -133,8 +134,11 @@ Or `codex mcp add hotline -- hotline mcp --agent codex`, then add
 `tool_timeout_sec` by hand. Source:
 [Codex MCP docs](https://developers.openai.com/codex/mcp).
 
-Codex does not tell a stdio server its session id, so a Codex session has no
-`agentSessionId` until the hook adapters (HL-06) supply one.
+Codex does not tell a stdio server its session id, so a Codex MCP session has
+no `agentSessionId`. The hook adapters ([hooks.md](hooks.md)) register with the
+`session_id` from their payload, so a Codex session's hooks and its MCP server
+show up as two daemon sessions. Claude Code's hooks and MCP server share one,
+when `CLAUDE_CODE_SESSION_ID` matches the hooks' `session_id`.
 
 ## Daemon routes it uses
 

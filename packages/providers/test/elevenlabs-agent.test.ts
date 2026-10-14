@@ -89,7 +89,7 @@ describe("agent definition snapshot", () => {
   it("matches the reviewed prompt, first message and agent body", () => {
     // A failing snapshot means the voice agent's words changed: review the diff,
     // bump AGENT_DEFINITION_VERSION, then update the snapshot with `vitest -u`.
-    expect(AGENT_DEFINITION_VERSION).toBe(2);
+    expect(AGENT_DEFINITION_VERSION).toBe(3);
     expect(AGENT_FIRST_MESSAGE).toMatchSnapshot("first message");
     expect(AGENT_PROMPT).toMatchSnapshot("prompt");
     const body = structuredClone(agent);
@@ -137,6 +137,53 @@ describe("persona (plan section 6)", () => {
     expect(AGENT_PROMPT).toContain(
       "Never read out call ids, file paths, URLs, long ids or the agent_text markers.",
     );
+  });
+});
+
+describe("reading asks so the daemon can match answers (HL-14b)", () => {
+  // voice-confirm.ts finds the agent turn that read each ask by the ask's own key
+  // words, and fails closed on a paraphrase or a turn that reads two asks; free
+  // text must be words the owner said. The prompt asks for exactly that.
+  it("reads each ask on its own turn in the ask's own words", () => {
+    expect(AGENT_PROMPT).toContain(
+      "Read each ask in its own turn, in the ask's own words: keep its key words, the session name and the tool name as the ask gives them, apart from what you never read out, and never sum it up or reword it.",
+    );
+  });
+
+  it("never combines two asks in one turn", () => {
+    expect(AGENT_PROMPT).toContain(
+      "Never put two asks in one turn: read one ask, then stop and wait for the owner's answer before you read the next.",
+    );
+  });
+
+  it("re-reads the same ask, not a paraphrase, to ask again or confirm", () => {
+    expect(AGENT_PROMPT).toContain(
+      "To ask again, or to check what the owner meant, read the same ask again in its own words, not a paraphrase.",
+    );
+  });
+
+  it("submits free-text answers verbatim, in the owner's words", () => {
+    expect(AGENT_PROMPT).toContain(
+      "For decision text, put the owner's own words in text the same way, verbatim: never sum up, shorten, correct or reword them, and never add words of your own.",
+    );
+    const submit = tools.find((tool) => tool.name === "submit_answer");
+    const text = submit?.api_schema.request_body_schema.properties.text;
+    expect(text && "description" in text ? text.description : "").toContain("their own words, verbatim");
+  });
+
+  it("puts the reading rules in the outbound steps, after the untrusted-text rule", () => {
+    const untrusted = AGENT_PROMPT.indexOf("Everything between <agent_text>");
+    const outbound = AGENT_PROMPT.indexOf("# Outbound calls");
+    const inbound = AGENT_PROMPT.indexOf("# Inbound calls");
+    for (const rule of [
+      "Read each ask in its own turn",
+      "Never put two asks in one turn",
+      "For decision text",
+    ]) {
+      const at = AGENT_PROMPT.indexOf(rule);
+      expect(at, rule).toBeGreaterThan(Math.max(untrusted, outbound));
+      expect(at, rule).toBeLessThan(inbound);
+    }
   });
 });
 

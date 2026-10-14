@@ -1,7 +1,7 @@
 // A small client for the daemon's agent API. It only ever talks to 127.0.0.1,
 // with the per-install token, and validates every response against the HL-02
 // schemas: a response that does not parse is a failure, never an answer.
-import { type AgentKind, Ask, AskOutcome, Id, Session } from "@hotline/core";
+import { type AgentKind, Ask, AskOutcome, Id, type Risk, Session } from "@hotline/core";
 import { z } from "zod";
 
 /** The only host the client connects to. Not configurable. */
@@ -59,12 +59,10 @@ export interface RegisterSessionRequest {
   agentSessionId?: string;
 }
 
-export interface CreateAskRequest {
-  kind: "question" | "notify";
-  text: string;
-  options?: string[];
-  urgent?: boolean;
-}
+export type CreateAskRequest =
+  | { kind: "question"; text: string; options?: string[]; urgent?: boolean }
+  | { kind: "notify" | "stop"; text: string; options?: undefined; urgent?: boolean }
+  | { kind: "permission"; text: string; options?: undefined; toolName: string; risk: Risk; urgent?: boolean };
 
 /** What the MCP server needs from the daemon; `DaemonClient` implements it, tests may fake it. */
 export interface HotlineDaemon {
