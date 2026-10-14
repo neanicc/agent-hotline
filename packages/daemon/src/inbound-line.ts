@@ -193,7 +193,9 @@ export class InboundLine {
       .map(([kind, n]) => count(n, ASK_WORDS[kind]));
     if (byKind.length > 0) parts[0] += `, open: ${byKind.join(" and ")}`;
     const latest = asks[0];
-    if (latest !== undefined) parts.push(`Latest: ${wrap(plain(redact(latest.text), LATEST_LENGTH))}`);
+    // Agent-written, so only on the voice path, fenced; the SMS carries state and counts only.
+    if (fence && latest !== undefined)
+      parts.push(`Latest: ${wrap(plain(redact(latest.text), LATEST_LENGTH))}`);
     const queued = this.#store.listInstructions({ sessionId: session.id, status: "queued" }).length;
     if (queued > 0) parts.push(`${count(queued, ["instruction", "instructions"])} from you waiting for it`);
     parts.push(`Last heard from ${ago(now.getTime() - Date.parse(session.lastSeenAt))}`);

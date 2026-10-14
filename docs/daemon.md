@@ -607,7 +607,8 @@ anyone else's text the generic SMS reply.
   are remembered. Open asks are counted from all of a session's open asks;
   the latest text is its newest ask's. Stale
   sessions are ended first ([session lifetime](#session-lifetime)). The `status`
-  text gets the same status without fences, which goes back only to the owner's
+  text gets the same status with state and counts only: no agent-written ask
+  text goes to Twilio. It goes back only to the owner's
   number (the webhook checked the sender, and Twilio replies to that number), so
   a spoofed sender never sees it.
 - **Instructions are held, then confirmed.** `send_instruction` takes only a

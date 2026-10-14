@@ -547,7 +547,11 @@ describe("status by text", () => {
     const reply = await h.text("status");
     expect(reply).toContain("Hotline: 1 live session.");
     expect(reply).toContain("Session 1, Codex in demo-app: waiting on you, open: 1 question.");
-    expect(reply).toContain("Latest: Pin the ONNX version or skip Windows?");
+    // Agent-written text never goes out by SMS: state and counts only.
+    expect(reply).toBe(
+      "Hotline: 1 live session.\nSession 1, Codex in demo-app: waiting on you, open: 1 question. Last heard from just now.",
+    );
+    expect(reply).not.toContain("ONNX");
     expect(reply).not.toContain("agent_text");
   });
 

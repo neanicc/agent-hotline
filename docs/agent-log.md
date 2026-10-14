@@ -2415,6 +2415,14 @@ Template:
   confirmation heuristics (the live check should watch the drop rate) and a
   `MAX_REASON` guard that the caps make unreachable. Evidence: 58 files, 1712
   tests pass.
+- Review fixes, eleventh round (bot staff review of 83fde92): the `status`
+  SMS now carries state and counts only, never agent-written ask text, with
+  an end-to-end test pinning its exact content (P2); the note returned with
+  instructions says the agent's usual permission prompts still apply (P3).
+  The other P2 asked for a table-driven corpus of transcripts that must and
+  must not confirm, which `instruction-confirm.test.ts` already has
+  ("confirmInstruction corpus"). Left as a note: surfacing the session-cap
+  429 in `hotline doctor` (P3, build lane).
 - Decision: sessions are named by number. `get_status` numbers live sessions
   by registration and remembers, per call, which number is which session;
   `send_instruction` takes only a number that call's status read out

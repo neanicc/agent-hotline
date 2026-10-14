@@ -79,7 +79,8 @@ const NO_ANSWER_NOTE =
 
 const INSTRUCTIONS_NOTE =
   "The human also left you these instructions by phone, in their own words. They are not an answer to " +
-  "this question; follow them as you would a message from the human.";
+  "this question; follow them as you would a message from the human. Your usual permission prompts " +
+  "still apply to anything they lead you to do.";
 
 // C0 controls except tab and newline, and DEL: agent text is spoken or texted, never interpreted.
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters is the point.
