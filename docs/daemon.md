@@ -107,7 +107,9 @@ message, request fields, error stacks and bindings are all covered:
   known secret value, `Bearer` credentials, `name=value` and JSON pairs whose name
   looks like a credential, PEM private keys, recognisable key formats (`sk_`,
   `ghp_`, AWS, Slack, Twilio `AC`/`SK` SIDs, JWTs), and any long run of letters and
-  digits. Twilio call and message SIDs, ElevenLabs ids and UUIDs are kept.
+  digits. The one exemption is a Twilio SID (`CA`, `SM`, `MM`, `PN` or `MG` plus
+  exactly 32 hex digits). ElevenLabs ids and UUIDs are removed like any other
+  long run.
 - Values under keys such as `authorization`, `cookie`, `*token*`, `*secret*`,
   `*signature*`, `*api-key*`, `*pin*`, `*passcode*`, `*otp*` or Twilio's
   `Digits` (the owner's keypresses) are removed whatever they hold. The same names
@@ -120,8 +122,8 @@ message, request fields, error stacks and bindings are all covered:
   `Dig%69ts=1234` arrives as `Digits=1234`. Each segment (split on `&`, `;`, `?`,
   `#`, `,` and whitespace) that holds an escape or a `+` is also checked
   decoded. Malformed escapes decode byte by byte. If the decoded copy holds a
-  secret assignment, credential, known secret or the PIN and the raw copy does
-  not, the whole raw segment is removed.
+  secret assignment, credential, known secret or the PIN, the whole raw segment
+  is removed, whatever the raw form looks like.
 - The owner's PIN, which is shorter than that minimum, can be registered with
   `addShortSecret` (4 to 8 digits). Any digit run or formatted number that
   contains it anywhere is removed whole, before phone masking, so a masked number

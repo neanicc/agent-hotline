@@ -169,8 +169,8 @@ Template:
   JSON log line, not on chosen fields, so messages, serializers and error stacks
   are covered. Numbers keep their last four digits. Known secret values,
   credential-like `name=value` and JSON pairs, Bearer credentials, PEM keys,
-  common key formats and long letter-digit runs are removed. Twilio CA/SM SIDs,
-  ElevenLabs ids and UUIDs are kept so logs stay usable. (7) Shutdown: the first
+  common key formats and long letter-digit runs are removed. Only Twilio SIDs
+  are kept (see the sixth review round). (7) Shutdown: the first
   SIGINT or SIGTERM closes both listeners (in-flight requests finish), then the
   database, and exits 0. After 10 s it gives up and exits 1. A second signal
   gets Node's default handling.
@@ -242,9 +242,30 @@ Template:
     and `+` before they read a name, which raw-text patterns missed
     (`Dig%69ts=1234`, `Digits+=1234`, `%44igits=1234`). Each `&`/`;`/`?`/`#`/`,`
     or whitespace segment holding an escape or `+` is also checked decoded.
-    Malformed escape runs decode byte by byte. If the decoded copy looks secret
-    and the raw copy does not, the whole raw segment is removed. With the pass
-    disabled, 6 tests fail.
+    Malformed escape runs decode byte by byte. If the decoded copy looks secret,
+    the whole raw segment is removed (made fully fail closed in the sixth
+    round). With the pass disabled, 6 tests fail.
+  - Not changed: webhook verification still runs after body parsing (256 KiB
+    cap), which signatures over form parameters need. HL-07 can refuse a
+    missing signature header earlier.
+  - Sixth round (coordinator, last redaction changes in HL-04):
+    - A stray `]` appeared when an earlier pass had already written
+      `[REDACTED]` (`From=%2B15555550100&Digits=4821` gave
+      `Digits=[REDACTED]]`). The assignment value group now consumes an
+      existing marker whole.
+    - The decoded-copy check fails closed: if the decoded segment looks secret,
+      the whole raw segment goes, even when the raw form already matched in
+      part.
+    - The id exemption is now exact: only Twilio `CA`/`SM`/`MM`/`PN`/`MG` SIDs
+      with exactly 32 hex digits. ElevenLabs-prefixed values and UUIDs are
+      removed like any other long run. The daemon logs its own ids through
+      structured fields it controls.
+    - Staff P3: after a shutdown timeout the lock is kept, because the store
+      may still be open, and the stale-pid check frees it once the process
+      exits.
+    - The rest goes to HL-13 (#14): base64, upper-cased or line-split copies
+      of registered secrets, slash-separated phone numbers, and YAML
+      continuation lines.
 - Logging contract (documented at the top of `logger.ts` and in
   `docs/daemon.md`):
   - Callers log parsed, allowlisted fields only.
@@ -252,9 +273,6 @@ Template:
   - The redactor is a safety net, not the primary control.
   - Deeper work belongs to HL-13 (#14): fuzzing the redactor, `.env` lines and
     the threat model.
-  - Not changed: webhook verification still runs after body parsing (256 KiB
-    cap), which signatures over form parameters need. HL-07 can refuse a
-    missing signature header earlier.
 - Open issues or follow-ups: add `daemon.webhookPort` to the config contract
   (lane:core) if the `port + 1` convention gets in the way. HL-07 needs a
   urlencoded body parser on the webhook listener and HL-08 the raw body for

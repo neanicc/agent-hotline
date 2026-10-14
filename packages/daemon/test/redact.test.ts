@@ -34,7 +34,6 @@ describe("phone numbers", () => {
     "127.0.0.1:7341",
     "version 5.12.5",
     "took 1234 ms",
-    "123e4567-e89b-12d3-a456-4266a4174b00",
     `CA${"0a1b2c3d4e5f6a7b".repeat(2)}`,
   ])("leaves %s alone", (input) => {
     expect(text(input)).toBe(input);
@@ -370,6 +369,49 @@ describe("bypasses closed after the security review", () => {
       known.text(input);
       expect(performance.now() - started).toBeLessThan(50);
     }
+  });
+
+  it.each([
+    ["From=%2B15555550100&Digits=4821", `From=***0100&Digits=${REDACTED}`],
+    ["PIN : 4821", `PIN : ${REDACTED}`],
+    ["Digits=4821 then pin=4821, ok", `Digits=${REDACTED} then pin=${REDACTED}, ok`],
+  ])("never leaves a stray bracket after an earlier pass redacted %s", (input, expected) => {
+    const known = createRedactor();
+    known.addShortSecret("4821");
+    expect(known.text(input)).toBe(expected);
+  });
+
+  it("removes a whole encoded segment whose decoded form is secret, even if the raw form partly matched", () => {
+    const known = createRedactor();
+    known.addShortSecret("4821");
+    // The raw segment already looks secret (`token=`), and its decoded copy also
+    // reveals the PIN and a second name; none of it may survive.
+    for (const input of ["token=abc%26pin%3D%34%38%32%31", "token=x+Digits=%34%38%32%31"]) {
+      const out = known.text(input);
+      expect(out).toBe(REDACTED);
+    }
+  });
+
+  it.each([
+    ["agent_", `agent_${"k".repeat(20)}${"7".repeat(20)}`],
+    ["conv_", `conv_${"Q9".repeat(20)}`],
+    ["phnum_", `phnum_${"a1".repeat(20)}`],
+  ])("does not exempt a %s-prefixed 40-character secret", (_prefix, secret) => {
+    expect(text(`id ${secret} end`)).toBe(`id ${REDACTED} end`);
+  });
+
+  it("removes UUID-shaped values, registered as secrets or not", () => {
+    const uuidKey = "9f1c2d3e-4b5a-6789-abcd-ef0123456789";
+    expect(text(`key ${uuidKey}`)).toBe(`key ${REDACTED}`);
+    const known = createRedactor([uuidKey]);
+    expect(known.text(`k=${uuidKey}&x=${encodeURIComponent(uuidKey)}`)).toBe(`k=${REDACTED}&x=${REDACTED}`);
+  });
+
+  it("still keeps Twilio SIDs, the one exempt id format", () => {
+    const sid = `CA${"0a1b2c3d4e5f6a7b".repeat(2)}`;
+    expect(text(`call ${sid}`)).toBe(`call ${sid}`);
+    // Not 32 hex digits after the prefix: removed.
+    expect(text(`call CA${"0a1b2c3d4e5f6a7b".repeat(2)}ff`)).toBe(`call ${REDACTED}`);
   });
 
   it("keeps pino's own timestamp in log lines", () => {

@@ -143,11 +143,13 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
   });
   const result = await Promise.race([daemon.close().then(() => false as const), timedOut]);
   clearTimeout(timer);
-  await lock.release();
   if (result === true) {
+    // The store may still be open, so keep the lock: a new daemon must not open
+    // the same database yet. Once this process exits, the stale-pid check frees it.
     daemon.log.error({ timeoutMs }, "hotline daemon did not stop in time");
     return 1;
   }
+  await lock.release();
   daemon.log.info("hotline daemon stopped");
   return 0;
 }

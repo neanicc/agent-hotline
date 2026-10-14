@@ -29,7 +29,7 @@ const SECRET_KEY = new RegExp(SECRET_NAME, "i");
  */
 const SECRET_ASSIGNMENT = new RegExp(
   String.raw`(?<![A-Za-z0-9_.-])(["']?[A-Za-z0-9_.-]{0,64}(?:${SECRET_NAME})[A-Za-z0-9_.-]{0,64}["']?\s{0,8}[:=]\s{0,8})` +
-    String.raw`("(?:[^"\\\r\n]|\\.){0,4096}"[^\s,;&}\]]*|'(?:[^'\\\r\n]|\\.){0,4096}'[^\s,;&}\]]*|["'][^\r\n]*|[^\s,;&"'}\]]+)`,
+    String.raw`(\[REDACTED\]|"(?:[^"\\\r\n]|\\.){0,4096}"[^\s,;&}\]]*|'(?:[^'\\\r\n]|\\.){0,4096}'[^\s,;&}\]]*|["'][^\r\n]*|[^\s,;&"'}\]]+)`,
   "gi",
 );
 
@@ -92,13 +92,15 @@ const KNOWN_TOKENS: readonly RegExp[] = [
 
 /**
  * Long runs of letters and digits look like keys or tokens (a Twilio auth token is
- * 32 hex digits, the daemon token 43 base64url characters). Identifiers that are
- * not secrets are kept so logs stay useful: Twilio call and message SIDs,
- * ElevenLabs conversation and agent ids, and UUIDs.
+ * 32 hex digits, the daemon token 43 base64url characters). The only exemption is
+ * an exact, well-known non-secret format: a Twilio call, message, phone-number or
+ * messaging-service SID (`CA`, `SM`, `MM`, `PN`, `MG` plus 32 hex digits). Anything
+ * else of that shape, ElevenLabs ids and UUIDs included, is removed: a provider can
+ * issue keys that look like ids, and the daemon logs its own ids through
+ * structured fields it controls.
  */
 const OPAQUE_RUN = /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_-])/g;
-const NOT_SECRET_IDS =
-  /^(?:(?:CA|SM|MM|PN|MG)[0-9a-f]{32}|(?:conv|agent|phnum)_[A-Za-z0-9]+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+const NOT_SECRET_IDS = /^(?:CA|SM|MM|PN|MG)[0-9a-f]{32}$/;
 
 function hasLetterAndDigit(text: string): boolean {
   return /[A-Za-z]/.test(text) && /\d/.test(text);
@@ -221,8 +223,8 @@ export function createRedactor(knownSecrets: Iterable<string> = []): Redactor {
    * `Dig%69ts=1234` or `Digits+=1234` reaches Twilio's parser as `Digits=1234`
    * while the raw text slips past the patterns. Each segment (between `&`, `;`,
    * `?`, `#`, `,` and whitespace) that holds an escape or a `+` is decoded too. If
-   * the decoded copy looks secret and the raw one does not, the whole raw segment
-   * is removed.
+   * the decoded copy looks secret at all, the whole raw segment is removed,
+   * whatever the raw form looks like (fail closed).
    */
   const removeEncodedSecrets = (input: string): string => {
     if (!/%[0-9A-Fa-f]{2}|\+/.test(input)) return input;
@@ -231,7 +233,7 @@ export function createRedactor(knownSecrets: Iterable<string> = []): Redactor {
       .map((segment, index) => {
         // Odd indexes are the delimiters the split captured.
         if (index % 2 === 1 || !/%[0-9A-Fa-f]{2}|\+/.test(segment)) return segment;
-        return looksSecret(formDecode(segment)) && !looksSecret(segment) ? REDACTED : segment;
+        return looksSecret(formDecode(segment)) ? REDACTED : segment;
       })
       .join("");
   };

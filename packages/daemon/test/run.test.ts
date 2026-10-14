@@ -165,6 +165,8 @@ describe("runDaemon", () => {
     signals.emit("SIGTERM");
     expect(await exit).toBe(1);
     expect(lines.join("")).toContain("did not stop in time");
+    // The store may still be open, so the lock stays until the process exits.
+    expect(await readFile(paths().lock, "utf8")).toBe(`${process.pid}\n`);
     socket.destroy();
     await daemon.close();
   });
