@@ -49,7 +49,7 @@ adapters in [hooks.md](hooks.md) are the clients):
 | `POST /v1/sessions/:sessionId/asks` | Queues `{kind, text, options?, toolName?, risk?, urgent?}` and returns `{ask}` (201). `kind` is `question`, `notify`, `permission` or `stop`. Only questions carry `options`; `permission` requires `toolName` (identifier characters, up to 100) and `risk` (`low` or `high`), and no other kind may send them. Text, options and the tool name are redacted before they are stored. The ask expires after `policy.askTimeoutMinutes`. Open-ask caps per session / across all sessions: questions 3 / 10, notifications 10 / 30, permission requests 3 / 10, stops 1 / 10; past them `429` (audited as `ask.refused`). A new `stop` cancels the session's older open `stop` first. `urgent` is the agent's request only; call policy decides |
 | `GET /v1/asks/:askId/outcome?waitSeconds=0..30` | `{state: "waiting", ask}` or `{state: "final", ask, outcome}`, waiting up to `waitSeconds` for a change |
 | `POST /v1/asks/:askId/cancel` | Cancels an ask that is still open: `{cancelled}` |
-| `POST /v1/sessions/:sessionId/end` | Marks the session `ended`, cancels its open asks and drops its queued instructions: `{ended}`. An ended session takes no new asks (`404`) |
+| `POST /v1/sessions/:sessionId/end` | Marks the session `ended`, cancels its open asks and drops its queued instructions: `{ended}`. An ended session takes no new asks, and its inbox and instruction routes answer `404` too, so its client registers again |
 | `GET /v1/sessions/:sessionId/inbox` | `{session, instructions, asks}`: the owner's queued instructions for this session ([inbound line](#inbound-line)), handed over once, and the 20 newest asks with their outcomes |
 | `POST /v1/sessions/:sessionId/instructions/take` | `{via: "ask" \| "stop"}` hands over the session's queued instructions, oldest first, once: `{instructions: [{text, receivedAt}]}`. The MCP server calls it after `ask_human`, the Stop hook before and after its stop |
 
@@ -466,7 +466,10 @@ anyone else's text the generic SMS reply.
   characters), queued instructions, and when it was last heard from. The name
   and the ask text are agent-derived, so they are fenced in `<agent_text>` like
   ask text on outbound calls. The whole status stays under 1400 characters;
-  sessions past that are counted ("3 more sessions are not read out"). Stale
+  sessions past that are counted ("3 more sessions are not read out") and
+  cannot be given instructions on that call, since only the numbers read out
+  are remembered. Open asks are counted from all of a session's open asks;
+  the latest text is its newest ask's. Stale
   sessions are ended first ([session lifetime](#session-lifetime)). The `status`
   text gets the same status without fences, which goes back only to the owner's
   number (the webhook checked the sender, and Twilio replies to that number), so
@@ -497,10 +500,22 @@ anyone else's text the generic SMS reply.
     2, Codex in api: rebase on main. Send it?"): it names "session <n>" for
     that session and repeats the instruction's words, and the owner's reply is
     a clear yes (a yes word, nothing doubtful, no question, no retraction);
-  - the owner's next reply after that holds no retraction ("never mind",
-    "cancel that", "scratch that", "forget it", "don't send", "actually no",
-    "wait"). Each instruction is checked on its own; nothing else the model
-    sent on the call can excuse a turn.
+  - for the rest of the call after that yes, no owner turn holds a retraction
+    ("never mind", "cancel that", "forget about it", "don't send", "hold
+    off"), a doubt marker or a bare negation ("no", "don't", "stop", "wait";
+    `soundsDoubtful` without counting questions). The one exception is a turn
+    that is itself the utterance of another instruction confirmed on its own
+    (`confirmInstructions` judges all of a call's instructions together,
+    repeating until nothing changes), and never a turn with a retraction. This
+    over-blocks on purpose: "no, that's all" drops it too, and the owner can
+    say it again or text it.
+  What is queued is never the model's `instruction` text: it is the owner's
+  own words for exactly the validated tokens, cut from the transcript (the
+  utterance minus its session reference and filler), with invisible
+  characters removed; after redaction only letters, digits, spaces and plain
+  punctuation are kept (`plainInstruction`). The read-back reply is judged by
+  a fixed yes lexicon and fails closed; HL-09c's reply judge can replace it
+  later.
   Every comparison uses one tokeniser, `speechTokens` in `@hotline/providers`
   (NFKC, lower case, apostrophe look-alikes, combining marks dropped), shared
   with `ownerSaid` and `voice-confirm.ts`, so curly apostrophes, fullwidth
@@ -510,12 +525,15 @@ anyone else's text the generic SMS reply.
   someone else. The PIN is only ever checked through `verify_pin`; nothing in a
   transcript can stand for it.
   A confirmed instruction is redacted, cut to 1000 characters and stored
-  (`instructions` table) with the matching owner turns as its excerpt and the
-  conversation id. Anything else is dropped (`voice.instruction-unconfirmed`
-  with the reason), and the owner gets one text saying it was not passed on.
-  The held instructions and the call's numbering live in memory for two hours:
-  a restart before the post-call event drops them (fail closed; the PinGate's
-  verification is in memory too, so nothing would count as the owner's anyway).
+  (`instructions` table) with the owner's utterance as its excerpt and the
+  conversation id, under an id fixed when it was held, so a retried post-call
+  event stores it once. Anything else is dropped
+  (`voice.instruction-unconfirmed` with the reason), and the owner gets one
+  text saying it was not passed on. The held instructions and the call's
+  numbering live in memory for an hour; past that, or after a restart before
+  the post-call event, they are dropped without a text (fail closed; the
+  PinGate's verification is in memory too, so nothing would count as the
+  owner's anyway), though the voice agent had said `queued`.
 - **Delivery.** Each instruction is handed over once, oldest first, to the
   session's next reader: the MCP server after `ask_human` returns (it adds
   them to the result), `check_inbox` (the inbox route), or the Stop hook, which
@@ -524,7 +542,10 @@ anyone else's text the generic SMS reply.
   guards. A stop already waiting on the owner is cancelled when an instruction
   for its session is queued (`ask.cancelled` by `instruction`), and the hook
   then picks the instruction up. A permission request never carries one.
-  Instructions are dropped when their session ends and after 6 hours unread
+  An ended session's inbox and take routes answer `404`, so its client
+  registers again (`check_inbox` retries once at once).
+  Instructions are dropped when their session ends and after 6 hours unread,
+  checked again at every hand-over
   (`instruction.expired`).
 - **No answers on inbound calls.** Call orchestration accepts `submit_answer`
   only on a call Hotline placed, so an inbound call answers no ask, PIN or not.

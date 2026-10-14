@@ -612,16 +612,22 @@ export class HotlineStore {
 
   // Owner instructions ------------------------------------------------------
 
-  /** Stores a new instruction. Its session must exist and its id must be new. */
-  addInstruction(instruction: Instruction): void {
+  /**
+   * Stores a new instruction; its session must exist. Idempotent by id: one
+   * already stored is left as it is and false is returned, so a retried
+   * post-call webhook can never queue the same instruction twice.
+   */
+  addInstruction(instruction: Instruction): boolean {
     const record = Instruction.parse(instruction);
-    this.wrap(`Could not add instruction ${record.id}`, () =>
+    const result = this.wrap(`Could not add instruction ${record.id}`, () =>
       this.db
         .prepare(
-          "INSERT INTO instructions (id, session_id, status, received_at, record) VALUES (?, ?, ?, ?, ?)",
+          `INSERT INTO instructions (id, session_id, status, received_at, record) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT (id) DO NOTHING`,
         )
         .run(record.id, record.sessionId, record.status, record.receivedAt, JSON.stringify(record)),
     );
+    return Number(result.changes) > 0;
   }
 
   /** Instructions oldest first, optionally of one session and one status. */
@@ -639,18 +645,27 @@ export class HotlineStore {
    * Hands over a session's queued instructions, oldest first, and marks them
    * delivered in the same transaction, so each is delivered once.
    */
-  takeInstructions(sessionId: string, via: InstructionDelivery, at: Date): Instruction[] {
+  takeInstructions(
+    sessionId: string,
+    via: InstructionDelivery,
+    at: Date,
+    /** Instructions received before this are dropped as `expired` in the same transaction, never delivered. */
+    expireBefore?: Date,
+  ): { taken: Instruction[]; expired: Instruction[] } {
     return this.transaction(() => {
-      const queued = this.listInstructions({ sessionId, status: "queued" });
-      for (const instruction of queued) {
-        this.writeInstruction({
-          ...instruction,
-          status: "delivered",
-          deliveredVia: via,
-          closedAt: at.toISOString(),
-        });
+      const taken: Instruction[] = [];
+      const expired: Instruction[] = [];
+      for (const instruction of this.listInstructions({ sessionId, status: "queued" })) {
+        const stale =
+          expireBefore !== undefined && Date.parse(instruction.receivedAt) < expireBefore.getTime();
+        this.writeInstruction(
+          stale
+            ? { ...instruction, status: "dropped", dropReason: "expired", closedAt: at.toISOString() }
+            : { ...instruction, status: "delivered", deliveredVia: via, closedAt: at.toISOString() },
+        );
+        (stale ? expired : taken).push(instruction);
       }
-      return queued;
+      return { taken, expired };
     });
   }
 

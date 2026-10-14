@@ -242,6 +242,7 @@ async function voiceWebhook(
     onVerified: (pin) => redactor.addShortSecret(pin),
     // Audited and texted to the owner by the inbound line.
     onLockout: (direction) => {
+      // Only defensive: pinLockout audits first and its text already catches provider errors.
       inbound.pinLockout(direction).catch(() => {});
     },
   });

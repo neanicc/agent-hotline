@@ -9,7 +9,7 @@
 //   and serve nobody but a call with the owner's number on it. A spoofed
 //   caller ID still needs the PIN; a lockout is texted to the owner here.
 // - Instructions are the owner's own words. `send_instruction` only holds one;
-//   it is queued once the post-call transcript backs it (`confirmInstruction`:
+//   it is queued once the post-call transcript backs it (`confirmInstructions`:
 //   the owner's whole utterance after the PIN, exactly one session named, read
 //   back and confirmed with a yes, not taken back). Each is confirmed on its
 //   own: nothing else the model sent can excuse a turn of the transcript.
@@ -33,7 +33,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Ask, AskKind, Session } from "@hotline/core";
 import { type PostCallEvent, type SmsProvider, speakableName } from "@hotline/providers";
 import type { SendInstructionResult, ToolCall, VoiceInstruction } from "./elevenlabs-webhook.js";
-import { confirmInstruction, type HeldInstruction } from "./instruction-confirm.js";
+import { confirmInstructions, type HeldInstruction, plainInstruction } from "./instruction-confirm.js";
 import type { OrchestratorLog } from "./orchestrator-state.js";
 import { CALL_CENTS_PER_MINUTE } from "./orchestrator-voice.js";
 import type { PinCallDirection } from "./pin.js";
@@ -49,7 +49,7 @@ export const MAX_INSTRUCTIONS_TOTAL = 20;
 /** Longest instruction stored, after redaction. */
 export const MAX_INSTRUCTION_LENGTH = 1000;
 /** A held instruction (or a call's session numbers) is forgotten after this long without a post-call event. */
-const CALL_MEMORY_MS = 2 * 60 * 60 * 1000;
+const CALL_MEMORY_MS = 60 * 60 * 1000;
 /** Calls remembered at once; past it the oldest are forgotten (their instructions are not queued). */
 const MAX_CALLS = 1000;
 /** At most one lockout text per direction in this window. */
@@ -107,7 +107,7 @@ interface CallMemory {
   /** The sessions the last status on this call read out, in order: session N is `sessionIds[N - 1]`. */
   sessionIds: string[];
   nicknames: string[];
-  held: (HeldInstruction & { sessionId: string; receivedAt: Date })[];
+  held: (HeldInstruction & { id: string; sessionId: string; receivedAt: Date; done?: boolean })[];
   expires: number;
 }
 
@@ -146,11 +146,11 @@ export class InboundLine {
     const { redact } = this.#options;
     const wrap = (text: string) => (fence ? `<agent_text>${text}</agent_text>` : text);
     const name = wrap(plain(speakableName(redact(session.nickname)) || "an unnamed session", 60));
-    const asks = this.#store.listSessionAsks(session.id, 20);
-    const open = asks.filter(
-      (ask) =>
-        (ask.status === "pending" || ask.status === "in-flight") && Date.parse(ask.expiresAt) > now.getTime(),
-    );
+    // Counts from every open ask, however old; the latest text from the newest one.
+    const asks = this.#store.listSessionAsks(session.id, 1);
+    const open = this.#store
+      .listAsks(["pending", "in-flight"])
+      .filter((ask) => ask.sessionId === session.id && Date.parse(ask.expiresAt) > now.getTime());
     const parts = [`Session ${number}, ${name}: ${STATE_WORDS[session.state]}`];
     const byKind = (["question", "permission", "stop", "notify"] as const)
       .map((kind) => [kind, open.filter((ask: Ask) => ask.kind === kind).length] as const)
@@ -165,10 +165,19 @@ export class InboundLine {
     return `${parts.join(". ")}.`;
   }
 
-  /** Every live session, numbered, cut to the budget with a count of the rest. */
-  #status(sessions: readonly Session[], now: Date, fence: boolean, head: string): string {
-    if (sessions.length === 0) return INBOUND_TEXTS.noSessions;
+  /**
+   * Every live session, numbered, cut to the budget with a count of the rest.
+   * `included` is the sessions actually read out, in order.
+   */
+  #status(
+    sessions: readonly Session[],
+    now: Date,
+    fence: boolean,
+    head: string,
+  ): { text: string; included: Session[] } {
+    if (sessions.length === 0) return { text: INBOUND_TEXTS.noSessions, included: [] };
     let text = head;
+    const included: Session[] = [];
     for (const [index, session] of sessions.entries()) {
       const line = this.#describe(session, index + 1, now, fence);
       const rest = sessions.length - index;
@@ -177,8 +186,9 @@ export class InboundLine {
         break;
       }
       text += fence ? ` ${line}` : `\n${line}`;
+      included.push(session);
     }
-    return text;
+    return { text, included };
   }
 
   /** `get_status`, after the PIN: every live session, numbered as `send_instruction` will name them. */
@@ -186,12 +196,13 @@ export class InboundLine {
     const now = call.receivedAt;
     const sessions = this.#sessions(now);
     const memory = this.#memory(call.conversationId, now);
-    // The numbers this call heard are the ones its instructions use.
-    memory.sessionIds = sessions.map((session) => session.id);
-    memory.nicknames = sessions.map((session) => speakableName(this.#options.redact(session.nickname)));
     this.#store.appendAudit("voice.status", { sessions: sessions.length }, now);
     const head = `${count(sessions.length, ["live session", "live sessions"])}.`;
-    return this.#status(sessions, now, true, head);
+    const { text, included } = this.#status(sessions, now, true, head);
+    // Only the numbers this call heard read out are ones its instructions may use.
+    memory.sessionIds = included.map((session) => session.id);
+    memory.nicknames = included.map((session) => speakableName(this.#options.redact(session.nickname)));
+    return text;
   }
 
   /** The reply to the owner's `status` text. */
@@ -200,7 +211,7 @@ export class InboundLine {
     const sessions = this.#sessions(now);
     this.#store.appendAudit("sms.status", { sessions: sessions.length }, now);
     const head = `Hotline: ${count(sessions.length, ["live session", "live sessions"])}.`;
-    const text = this.#status(sessions, now, false, head);
+    const { text } = this.#status(sessions, now, false, head);
     return text === INBOUND_TEXTS.noSessions ? `Hotline: ${text}` : text;
   }
 
@@ -232,7 +243,9 @@ export class InboundLine {
     const session = sessionId === undefined ? undefined : this.#store.getSession(sessionId);
     if (call === undefined || session === undefined || session.state === "ended") return "unknown-session";
     if (voice.instruction.trim() === "" || voice.ownerWords.trim() === "") return "invalid";
-    const held = [...this.#calls.values()].flatMap((memory) => memory.held);
+    // Calls whose post-call event never came stop counting against the caps.
+    this.#forget(now);
+    const held = [...this.#calls.values()].flatMap((memory) => memory.held.filter((h) => !h.done));
     const queued = this.#store.listInstructions({ status: "queued" });
     const forSession = (list: readonly { sessionId: string }[]) =>
       list.filter((i) => i.sessionId === session.id).length;
@@ -244,6 +257,8 @@ export class InboundLine {
       return "too-many";
     }
     call.held.push({
+      // Stable from here on, so a retried post-call event stores it once.
+      id: this.#options.newId?.() ?? randomUUID(),
       instruction: voice.instruction,
       ownerWords: voice.ownerWords,
       sessionNumber: voice.sessionNumber,
@@ -256,15 +271,20 @@ export class InboundLine {
 
   /** This call's memory, created if new; forgets expired calls, and the oldest past `MAX_CALLS`. */
   #memory(conversationId: string, now: Date): CallMemory {
-    for (const [id, memory] of this.#calls) {
-      if (memory.expires <= now.getTime() || this.#calls.size > MAX_CALLS) this.#calls.delete(id);
-    }
+    this.#forget(now);
     let memory = this.#calls.get(conversationId);
     if (memory === undefined) {
       memory = { sessionIds: [], nicknames: [], held: [], expires: now.getTime() + CALL_MEMORY_MS };
       this.#calls.set(conversationId, memory);
     }
     return memory;
+  }
+
+  /** Forgets calls past `CALL_MEMORY_MS` (their instructions are never queued), and the oldest past `MAX_CALLS`. */
+  #forget(now: Date): void {
+    for (const [id, memory] of this.#calls) {
+      if (memory.expires <= now.getTime() || this.#calls.size > MAX_CALLS) this.#calls.delete(id);
+    }
   }
 
   /**
@@ -286,14 +306,17 @@ export class InboundLine {
       return;
     }
     let notQueued = 0;
-    // Crossed off one at a time, so a retry after a failure never queues one twice.
-    // Each is confirmed on its own: nothing else the model sent on the call
-    // can excuse a turn of the transcript (such as a take-back).
-    for (let held = memory.held[0]; held !== undefined; held = memory.held[0]) {
-      const check =
-        event.type === "transcription"
-          ? confirmInstruction(event.transcript, held)
-          : ({ confirmed: false, reason: "the call never connected" } as const);
+    // All of the call's instructions are judged together against the same
+    // transcript (only one confirmed on its own can excuse a turn), every time,
+    // so a retry after a failure reaches the same verdicts. Each is crossed off
+    // once handled, and its stable id stops a second copy being stored.
+    const checks =
+      event.type === "transcription"
+        ? confirmInstructions(event.transcript, memory.held)
+        : memory.held.map(() => ({ confirmed: false as const, reason: "the call never connected" }));
+    for (const [index, held] of memory.held.entries()) {
+      if (held.done) continue;
+      const check = checks[index] ?? { confirmed: false as const, reason: "not checked" };
       const session = this.#store.getSession(held.sessionId);
       if (!check.confirmed || session === undefined || session.state === "ended") {
         const reason = check.confirmed ? "the session ended" : check.reason;
@@ -301,10 +324,10 @@ export class InboundLine {
           sessionId: held.sessionId,
         });
         notQueued += 1;
-      } else if (!this.#queue(held, check.excerpt, event.conversationId, receivedAt)) {
+      } else if (!this.#queue(held, check.text, check.excerpt, event.conversationId, receivedAt)) {
         notQueued += 1;
       }
-      memory.held.shift();
+      held.done = true;
     }
     this.#calls.delete(event.conversationId);
     if (notQueued > 0)
@@ -313,6 +336,8 @@ export class InboundLine {
 
   #queue(
     held: CallMemory["held"][number],
+    /** The owner's own words for the instruction, from the transcript: never the model's text. */
+    ownerWords: string,
     excerpt: string,
     conversationId: string,
     receivedAt: Date,
@@ -322,7 +347,8 @@ export class InboundLine {
       const redacted = redact(text).trim();
       return redacted.length <= max ? redacted : `${redacted.slice(0, max - 1)}…`;
     };
-    const text = cap(held.instruction, MAX_INSTRUCTION_LENGTH);
+    // Redacted first, so a secret is caught before its symbols are dropped.
+    const text = plainInstruction(cap(ownerWords, MAX_INSTRUCTION_LENGTH));
     const ownerExcerpt = cap(excerpt, 2000);
     if (text === "" || ownerExcerpt === "") {
       this.#store.appendAudit(
@@ -335,8 +361,8 @@ export class InboundLine {
       );
       return false;
     }
-    this.#store.addInstruction({
-      id: this.#options.newId?.() ?? randomUUID(),
+    const stored = this.#store.addInstruction({
+      id: held.id,
       sessionId: held.sessionId,
       text,
       ownerExcerpt,
@@ -345,7 +371,8 @@ export class InboundLine {
       receivedAt: held.receivedAt.toISOString(),
       status: "queued",
     });
-    this.#store.appendAudit("instruction.queued", {}, receivedAt, { sessionId: held.sessionId });
+    // Already stored by an earlier attempt at this event: the rest was done or is idempotent.
+    if (stored) this.#store.appendAudit("instruction.queued", {}, receivedAt, { sessionId: held.sessionId });
     // A Stop hook already waiting on the owner picks the instruction up at once:
     // its open stop gives way (the hook then takes the queued instructions).
     for (const ask of this.#store.listAsks(["pending", "in-flight"])) {

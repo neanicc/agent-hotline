@@ -5,7 +5,9 @@ import { ownerSaid, speechTokens, type TranscriptTurn } from "@hotline/providers
 import { describe, expect, it } from "vitest";
 import {
   confirmInstruction,
+  confirmInstructions,
   type HeldInstruction,
+  plainInstruction,
   sessionsNamed,
   soundsDoubtful,
   takesBack,
@@ -41,6 +43,7 @@ describe("confirmInstruction", () => {
   it("confirms the owner's own utterance for the session they named, read back and confirmed", () => {
     expect(confirmInstruction(call("Session one, run the tests.", READ_BACK, "Yes."), held())).toEqual({
       confirmed: true,
+      text: "run the tests",
       excerpt: "Session one, run the tests.",
     });
   });
@@ -132,27 +135,115 @@ describe("confirmInstruction", () => {
     }
   });
 
-  it("is taken back by a retraction in the owner's next reply, and nothing excuses one", () => {
+  it("is taken back by a retraction, doubt or negation anywhere later in the call", () => {
+    const retracted = { confirmed: false, reason: "the owner took the instruction back" };
     for (const later of [
       "Actually no, cancel that.",
       "Never mind.",
       "Scratch that.",
       "Hold on, don't send it.",
+      "No don't.",
+      "Forget about it.",
+      "Stop.",
+      "Hold off on that.",
+      "Wait.",
+      // Over-blocks on purpose: the owner can say it again or text it.
+      "No, that's all.",
     ]) {
       expect(
         confirmInstruction(call("Session one, run the tests.", READ_BACK, "Yes.", owner(later)), held()),
-      ).toEqual({
-        confirmed: false,
-        reason: "the owner took the instruction back",
-      });
+        later,
+      ).toEqual(retracted);
     }
-    // Later talk without a retraction is fine.
+    // A retraction much later in the call counts too.
+    const late = call(
+      "Session one, run the tests.",
+      READ_BACK,
+      "Yes.",
+      owner("How is session two doing?"),
+      agent("It is working."),
+      owner("Okay."),
+      agent("Anything else?"),
+      owner("Actually, about that first one, don't send it."),
+    );
+    expect(confirmInstruction(late, held())).toEqual(retracted);
+    // Later talk with nothing doubtful is fine.
     expect(
       confirmInstruction(
-        call("Session one, run the tests.", READ_BACK, "Yes.", owner("No, that's all.")),
+        call("Session one, run the tests.", READ_BACK, "Yes.", owner("Thanks, bye.")),
         held(),
       ).confirmed,
     ).toBe(true);
+  });
+
+  it("excuses only the utterance of another instruction confirmed on its own, and never a retraction", () => {
+    const first = held({ instruction: "don't push yet", ownerWords: "Session one, don't push yet" });
+    const second = held({
+      instruction: "do not merge anything",
+      ownerWords: "And session two, do not merge anything",
+      sessionNumber: 2,
+    });
+    const both = [
+      ...opening,
+      owner("Session one, don't push yet."),
+      agent("For session 1, Claude in demo-app: don't push yet. Send it?"),
+      owner("Yes."),
+      agent("Sent. Anything else?"),
+      owner("And session two, do not merge anything."),
+      agent("For session 2, Codex in api: do not merge anything. Send it?"),
+      owner("Yep."),
+      agent("Sent."),
+    ];
+    expect(confirmInstructions(both, [first, second]).map((r) => r.confirmed)).toEqual([true, true]);
+    // Alone, the second instruction's "not" reads as doubt about the first.
+    expect(confirmInstructions(both, [first]).map((r) => r.confirmed)).toEqual([false]);
+    // Without its read-back the second is not confirmed, so it excuses nothing.
+    const unread = both.filter((turn) => !turn.message.startsWith("For session 2"));
+    expect(confirmInstructions(unread, [first, second]).map((r) => r.confirmed)).toEqual([false, false]);
+    // A "never mind" the model sends as another instruction is never excused.
+    const laundered = [
+      ...opening,
+      owner("Session one, run the tests."),
+      agent(READ_BACK),
+      owner("Yes."),
+      agent("Sent."),
+      owner("Never mind."),
+      agent("For session 2: never mind. Send it?"),
+      owner("Yes."),
+    ];
+    const launder = held({ instruction: "never mind", ownerWords: "never mind", sessionNumber: 2 });
+    expect(confirmInstructions(laundered, [held(), launder]).map((r) => r.confirmed)).toEqual([false, false]);
+  });
+
+  it("queues the owner's own words, never the model's text", () => {
+    const transcript = call("Session one, run the tests.", READ_BACK, "Yes.");
+    for (const model of [
+      "run the tests;",
+      "run the `tests`",
+      "run\nthe tests",
+      "run the​ tests",
+      "RUN THE TESTS!!",
+    ]) {
+      const result = confirmInstruction(transcript, held({ instruction: model }));
+      expect(result, JSON.stringify(model)).toEqual({
+        confirmed: true,
+        text: "run the tests",
+        excerpt: "Session one, run the tests.",
+      });
+    }
+    // Extra words the owner never said, such as a shell command, fail.
+    expect(confirmInstruction(transcript, held({ instruction: "run the tests; rm -rf ~" })).confirmed).toBe(
+      false,
+    );
+    // The delivered text has exactly the validated words, and no invisible characters.
+    const odd = call("Session one, run the​ tests‮.", READ_BACK, "Yes.");
+    const result = confirmInstruction(odd, held());
+    expect(result.confirmed && speechTokens(result.text)).toEqual(["run", "the", "tests"]);
+    expect(result.confirmed && /[​‮]/.test(result.text)).toBe(false);
+    // What is stored goes through plainInstruction after redaction: plain characters only.
+    expect(plainInstruction("run the `tests` && echo $HOME | [REDACTED]")).toBe(
+      "run the tests echo HOME [REDACTED]",
+    );
   });
 
   it("never takes words from agent or caller turns", () => {

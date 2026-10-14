@@ -27,16 +27,31 @@
 //    instruction's words ("For session 2, Codex in api: rebase on main. Send
 //    it?"), and the owner's reply to it is a clear yes: a yes word, nothing
 //    doubtful, no question, no take-back.
-// 4. No take-back: the owner's next stretch after that (their reply to the
-//    agent's following turn) holds no retraction ("never mind", "cancel that",
-//    "scratch that", "forget it", "don't send", "actually no", "wait").
-//    Nothing the model sent can mask one.
+// 4. No take-back for the rest of the call: after the owner's yes, any owner
+//    turn with a retraction ("never mind", "cancel that", "forget it"), a doubt
+//    marker or a bare negation ("no", "don't", "stop", "hold off", "wait";
+//    `soundsDoubtful` without counting questions) means not confirmed. The one
+//    exception is a turn that is itself the utterance of another instruction
+//    this function confirmed on its own, and never one with a retraction in it.
+//    This over-blocks on purpose ("no, that's all" drops it too): the owner can
+//    say it again or text it.
 //
-// `owner_words` must also be the owner's words in the utterance. Every
-// comparison uses one tokeniser (`speechTokens`, shared with `ownerSaid` and
-// voice-confirm.ts). Everything fails closed. Pure: no I/O, no clock.
+// What is queued is never the model's text: it is the owner's own words for
+// the instruction, cut from the transcript (the matched owner turns minus the
+// session reference and filler), with anything but letters, digits, spaces
+// and plain punctuation removed, and only when its words are exactly the ones
+// validated. `owner_words` must also be the owner's words in the utterance.
+// Every comparison uses one tokeniser (`speechTokens`, shared with `ownerSaid`
+// and voice-confirm.ts). Everything fails closed. Pure: no I/O, no clock.
 import { ownerSaid, speechTokens, type TranscriptTurn } from "@hotline/providers";
-import { soundsDoubtful, type VoiceConfirmation } from "./voice-confirm.js";
+import { soundsDoubtful } from "./voice-confirm.js";
+
+export type InstructionConfirmation =
+  /**
+   * `text`: the owner's own words for the instruction, to queue. `excerpt`: the
+   * owner's whole utterance, verbatim, to store with it.
+   */
+  { confirmed: true; text: string; excerpt: string } | { confirmed: false; reason: string };
 
 const MAX_EXCERPT = 2000;
 const NUMBER_WORDS = "one two three four five six seven eight nine ten".split(" ");
@@ -61,6 +76,11 @@ const TAKE_BACKS = [
   "scratch that",
   "forget it",
   "forget that",
+  "forget about it",
+  "hold off",
+  "no don't",
+  "don't do it",
+  "don't do that",
   "don't send",
   "do not send",
   "actually no",
@@ -172,21 +192,67 @@ function occurrences(haystack: readonly string[], needle: readonly string[]): nu
   return starts;
 }
 
-/** Whether the post-call transcript backs a held instruction; see the top of this file. */
-export function confirmInstruction(
-  transcript: readonly TranscriptTurn[],
-  held: HeldInstruction,
-): VoiceConfirmation {
+/** Plain punctuation kept in a queued instruction; everything else between words becomes a space. */
+const KEPT = /[^\p{L}\p{N}\p{M}'’.,!?:\-[\] ]/gu;
+
+/**
+ * An instruction as it is queued, after redaction: letters, digits, spaces and
+ * plain punctuation only (the redactor's `[REDACTED]` included); shell
+ * characters, symbols and anything invisible become spaces.
+ */
+export function plainInstruction(text: string): string {
+  return text.replace(KEPT, " ").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * The owner's own words for tokens `start` to `start + length` of `raw`, or
+ * undefined when they cannot be cut out exactly (fail closed): the result's
+ * words are exactly those tokens.
+ */
+function ownerSpan(raw: string, start: number, length: number): string | undefined {
+  // Each raw word (letters, digits, marks) and the tokens it normalises to.
+  const spans: { from: number; to: number; tokens: string[] }[] = [];
+  for (const found of raw.matchAll(/[\p{L}\p{N}\p{M}]+/gu)) {
+    spans.push({ from: found.index, to: found.index + found[0].length, tokens: speechTokens(found[0]) });
+  }
+  const owner = spans.flatMap((span, index) => span.tokens.map(() => index));
+  const all = spans.flatMap((span) => span.tokens);
+  const expected = speechTokens(raw);
+  if (all.length !== expected.length || all.some((token, i) => token !== expected[i])) return undefined;
+  const first = owner[start];
+  const last = owner[start + length - 1];
+  if (first === undefined || last === undefined) return undefined;
+  // A raw word that also holds tokens outside the span cannot be cut.
+  if (owner[start - 1] === first || owner[start + length] === last) return undefined;
+  // Only invisible and control characters go here; the caller redacts, then
+  // keeps plain characters only (`plainInstruction`), so a secret is still
+  // recognisable when the redactor sees it.
+  const text = raw
+    .slice(spans[first]?.from ?? 0, spans[last]?.to ?? 0)
+    .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const wanted = all.slice(start, start + length);
+  const got = speechTokens(text);
+  return got.length === wanted.length && got.every((token, i) => token === wanted[i]) ? text : undefined;
+}
+
+/** Rules 1 to 3 for one instruction: where its utterance is, and the owner's words for it. */
+type Match =
+  | { ok: true; utterance: number; reply: number; text: string; excerpt: string }
+  | { ok: false; reason: string };
+
+function match(parts: readonly Block[], held: HeldInstruction): Match {
   const wanted = speechTokens(held.instruction);
-  if (wanted.length === 0) return { confirmed: false, reason: "the instruction has no words" };
+  if (wanted.length === 0) return { ok: false, reason: "the instruction has no words" };
   const words = referenceWords(held.listed);
   const allowed = { has: (word: string) => words.has(word) || /^\d{1,2}$/.test(word) };
-  const parts = blocks(transcript);
   let reason = "the instruction is not the owner's own words";
   for (const [i, block] of parts.entries()) {
     const turns = ownerBlock(block);
     if (turns === undefined) continue;
-    const said = speechTokens(textOf(turns));
+    const raw = textOf(turns);
+    const said = speechTokens(raw);
     for (const start of occurrences(said, wanted)) {
       const before = said.slice(0, start);
       const after = said.slice(start + wanted.length);
@@ -234,17 +300,66 @@ export function confirmInstruction(
         reason = "the owner did not confirm the read-back";
         continue;
       }
-      // 4. No retraction in the owner's next reply. Nothing is excused from this check.
-      const next = parts[i + 4];
-      if (
-        next?.kind === "person" &&
-        next.turns.some((turn) => turn.role === "owner" && takesBack(turn.message))
-      ) {
-        reason = "the owner took the instruction back";
+      // What is queued: the owner's own words for exactly the validated tokens.
+      const text = ownerSpan(raw, start, wanted.length);
+      if (text === undefined) {
+        reason = "the owner's words cannot be cut out exactly";
         continue;
       }
-      return { confirmed: true, excerpt: textOf(turns).slice(0, MAX_EXCERPT) };
+      return { ok: true, utterance: i, reply: i + 2, text, excerpt: raw.slice(0, MAX_EXCERPT) };
     }
   }
-  return { confirmed: false, reason };
+  return { ok: false, reason };
+}
+
+/**
+ * Confirms every instruction held for one call against its post-call
+ * transcript; see the top of this file. Results are in the order of `held`.
+ */
+export function confirmInstructions(
+  transcript: readonly TranscriptTurn[],
+  held: readonly HeldInstruction[],
+): InstructionConfirmation[] {
+  const parts = blocks(transcript);
+  const matches = held.map((instruction) => match(parts, instruction));
+  const confirmed = matches.map((m) => m.ok);
+  // 4. Retractions for the rest of the call. Only the utterance of another
+  // instruction confirmed on its own is excused, and never a retraction. A
+  // drop can withdraw an excuse, so repeat until nothing changes.
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const [index, m] of matches.entries()) {
+      if (!m.ok || !confirmed[index]) continue;
+      const excused = new Set(
+        matches.flatMap((other, j) => (other.ok && j !== index && confirmed[j] ? [other.utterance] : [])),
+      );
+      const retracted = parts.some(
+        (block, at) =>
+          at > m.reply &&
+          block.kind === "person" &&
+          block.turns.some(
+            (turn) =>
+              turn.role === "owner" &&
+              (takesBack(turn.message) || (soundsDoubtful(turn.message, false) && !excused.has(at))),
+          ),
+      );
+      if (retracted) {
+        confirmed[index] = false;
+        changed = true;
+      }
+    }
+  }
+  return matches.map((m, index) => {
+    if (!m.ok) return { confirmed: false, reason: m.reason };
+    if (!confirmed[index]) return { confirmed: false, reason: "the owner took the instruction back" };
+    return { confirmed: true, text: m.text, excerpt: m.excerpt };
+  });
+}
+
+/** `confirmInstructions` for a call that gave one instruction. */
+export function confirmInstruction(
+  transcript: readonly TranscriptTurn[],
+  held: HeldInstruction,
+): InstructionConfirmation {
+  return confirmInstructions(transcript, [held])[0] ?? { confirmed: false, reason: "nothing held" };
 }

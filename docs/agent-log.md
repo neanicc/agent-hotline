@@ -1868,6 +1868,27 @@ Template:
   except that a combining mark with no precomposed form no longer splits a
   word. (7) The status's agent text stays fenced and capped (name 60, latest
   ask 120), and agent turns never count as the owner's words.
+- Review fixes, second round (security review of 570a218, bot staff review
+  and Greptile on 570a218): (1) the take-back check now covers the rest of
+  the call after the owner's yes, and counts doubt markers and bare
+  negations ("no", "don't", "stop", "hold off", "wait") as well as
+  retractions. The only exception is the utterance of another instruction
+  that `confirmInstructions` confirmed on its own (judged together, repeated
+  until stable), and never a turn with a retraction. It over-blocks ("no,
+  that's all" drops the instruction) by decision: the owner can say it again
+  or text it. (2) The queued text is the owner's own words for exactly the
+  validated tokens, cut from the transcript, never the model's `instruction`;
+  redacted first, then `plainInstruction` keeps only letters, digits, spaces
+  and plain punctuation. (3) `takeInstructions` drops instructions past their
+  6 hours in the same transaction instead of delivering them. (4) An ended
+  session's inbox and take routes answer 404, and `check_inbox` registers
+  again at once. (5) `get_status` remembers only the sessions it read out.
+  (6) Held instructions get a fixed id and `addInstruction` is idempotent, so
+  a retried post-call event stores each once. (7) Open-ask counts use every
+  open ask. (8) Held instructions are forgotten after one hour, not two, and
+  forgotten calls stop counting against the caps. The read-back reply uses a
+  fixed yes lexicon and fails closed; switching to HL-09c's reply judge when
+  it lands is a follow-up.
 - Decision: sessions are named by number. `get_status` numbers live sessions
   by registration and remembers, per call, which number is which session;
   `send_instruction` takes only a number that call's status read out
@@ -1906,7 +1927,10 @@ Template:
   review fixes: build passes and test passed 57 files, 1467 tests, three times
   in a row; mutation checks on the new rules, each reverted: extra words
   allowed (4 tests fail), several sessions named accepted (1), read-back
-  skipped (2), take-back skipped (3). New end-to-end tests
+  skipped (2), take-back skipped (3). After the second round: build passes
+  and test passed 57 files, 1475 tests, three times in a row; mutations,
+  each reverted: take-back limited to the next reply (1 test fails), the
+  model's text stored instead of the owner's words (1). New end-to-end tests
   (`apps/cli/test/inbound-line.test.ts`) run the real daemon routes with the
   fake voice and SMS providers, then the real hook adapter and MCP server:
   PIN, status, instruction, delivery at the Stop hook (no call placed) and at

@@ -402,8 +402,16 @@ export function createHotlineMcpServer(options: HotlineMcpOptions): HotlineMcpSe
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async () => {
+      const read = async () => json(summarizeInbox(await daemon.inbox(await ensureSession())));
       try {
-        return json(summarizeInbox(await daemon.inbox(await ensureSession())));
+        try {
+          return await read();
+        } catch (error) {
+          // The daemon ended the session (say, idle for hours): register again once.
+          if (!(error instanceof DaemonError && error.kind === "not-found")) throw error;
+          forgetSession();
+          return await read();
+        }
       } catch (error) {
         if (error instanceof DaemonError && error.kind === "not-found") forgetSession();
         const reason = error instanceof DaemonError ? error.message : "the daemon could not be reached";

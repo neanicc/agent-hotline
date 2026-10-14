@@ -28,7 +28,13 @@ import { sessionNickname } from "@hotline/providers";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import type { Redactor } from "./redact.js";
-import { endSession, expireStaleSessions, liveSessions, MAX_LIVE_SESSIONS } from "./sessions.js";
+import {
+  endSession,
+  expireStaleSessions,
+  INSTRUCTION_TTL_MS,
+  liveSessions,
+  MAX_LIVE_SESSIONS,
+} from "./sessions.js";
 import { type HotlineStore, type Instruction, InstructionDelivery } from "./store.js";
 
 /** Longest an outcome request may wait before answering "still waiting". */
@@ -272,7 +278,14 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
   /** Hands over a session's queued instructions, oldest first, each with an audit entry. */
   const takeInstructions = (sessionId: string, via: InstructionDelivery): InboxInstruction[] => {
     const now = clock();
-    const taken = store.takeInstructions(sessionId, via, now);
+    // One past its lifetime is dropped here, never delivered, whoever reads first.
+    const { taken, expired } = store.takeInstructions(
+      sessionId,
+      via,
+      now,
+      new Date(now.getTime() - INSTRUCTION_TTL_MS),
+    );
+    for (const _ of expired) store.appendAudit("instruction.expired", {}, now, { sessionId });
     for (const _ of taken) store.appendAudit("instruction.delivered", { via }, now, { sessionId });
     return taken.map(inboxInstruction);
   };
@@ -480,7 +493,10 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
     const params = SessionParams.safeParse(request.params);
     if (!params.success) return invalid(reply, params.error);
     const session = store.getSession(params.data.sessionId);
-    if (session === undefined) return reply.code(404).send({ error: "unknown session" });
+    // An ended session (say, expired while idle) is unknown: its client registers again.
+    if (session === undefined || session.state === "ended") {
+      return reply.code(404).send({ error: "unknown session" });
+    }
     await settleDue(store.listSessionAsks(session.id, INBOX_ASK_LIMIT));
     const asks = store.listSessionAsks(session.id, INBOX_ASK_LIMIT).map(outcomeOf);
     const seen = { ...(store.getSession(session.id) ?? session), lastSeenAt: clock().toISOString() };
@@ -499,8 +515,10 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
     const body = TakeInstructionsBody.safeParse(request.body);
     if (!body.success) return invalid(reply, body.error);
     const session = store.getSession(params.data.sessionId);
-    if (session === undefined) return reply.code(404).send({ error: "unknown session" });
-    if (session.state !== "ended") store.putSession({ ...session, lastSeenAt: clock().toISOString() });
+    if (session === undefined || session.state === "ended") {
+      return reply.code(404).send({ error: "unknown session" });
+    }
+    store.putSession({ ...session, lastSeenAt: clock().toISOString() });
     return { instructions: takeInstructions(session.id, body.data.via) };
   });
 }

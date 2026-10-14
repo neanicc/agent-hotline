@@ -7,7 +7,14 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Answer, Ask, AskOutcome, Session } from "@hotline/core";
-import { createRedactor, type Daemon, generateApiToken, openStore, startDaemon } from "@hotline/daemon";
+import {
+  createRedactor,
+  type Daemon,
+  endSession,
+  generateApiToken,
+  openStore,
+  startDaemon,
+} from "@hotline/daemon";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult, Progress } from "@modelcontextprotocol/sdk/types.js";
@@ -442,6 +449,19 @@ describe("hotline MCP server", () => {
     const result = resultJson(await mcp.callTool({ name: "ask_human", arguments: { question: "Go?" } }));
     expect(result).toMatchObject({ outcome: "answered", answer: "ship it" });
     expect(result).not.toHaveProperty("instructions");
+  });
+
+  it("registers again when the daemon ended its idle session, so check_inbox keeps working", async () => {
+    const running = await startTestDaemon();
+    const { mcp } = await connect(clientFor(running.apiPort));
+    const first = await waitFor(() => running.store.listSessions()[0], "the session");
+    // What the daemon does to a session nobody heard from for six hours.
+    endSession(running.store, first.id, now, "idle");
+    const inbox = await mcp.callTool({ name: "check_inbox", arguments: {} });
+    expect(inbox.isError).toBeUndefined();
+    const live = running.store.listSessions().filter((s) => s.state !== "ended");
+    expect(live).toHaveLength(1);
+    expect(live[0]?.id).not.toBe(first.id);
   });
 
   it("reports an unreachable inbox as an error", async () => {

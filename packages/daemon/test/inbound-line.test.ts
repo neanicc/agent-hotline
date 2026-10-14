@@ -173,6 +173,34 @@ describe("status", () => {
     expect(text).not.toContain("agent_text");
   });
 
+  it("lets instructions name only the sessions the status actually read out", () => {
+    for (let i = 1; i <= 20; i++) {
+      session(`s-${String(i).padStart(2, "0")}`, `Claude in project-${i}`);
+      ask(`s-${String(i).padStart(2, "0")}`, {
+        kind: "question",
+        text: "Which option should I take? ".repeat(3),
+      });
+    }
+    const status = line.getStatus(call());
+    const read = Number(/(\d+) more sessions are not read out/.exec(status)?.[1]);
+    const heard = 20 - read;
+    expect(heard).toBeGreaterThan(0);
+    expect(heard).toBeLessThan(20);
+    expect(instruct(heard)).toBe("queued");
+    expect(instruct(heard + 1)).toBe("unknown-session");
+  });
+
+  it("counts every open ask, however many newer ones there are", () => {
+    session("s-1", "Claude in demo-app");
+    ask("s-1", { kind: "question", text: "Old question?" });
+    for (let i = 0; i < 25; i++) {
+      now = new Date(now.getTime() + 1000);
+      const note = ask("s-1", { kind: "notify", text: `FYI ${i}` });
+      store.setAskStatus(note.id, "cancelled");
+    }
+    expect(line.getStatus(call())).toContain("open: 1 question.");
+  });
+
   it("ends stale sessions before reading the status", () => {
     session("s-1", "Claude in demo-app");
     now = new Date(START.getTime() + 6 * 60 * 60 * 1000);
@@ -245,6 +273,18 @@ describe("send_instruction", () => {
     expect(store.listAudit().find((e) => e.event === "voice.instruction-unconfirmed")?.detail).toEqual({
       reason: "the session ended",
     });
+  });
+
+  it("stores the owner's own words, never the model's text", async () => {
+    session("s-1", "Claude in demo-app");
+    line.getStatus(call());
+    // Same words to the tokeniser, but lookalike letters, symbols and a newline.
+    expect(instruct(1, "Run the `ｔｅｓｔｓ`;\nNOW")).toBe("queued");
+    expect(instruct(1, "run​ the tests $(id)")).toBe("queued");
+    await line.postCall(transcript("conv-1", "session 1, run the tests now"), now, false);
+    // The first has the owner's words with the model's symbols gone; the second
+    // has words the owner never said ("id"), so it is not queued at all.
+    expect(store.listInstructions().map((i) => i.text)).toEqual(["run the tests now"]);
   });
 
   it("redacts a secret the owner said before it is stored", async () => {

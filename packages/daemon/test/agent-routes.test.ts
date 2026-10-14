@@ -624,11 +624,45 @@ describe("owner instructions (HL-10)", () => {
       status: "dropped",
       dropReason: "session-ended",
     });
+    // An ended session is unknown to its readers, so their client registers again.
     expect(
-      (await api(daemon, "POST", `/v1/sessions/${session.id}/instructions/take`, { via: "stop" })).json,
-    ).toEqual({
-      instructions: [],
-    });
+      (await api(daemon, "POST", `/v1/sessions/${session.id}/instructions/take`, { via: "stop" })).status,
+    ).toBe(404);
+    expect((await api(daemon, "GET", `/v1/sessions/${session.id}/inbox`)).status).toBe(404);
+  });
+
+  it("never hand over an instruction past its six hours, even to a session that keeps reading", async () => {
+    const daemon = await start();
+    const session = await register(daemon);
+    instruct(daemon.store, session.id, "run the tests");
+    now = new Date(START.getTime() + 6 * 60 * 60 * 1000 + 1000);
+    instruct(daemon.store, session.id, "then open a PR");
+    const taken = await api(daemon, "POST", `/v1/sessions/${session.id}/instructions/take`, { via: "stop" });
+    expect((taken.json as { instructions: { text: string }[] }).instructions.map((i) => i.text)).toEqual([
+      "then open a PR",
+    ]);
+    expect(daemon.store.listInstructions().map((i) => [i.text, i.status, i.dropReason])).toEqual([
+      ["run the tests", "dropped", "expired"],
+      ["then open a PR", "delivered", undefined],
+    ]);
+  });
+
+  it("store an instruction once by id, so a retried webhook cannot queue it twice", async () => {
+    const daemon = await start();
+    const session = await register(daemon);
+    const record = {
+      id: "instruction-fixed",
+      sessionId: session.id,
+      text: "run the tests",
+      ownerExcerpt: "session one, run the tests",
+      sourceId: "conversation-1",
+      channel: "voice" as const,
+      receivedAt: now.toISOString(),
+      status: "queued" as const,
+    };
+    expect(daemon.store.addInstruction(record)).toBe(true);
+    expect(daemon.store.addInstruction({ ...record, text: "something else" })).toBe(false);
+    expect(daemon.store.listInstructions().map((i) => i.text)).toEqual(["run the tests"]);
   });
 });
 
