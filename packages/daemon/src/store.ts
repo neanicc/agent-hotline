@@ -8,7 +8,17 @@
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { Answer, Ask, type AskStatus, answerProblem, CallRecord, Id, Session } from "@hotline/core";
+import {
+  type AgentKind,
+  Answer,
+  Ask,
+  type AskKind,
+  type AskStatus,
+  answerProblem,
+  CallRecord,
+  Id,
+  Session,
+} from "@hotline/core";
 import { privatePathProblem } from "./private-file.js";
 import { createRedactor, type Redactor } from "./redact.js";
 
@@ -233,6 +243,17 @@ export class HotlineStore {
     return row === undefined ? undefined : this.decode(Session, "session", row);
   }
 
+  /** The live (not `ended`) session of `agent` with the agent's own session id, if any. */
+  findLiveSession(agent: AgentKind, agentSessionId: string): Session | undefined {
+    return this.db
+      .prepare(
+        "SELECT id, record FROM sessions WHERE agent_session_id = ? AND state != 'ended' ORDER BY last_seen_at DESC, id",
+      )
+      .all(agentSessionId)
+      .map((row) => this.decode(Session, "session", row))
+      .find((session) => session.agent === agent);
+  }
+
   listSessions(): Session[] {
     return this.db
       .prepare("SELECT id, record FROM sessions ORDER BY last_seen_at DESC, id")
@@ -265,6 +286,17 @@ export class HotlineStore {
   getAsk(id: string): Ask | undefined {
     const row = this.db.prepare("SELECT id, record FROM asks WHERE id = ?").get(id);
     return row === undefined ? undefined : this.decode(Ask, "ask", row);
+  }
+
+  /** How many of a session's asks of `kind` are still `pending` or `in-flight`. */
+  countOpenAsks(sessionId: string, kind: AskKind): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS open FROM asks WHERE session_id = ? AND status IN ('pending', 'in-flight')
+         AND json_extract(record, '$.kind') = ?`,
+      )
+      .get(sessionId, kind);
+    return Number(row?.open ?? 0);
   }
 
   /** The newest `limit` asks of one session, newest first. */

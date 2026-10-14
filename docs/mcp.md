@@ -27,6 +27,13 @@ decides anything itself.
   (another ask's answer, `allow`, `done`, an option out of range) becomes
   `no-answer` with reason `unclear`. The daemon builds `answered` only from an
   answer `recordAnswer` stored after `answerProblem` passed.
+- **Bounded asks.** A session may have at most 3 open questions and 10 open
+  notifications. Past that the daemon answers `429` and stores nothing, and
+  `ask_human` returns `no-answer`.
+- **`urgent` is only a request.** The agent sets it, so a looping or
+  prompt-injected agent can set it too. Call policy (HL-09) must honor it only
+  when the owner turned on `quietHours.allowUrgentCalls`, and always within the
+  rate limits. It is never honored by default.
 - **Progress while waiting.** If the client sent a `progressToken`, `ask_human`
   sends `notifications/progress` about every 60 seconds, so an idle timeout does
   not fire.

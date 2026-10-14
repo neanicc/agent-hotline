@@ -37,6 +37,12 @@ export const MAX_ASK_TEXT = 1000;
 export const MAX_OPTION_TEXT = 200;
 /** On shutdown, agent API connections still open after this long are closed. */
 export const CLOSE_GRACE_MS = 2_000;
+/**
+ * Open (pending or in-flight) asks one session may have at once. Questions wait
+ * for the owner, so a few are plenty; notifications stay open until delivered or
+ * expired. Beyond this the daemon answers 429 and stores no ask.
+ */
+export const MAX_OPEN_ASKS = { question: 3, notify: 10 } as const;
 
 const ELLIPSIS = "…";
 
@@ -172,10 +178,7 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
   const refreshSessionState = (sessionId: string) => {
     const session = store.getSession(sessionId);
     if (session === undefined || session.state === "ended") return;
-    const waiting = store
-      .listSessionAsks(sessionId, INBOX_ASK_LIMIT)
-      .some((ask) => ask.kind === "question" && (ask.status === "pending" || ask.status === "in-flight"));
-    const state = waiting ? "waiting-on-human" : "working";
+    const state = store.countOpenAsks(sessionId, "question") > 0 ? "waiting-on-human" : "working";
     if (session.state !== state) store.putSession({ ...session, state });
   };
   // Every status change, whoever makes it (an answer, expiry, a cancel), updates the session.
@@ -214,12 +217,7 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
     if (!body.success) return invalid(reply, body.error);
     const { agent, cwd, agentSessionId } = body.data;
     const now = clock().toISOString();
-    const existing =
-      agentSessionId === undefined
-        ? undefined
-        : store
-            .listSessions()
-            .find((s) => s.agent === agent && s.agentSessionId === agentSessionId && s.state !== "ended");
+    const existing = agentSessionId === undefined ? undefined : store.findLiveSession(agent, agentSessionId);
     const session: Session = existing
       ? { ...existing, cwd, lastSeenAt: now }
       : {
@@ -249,6 +247,13 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
       return reply.code(404).send({ error: "unknown session" });
     }
     const { kind, urgent = false } = body.data;
+    // A looping or prompt-injected agent must not be able to pile up asks.
+    if (store.countOpenAsks(session.id, kind) >= MAX_OPEN_ASKS[kind]) {
+      store.appendAudit("ask.refused", { kind, reason: "too many open asks" }, clock(), {
+        sessionId: session.id,
+      });
+      return reply.code(429).send({ error: "too many open asks for this session" });
+    }
     // Redact before anything is stored, so no later step can forward the raw text.
     const text = cut(redactor.text(body.data.text), MAX_ASK_TEXT);
     const options =

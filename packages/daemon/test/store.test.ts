@@ -414,6 +414,29 @@ describe("ask change listeners", () => {
     expect(heard).toEqual(["a1", "a2"]);
   });
 
+  it("count a session's open asks of one kind", async () => {
+    const db = await open();
+    db.putSession(session);
+    db.addAsk(ask());
+    db.addAsk(ask({ id: "a2", status: "in-flight" }));
+    db.addAsk(ask({ id: "a3", status: "expired" }));
+    db.addAsk(ask({ id: "a4", kind: "notify", options: [] }));
+    expect(db.countOpenAsks("s1", "question")).toBe(2);
+    expect(db.countOpenAsks("s1", "notify")).toBe(1);
+    expect(db.countOpenAsks("s2", "question")).toBe(0);
+  });
+
+  it("find a live session by agent and agent session id", async () => {
+    const db = await open();
+    db.putSession(session);
+    db.putSession({ ...session, id: "s2", agent: "codex" });
+    db.putSession({ ...session, id: "s3", agentSessionId: "agent-session-3", state: "ended" });
+    expect(db.findLiveSession("claude-code", "agent-session-1")?.id).toBe("s1");
+    expect(db.findLiveSession("codex", "agent-session-1")?.id).toBe("s2");
+    expect(db.findLiveSession("claude-code", "agent-session-3")).toBeUndefined();
+    expect(db.findLiveSession("claude-code", "unknown")).toBeUndefined();
+  });
+
   it("list one session's newest asks first", async () => {
     const db = await open();
     db.putSession(session);

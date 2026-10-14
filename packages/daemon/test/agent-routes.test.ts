@@ -9,7 +9,9 @@ import {
   defaultNickname,
   generateApiToken,
   type HotlineStore,
+  INBOX_ASK_LIMIT,
   type InboxResponse,
+  MAX_OPEN_ASKS,
   type OutcomeResponse,
   openStore,
   type StartDaemonOptions,
@@ -339,6 +341,44 @@ describe("agent API routes", () => {
     await daemon.close();
     await pending;
     expect(Date.now() - startedAt).toBeLessThan(5_000);
+  });
+
+  it("refuse asks beyond the open-ask cap per session and kind, with 429", async () => {
+    const daemon = await start();
+    const session = await register(daemon);
+    const other = await register(daemon, { cwd: "/work/other" });
+    const questions: Ask[] = [];
+    for (let i = 0; i < MAX_OPEN_ASKS.question; i++) {
+      questions.push((await ask(daemon, session.id, { kind: "question", text: `Q${i}?` })).ask);
+    }
+    const refused = await ask(daemon, session.id, { kind: "question", text: "One more?" });
+    expect(refused.status).toBe(429);
+    expect(daemon.store.listAsks().map((a) => a.text)).not.toContain("One more?");
+    expect(daemon.store.listAudit({ sessionId: session.id }).map((e) => e.event)).toContain("ask.refused");
+    // Other kinds and other sessions have their own budget.
+    expect((await ask(daemon, session.id, { kind: "notify", text: "FYI" })).status).toBe(201);
+    expect((await ask(daemon, other.id, { kind: "question", text: "Q?" })).status).toBe(201);
+    // Once one closes, there is room again.
+    record(daemon.store, answerFor(questions[0]?.id ?? "", { decision: { type: "text", text: "yes" } }));
+    expect((await ask(daemon, session.id, { kind: "question", text: "Now?" })).status).toBe(201);
+
+    for (let i = 1; i < MAX_OPEN_ASKS.notify; i++) {
+      expect((await ask(daemon, session.id, { kind: "notify", text: `FYI ${i}` })).status).toBe(201);
+    }
+    expect((await ask(daemon, session.id, { kind: "notify", text: "Too many" })).status).toBe(429);
+  });
+
+  it("keep a session waiting while any question is open, however many asks came after it", async () => {
+    const daemon = await start();
+    const session = await register(daemon);
+    await ask(daemon, session.id, { kind: "question", text: "Old question?" });
+    for (let i = 0; i < INBOX_ASK_LIMIT + 5; i++) {
+      now = new Date(now.getTime() + 1000);
+      const { ask: note } = await ask(daemon, session.id, { kind: "notify", text: `FYI ${i}` });
+      daemon.store.setAskStatus(note.id, "cancelled");
+    }
+    expect(daemon.store.listSessionAsks(session.id, 100)).toHaveLength(INBOX_ASK_LIMIT + 6);
+    expect(daemon.store.getSession(session.id)?.state).toBe("waiting-on-human");
   });
 
   it("cap the wait at 30 seconds", async () => {

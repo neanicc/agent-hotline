@@ -257,7 +257,9 @@ export function createHotlineMcpServer(options: HotlineMcpOptions): HotlineMcpSe
         urgent: z
           .boolean()
           .optional()
-          .describe("Whether this may call during quiet hours (if the owner allows it)"),
+          .describe(
+            "Ask for a call even during quiet hours. Only a request: the owner's settings and rate limits decide",
+          ),
       },
       annotations: { readOnlyHint: false, openWorldHint: true },
     },

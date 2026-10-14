@@ -351,6 +351,20 @@ describe("hotline MCP server", () => {
     });
   });
 
+  it("returns no answer once the session has too many open questions", async () => {
+    const running = await startTestDaemon();
+    const { mcp } = await connect(clientFor(running.apiPort));
+    for (let i = 0; i < 3; i++) {
+      void mcp.callTool({ name: "ask_human", arguments: { question: `Question ${i}?` } }).catch(() => {});
+    }
+    await waitFor(() => running.store.listAsks(["pending"]).length === 3, "three open questions");
+    const result = resultJson(
+      await mcp.callTool({ name: "ask_human", arguments: { question: "One more?" } }),
+    );
+    expect(result).toMatchObject({ outcome: "no-answer", reason: "failed" });
+    expect(running.store.listAsks()).toHaveLength(3);
+  });
+
   it("reports a notification it could not deliver to the daemon as an error", async () => {
     const { mcp } = await connect(clientFor(await closedPort()));
     const result = await mcp.callTool({ name: "notify_human", arguments: { message: "Done." } });

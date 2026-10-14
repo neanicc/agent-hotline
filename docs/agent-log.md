@@ -533,6 +533,20 @@ Template:
   suite does not exist yet (HL-12). Real agent integration was not run: `claude`
   and `codex` are installed, but driving them would call their model APIs, and
   this run allows no network beyond 127.0.0.1. No live call.
+- Review fixes (staff review on #32, 2 P2 and 2 P3):
+  - Asks are capped per session: 3 open questions and 10 open notifications.
+    Beyond that the daemon answers `429`, stores no ask, and audits
+    `ask.refused`, so a looping or prompt-injected agent cannot pile up asks
+    for HL-09 to deliver. The limits are daemon constants, not config, to
+    avoid a core contract change. `ask_human` turns the refusal into
+    `no-answer`.
+  - `urgent` is documented as the agent's request only. HL-09 must honor it
+    only with `quietHours.allowUrgentCalls` and within the rate limits, never
+    by default.
+  - A session's state now counts all of its open questions (`countOpenAsks`),
+    not just the newest 20 asks.
+  - Session reuse looks up `agent_session_id` with `findLiveSession` instead of
+    scanning every session.
 - Open issues or follow-ups: HL-09 should record the specific no-answer reason
   (`no-pickup`, `unclear`, `dropped`) on the ask. Today only `expired` maps to
   `timeout` and `cancelled` to `cancelled`. HL-10 should add the instruction

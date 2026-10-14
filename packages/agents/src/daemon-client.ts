@@ -214,6 +214,9 @@ export class DaemonClient implements HotlineDaemon {
     if (response.status === 401) throw new DaemonError("unauthorized", "the daemon refused the API token");
     if (response.status === 404)
       throw new DaemonError("not-found", "the daemon does not know that session or ask");
+    if (response.status === 429) {
+      throw new DaemonError("rejected", "this session already has too many open asks; wait for them first");
+    }
     if (!response.ok) throw new DaemonError("rejected", `the daemon answered HTTP ${response.status}`);
     let json: unknown;
     try {
