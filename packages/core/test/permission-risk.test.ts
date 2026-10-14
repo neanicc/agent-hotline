@@ -23,7 +23,11 @@ describe("classifyPermission (plan question 6 default)", () => {
     "git log --oneline -5 main",
     "git log --format=%H -3",
     "git show HEAD:src/a.ts",
-    "grep -f./patterns.txt src",
+    "grep -f patterns.txt src",
+    "grep -rn --max-count=3 foo src",
+    "head -n5 README.md",
+    "diff -u a.txt b.txt",
+    "git log -p src",
     "grep 'it(\"*' src",
     "git branch -a",
     "cat README.md | head -20",
@@ -46,8 +50,88 @@ describe("classifyPermission (plan question 6 default)", () => {
     ["find . -name '*.log' -exec ls {} +", "runs a command Hotline does not recognise as read-only"],
     // `~` outside quotes is an expansion: refused even inside a revision.
     ["git log --oneline -5 HEAD~3", "runs a command Hotline does not recognise as read-only"],
+    // An attached value could start at any character after the dash; `/patterns.txt` is outside.
+    ["grep -f./patterns.txt src", "runs a command Hotline does not recognise as read-only"],
   ])("now treats `%s` as high risk: %s", (command, reason) => {
     expect(bash(command)).toEqual({ risk: "high", reasons: [reason] });
+  });
+
+  // Third review: every form of option value, against each allowlisted command.
+  it.each([
+    // grep
+    "grep -f/etc/x src",
+    "grep -rf/etc/x src",
+    "grep -rif/etc/x src",
+    "grep -fsecrets.txt src",
+    "grep -f.env src",
+    "grep -f.ENV src",
+    "grep --file /etc/x src",
+    "grep --file=/etc/x src",
+    "grep --file=../x src",
+    "grep -e x /etc/hosts",
+    // rg
+    "rg --ignore-file=/etc/x foo",
+    "rg --ignore-file /etc/x foo",
+    "rg -f/etc/x src",
+    "rg --ignore-file=.git/info/exclude foo",
+    // head and tail
+    "head -c1/etc/x",
+    "head -n5 /etc/x",
+    "head --lines=5 ../x",
+    "tail -f/etc/x",
+    "tail --follow=/etc/x",
+    "tail -n 3 ~/x",
+    // diff
+    "diff /etc/x a.txt",
+    "diff --from-file=/etc/x a.txt",
+    "diff -r../x a",
+    "diff -u a.txt .Env",
+    // find
+    "find . -newer /etc/x",
+    "find /etc -name x",
+    "find . -newer.env",
+    "find ../ -type f",
+    // git: other repositories, nested repositories, config and env
+    "git log --git-dir=/x",
+    "git diff --work-tree=../x",
+    "git status --git-dir=sub/.git",
+    "git log -- /etc/x",
+    "git show sub/.git/config",
+    "git log .GIT",
+    "git diff --no-index /etc/x a",
+    "git -C sub status",
+    "git -c core.fsmonitor=x status",
+    "git --exec-path=. status",
+    "GIT_DIR=/x git status",
+    "FOO=1 git status",
+    "git log --stat/x",
+    // case and normalisation on sensitive names
+    "cat .ENV",
+    "cat .Env.local",
+    "cat sub/.SSH/id_rsa",
+    "echo x > .GIT/config",
+    "echo x > .Gitattributes",
+    "echo x > Package.json",
+    "echo x > NODE_MODULES/.bin/vitest",
+  ])("fails closed on the option or path form `%s`", (command) => {
+    expect(bash(command).risk).toBe("high");
+  });
+
+  it.each([
+    ".GIT/config",
+    ".Git/hooks/pre-commit",
+    "sub/.git",
+    "vendor/lib/.GIT/HEAD",
+    ".Env",
+    ".ENV.local",
+    ".Gitattributes",
+    "PACKAGE.JSON",
+    "Node_Modules/x/index.js",
+    // NFC: a decomposed accent elsewhere in the path does not hide `.git`.
+    "résumé/.git/config",
+  ])("treats writing %j as high risk on a case-insensitive file system", (path) => {
+    const write = classifyPermission({ toolName: "Write", toolInput: { file_path: path }, cwd });
+    expect(write).toEqual({ risk: "high", reasons: ["touches credentials or agent settings"] });
   });
 
   // Second review: expansions the tokenizer did not model, attached option values,

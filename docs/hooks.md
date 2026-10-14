@@ -80,7 +80,7 @@ arguments:
 | Command | Allowed when |
 | --- | --- |
 | `ls`, `pwd`, `cat`, `head`, `tail`, `wc`, `grep`, `egrep`, `fgrep`, `rg`, `find`, `echo`, `diff`, `du`, `tree` | Every argument that is not an option is inside the project and names no credential. Not `find -delete`, `-exec`, `-execdir`, `-ok`, `-okdir`, `-fprint*` or `-fls`; not `rg --pre`, `--pre-glob` or `-z`; not `tree -o` |
-| `git status`, `diff`, `log`, `show`, `rev-parse`, `ls-files` | No option before the subcommand (`-c`, `-C`, `--exec-path`), no `--output` or `--ext-diff`, and path-like arguments inside the project |
+| `git status`, `diff`, `log`, `show`, `rev-parse`, `ls-files` | No option before the subcommand (`-c`, `-C`, `--exec-path`), none of `--output`, `--ext-diff`, `--git-dir`, `--work-tree`, `--exec-path`, `--no-index`, `--namespace`, and every argument checked as a path (below) |
 | `git branch` | Listing only: `-a`, `-r`, `-l`, `-v`, `-vv`, `--list`, `--all`, `--remotes`, `--show-current`, `--no-color` |
 | `npm`, `pnpm`, `yarn`, `bun` | `test`, `build`, `lint` or `typecheck` (directly or after `run`), then only options, `--` and paths inside the project |
 
@@ -101,9 +101,21 @@ and Codex may run commands under zsh on macOS.
 Redirections are allowed only to `/dev/null`, to file descriptors (`2>&1`), or
 to and from paths inside the project.
 
-An option with a path-like value attached (`-f/path`, `--file=/path`) must split
-cleanly into option letters and a path that is itself safe; `head -c1/etc/x`
-does not, so it is high.
+Hotline does not know which options take a value, so it checks every form:
+
+- `--opt=VALUE`: VALUE is checked as a path.
+- `--opt VALUE`: every following word is checked as a path anyway.
+- A long option with `/`, `.` or `~` in it is refused.
+- `-fVALUE` and clusters such as `-rf/etc/x` or `-fsecrets`: the value could
+  start at any character after the dash, so every suffix is checked as a path.
+  `head -c1/etc/x` and `grep -f.env` are high.
+
+"Checked as a path" means: inside the project, no credential or settings name,
+and no `.git` component. Every git argument, revisions included, gets this check,
+so git cannot be pointed at another or a nested repository. `--git-dir`,
+`--work-tree`, `--exec-path`, `--no-index` and `--namespace` are refused, as are
+`-C` and `-c` (no option may come before the subcommand), and any `VAR=` prefix
+(`GIT_DIR=...`).
 
 Anything else is high, including:
 
@@ -122,15 +134,26 @@ scripts run the project's own code, and git commands honour repository config
 these is high risk ("touches credentials or agent settings"), even inside the
 project:
 
-- `.git/` (anything in it), `.gitattributes`, `.gitmodules`, `.husky/`;
+- any path with a `.git` component, at any depth, directory or file;
+- `.gitattributes`, `.gitmodules`, `.husky/`;
 - `package.json`, `node_modules/`;
 - `.npmrc`, `.yarnrc*`, `.yarn/`, `.pnpmfile.cjs`, `bunfig.toml`, `.envrc`.
 
-Reading them stays low. Other project code the owner already approved an edit
-to (a test file, a build script it imports) runs as low risk. There the
-protection is that a low-risk request still needs the owner's explicit "yes" to
-the command they hear. Hotline also cannot see the shell's aliases or `PATH`.
-This is a classification of the command text, not a sandbox.
+Sensitive names are matched case-insensitively after NFC normalisation, because
+macOS file systems ignore case and normalisation by default (`.GIT/config`,
+`.Env` and `Package.json` all count). Reading them stays low.
+
+Other project code the owner already approved an edit to (a test file, a build
+script it imports) runs as low risk. There the protection is that a low-risk
+request still needs the owner's explicit "yes" to the command they hear.
+Hotline also cannot see the shell's aliases or `PATH`. This is a classification
+of the command text, not a sandbox.
+
+**What the classifier decides.** It decides only how much proof an approval
+needs: the PIN or a confirming text, or the owner's spoken "yes". It never
+decides whether an approval is needed. Every permission request needs the
+owner's own approval, and every failure denies. Bypass classes not covered here
+are tracked for HL-13's fuzz tests.
 
 **Unknown project.** When the session's `cwd` is empty, relative, `/`, a
 top-level directory such as `/tmp`, or a home directory (`/Users/<name>`,

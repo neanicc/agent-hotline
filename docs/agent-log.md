@@ -1004,6 +1004,27 @@ Template:
     numeric glob, qualifier, `^` and `#`, ANSI-C `$'..'`, double-quote `$`, `!`
     and backticks, CR, NUL, other C0 and C1 controls, Unicode lookalike
     separators and spaces, and `&!`, `>!`, `|&`, `<>`.
+- Third security review (coordinator and push review, of baa90d5/2976ba2):
+  - Sensitive names are matched case-insensitively after NFC normalisation
+    (macOS APFS ignores both), so `.GIT/config`, `.Env` and `Package.json`
+    count.
+  - A `.git` component at any depth is sensitive.
+  - Every git argument is checked as a path. `--git-dir`, `--work-tree`,
+    `--exec-path`, `--no-index` and `--namespace` are refused, as are options
+    before the subcommand (`-C`, `-c`) and any `VAR=` prefix.
+  - Option values are checked in every form: `--opt=VALUE`, a long option
+    with a path character, and every suffix of a short cluster (`-rf/etc/x`,
+    `-fsecrets`). A separate value is covered by checking each following word.
+  - Tests cover each form for grep, rg, head, tail, diff, find and git.
+    Mutations: skipping the suffix check fails 15 tests; case-sensitive matching
+    fails 6.
+  - `grep -f./patterns.txt` moved from low to high (the suffix `/patterns.txt`
+    is outside).
+  - Stopping point: the classifier only decides how much proof an approval
+    needs (PIN or confirming text vs. a spoken "yes"), never whether one is
+    needed. Every request still needs the owner's own approval, and failures
+    deny. Remaining bypass classes go to HL-13's fuzz tests (the coordinator is
+    recording them on HL-13), and HL-06 stops hardening the classifier here.
 - Daemon: `POST /v1/sessions/:id/asks` accepts `permission` (requires
   `toolName`, identifier characters up to 100, and `risk`) and `stop`; text and
   tool name are redacted before storage. Caps per session / total: permission
@@ -1024,7 +1045,8 @@ Template:
   fixtures README.
 - Evidence (worktree, Node 24.11.0):
   - `scripts/ci/run.sh setup`, `build` and `test` pass: 682 tests in 34 files
-    at ce62b97, 766 at f85b69b, and 824 after the second security review.
+    at ce62b97, 766 at f85b69b, 824 at baa90d5, and 1070 (41 files, after
+    catching up with main) after the third review.
   - The security fixes have a bypass test for each case the review listed,
     plus unknown-project, shortened-preview and reassuring-description tests.
     Earlier expectations only moved from low to high. Mutations: treating

@@ -19,8 +19,12 @@
 // as low risk. What protects the owner there is that low risk still needs their
 // explicit "yes" to this command.
 //
-// It decides how much proof the owner gives. A low-risk request still needs the
-// owner's own "yes", and every failure denies.
+// The classifier only decides how much proof an approval needs (the PIN or a
+// confirming text, or the owner's spoken "yes"), never whether one is needed:
+// every permission request needs the owner's own approval, and every failure
+// denies. Sensitive names are matched case-insensitively after NFC
+// normalisation, because macOS file systems ignore both by default. Bypass
+// classes not covered here are tracked for HL-13's fuzzing.
 // Pure: no I/O, no Node modules. Paths are resolved as POSIX strings.
 import type { Risk } from "./contracts.js";
 
@@ -132,13 +136,25 @@ const CREDENTIAL_PATH =
  * that `pnpm test` runs. Writing one is high risk even inside the project.
  */
 const CODE_CONFIG_PATH =
-  /(?:^|\/)(?:\.git(?:\/|$)|\.gitattributes$|\.gitmodules$|\.husky(?:\/|$)|\.npmrc$|\.yarnrc(?:\.yml)?$|\.yarn(?:\/|$)|\.pnpmfile\.c?js$|bunfig\.toml$|package\.json$|node_modules(?:\/|$)|\.envrc$)/;
+  /(?:^|\/)(?:\.git(?:\/|$)|\.gitattributes$|\.gitmodules$|\.husky(?:\/|$)|\.npmrc$|\.yarnrc(?:\.yml)?$|\.yarn(?:\/|$)|\.pnpmfile\.c?js$|bunfig\.toml$|package\.json$|node_modules(?:\/|$)|\.envrc$)/i;
 
 /** The part of `path` that is judged: below the project root when inside it, else the whole path. */
 function judgedPart(cwd: string, path: string): string {
+  // macOS file systems ignore case and Unicode normalisation by default, so
+  // `.GIT/config` and a decomposed `.env` are matched like the plain names
+  // (the patterns are case-insensitive; this makes the form canonical).
+  const normal = path.normalize("NFC");
   const root = projectRoot(cwd);
-  if (root === undefined || !insideProject(cwd, path)) return path;
-  return resolvePosix(root, path).slice(root.length);
+  if (root === undefined || !insideProject(cwd, normal)) return normal;
+  return resolvePosix(root, normal).slice(root.length);
+}
+
+/** Whether any component of `path` is `.git` (a repository directory or a `.git` file), in any case. */
+export function hasGitComponent(path: string): boolean {
+  return path
+    .normalize("NFC")
+    .split("/")
+    .some((part) => part.toLowerCase() === ".git");
 }
 
 /** Whether `path` names a credential or settings file. Inside the project only the part below it counts. */
@@ -409,7 +425,15 @@ const GIT_READ_ONLY: ReadonlySet<string> = new Set([
   "rev-parse",
   "ls-files",
 ]);
-const GIT_FORBIDDEN_OPTIONS = ["--output", "--ext-diff"];
+const GIT_FORBIDDEN_OPTIONS = [
+  "--output",
+  "--ext-diff",
+  "--git-dir",
+  "--work-tree",
+  "--exec-path",
+  "--no-index",
+  "--namespace",
+];
 const GIT_BRANCH_LIST_OPTIONS: ReadonlySet<string> = new Set([
   "-a",
   "-r",
@@ -426,17 +450,44 @@ const PACKAGE_MANAGERS: ReadonlySet<string> = new Set(["npm", "pnpm", "yarn", "b
 const PACKAGE_SCRIPTS: ReadonlySet<string> = new Set(["test", "build", "lint", "typecheck"]);
 
 /** An argument is safe when it is inside a known project and names no credential. */
+/**
+ * Whether one argument is safe for a read-only command. A plain argument must be
+ * a path inside the project that is not sensitive. Options are checked for any
+ * value they could carry, since Hotline does not know which options take one:
+ *
+ * - `--opt=VALUE`: VALUE is checked as a path;
+ * - `--opt` with a path-like character (`/`, `.`, `~`) is refused;
+ * - `-xVALUE` and clusters such as `-rf/etc/x` or `-fsecrets`: every suffix
+ *   after the dash could be the value, so every suffix is checked as a path.
+ *
+ * A separate `--opt VALUE` needs nothing here: the commands that use this check
+ * every following word as a path anyway.
+ */
 function safeArgument(arg: string, cwd: string): boolean {
-  if (arg.startsWith("-")) {
-    if (arg.includes("=")) return safeArgument(arg.slice(arg.indexOf("=") + 1), cwd);
-    // An option with a path-like value attached (`-f/home/u/.ssh/id_rsa`): the
-    // value must split cleanly off the option letters and be safe itself.
-    if (!/[/~]|\.\./.test(arg)) return true;
-    const attached = /^-[A-Za-z]+([/.].*)$/.exec(arg);
-    return attached?.[1] !== undefined && safeArgument(attached[1], cwd);
+  if (arg.startsWith("--")) {
+    if (arg.includes("=")) return safePath(arg.slice(arg.indexOf("=") + 1), cwd);
+    return !/[/.~]/.test(arg);
   }
-  if (CREDENTIAL_PATH.test(arg) && credentialPath(cwd, arg)) return false;
-  return insideProject(cwd, arg);
+  if (arg.startsWith("-") && arg.length > 1) {
+    const body = arg.slice(1);
+    if (body.includes("="))
+      return (
+        safePath(body.slice(body.indexOf("=") + 1), cwd) &&
+        safeArgument(`-${body.slice(0, body.indexOf("="))}`, cwd)
+      );
+    for (let i = 1; i < body.length; i++) {
+      if (!safePath(body.slice(i), cwd)) return false;
+    }
+    return !hasGitComponent(body) && !CREDENTIAL_PATH.test(body) && !CREDENTIAL_PATH.test(`/${body}`);
+  }
+  return safePath(arg, cwd);
+}
+
+/** A path inside the project that names no credential, settings file or `.git` component. */
+function safePath(path: string, cwd: string): boolean {
+  if (path === "") return true;
+  if (hasGitComponent(path) || credentialPath(cwd, path)) return false;
+  return insideProject(cwd, path.normalize("NFC"));
 }
 
 /** Whether any argument is one of `options`, also as `--opt=value`, `-xVALUE` or in a cluster such as `-iz`. */
@@ -467,11 +518,10 @@ function readOnlyCommand({ words, redirects }: SimpleCommand, cwd: string): bool
     const [sub, ...rest] = args;
     if (sub === undefined || !GIT_READ_ONLY.has(sub) || forbidden(rest, GIT_FORBIDDEN_OPTIONS)) return false;
     if (sub === "branch") return rest.every((arg) => GIT_BRANCH_LIST_OPTIONS.has(arg));
-    // Revisions (`HEAD~2`, `main`) pass; anything that could be a path is checked like one.
-    const pathLike = (arg: string) => /[/~]/.test(arg) || arg.startsWith(".") || CREDENTIAL_PATH.test(arg);
-    return rest.every((arg) =>
-      arg.startsWith("-") ? safeArgument(arg, cwd) : !pathLike(arg) || safeArgument(arg, cwd),
-    );
+    // Every argument, revisions included (`main`, `HEAD:src/a.ts`), is checked as
+    // a path: inside the project, nothing sensitive, and no `.git` component, so
+    // git cannot be pointed at another or a nested repository.
+    return rest.every((arg) => safeArgument(arg, cwd));
   }
   if (PACKAGE_MANAGERS.has(name)) {
     const [first, second, ...more] = args;
