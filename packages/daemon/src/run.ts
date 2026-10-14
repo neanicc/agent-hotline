@@ -1,12 +1,14 @@
-// `hotline daemon`: load the config, open the secret store and database, start
-// both listeners, and shut down cleanly on SIGINT or SIGTERM.
+// `hotline daemon`: load the config, take the per-home lock, open the secret
+// store and database, start both listeners, and shut down cleanly on SIGINT or
+// SIGTERM.
 import { ensureApiToken } from "./api-token.js";
 import { hotlinePaths, loadConfig } from "./config-file.js";
+import { acquireDaemonLock } from "./lock.js";
 import type { LogDestination, LogLevel } from "./logger.js";
 import { createRedactor } from "./redact.js";
 import { type Exec, openSecretStore } from "./secret-store.js";
 import { type Daemon, startDaemon } from "./server.js";
-import { openStore } from "./store.js";
+import { type HotlineStore, openStore } from "./store.js";
 
 export type ShutdownSignal = "SIGINT" | "SIGTERM";
 export const SHUTDOWN_SIGNALS: readonly ShutdownSignal[] = ["SIGINT", "SIGTERM"];
@@ -17,22 +19,34 @@ export interface SignalSource {
   off(signal: ShutdownSignal, listener: () => void): unknown;
 }
 
+export interface ShutdownWait {
+  /** The first SIGINT or SIGTERM. */
+  received: Promise<ShutdownSignal>;
+  /** Removes the listeners without waiting; `received` then never settles. */
+  cancel(): void;
+}
+
 /**
- * Resolves with the first SIGINT or SIGTERM. The listeners are removed at that
- * point, so a second signal during shutdown gets Node's default handling and
+ * Listens for the first SIGINT or SIGTERM. The listeners are removed when it
+ * arrives, so a second signal during shutdown gets Node's default handling and
  * ends the process at once.
  */
-export function nextShutdownSignal(signals: SignalSource): Promise<ShutdownSignal> {
-  return new Promise((resolve) => {
+export function nextShutdownSignal(signals: SignalSource): ShutdownWait {
+  let cancel = () => {};
+  const received = new Promise<ShutdownSignal>((resolve) => {
     const listeners = SHUTDOWN_SIGNALS.map((signal) => {
       const listener = () => {
-        for (const [name, registered] of listeners) signals.off(name, registered);
+        cancel();
         resolve(signal);
       };
       signals.on(signal, listener);
       return [signal, listener] as const;
     });
+    cancel = () => {
+      for (const [name, registered] of listeners) signals.off(name, registered);
+    };
   });
+  return { received, cancel };
 }
 
 /** Ports for the agent API and the webhook listener: the configured port and the next one. */
@@ -61,7 +75,7 @@ export interface RunDaemonOptions {
   clock?: () => Date;
   /** How long to wait for in-flight requests before giving up on a clean stop. */
   shutdownTimeoutMs?: number;
-  /** Called once both listeners are up. */
+  /** Called once both listeners are up. If it throws, the daemon stops again. */
   onReady?: (daemon: Daemon) => void;
 }
 
@@ -70,49 +84,50 @@ export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
 /**
  * Runs the daemon until SIGINT or SIGTERM. Resolves with the process exit code:
  * 0 after a clean stop, 1 if closing timed out. Startup problems (missing or
- * unsafe config, secret store, database, port in use) reject.
+ * unsafe config, another daemon on the same home, secret store, database, port
+ * in use) reject, after closing whatever had been opened.
  */
 export async function runDaemon(options: RunDaemonOptions): Promise<number> {
   const clock = options.clock ?? (() => new Date());
   const paths = hotlinePaths({ env: options.env, homeDir: options.homeDir });
   const config = await loadConfig(paths.config);
   const ports = daemonPorts(options.port ?? config.daemon.port);
-  const secrets = openSecretStore({
-    choice: config.secrets.store,
-    platform: options.platform,
-    filePath: paths.secrets,
-    exec: options.exec,
-  });
-  const apiToken = await ensureApiToken(secrets);
-  const redactor = createRedactor([apiToken]);
-  const log = { level: options.logLevel ?? "info", destination: options.logDestination, redactor };
+  // Before the token or database: a second daemon on this home stops here.
+  const lock = await acquireDaemonLock(paths.lock);
 
-  const store = await openStore(paths.database, { redactor });
-  let daemon: Daemon;
+  let store: HotlineStore | undefined;
+  let daemon: Daemon | undefined;
+  let shutdown: ShutdownWait | undefined;
   try {
+    const secrets = openSecretStore({
+      choice: config.secrets.store,
+      platform: options.platform,
+      filePath: paths.secrets,
+      exec: options.exec,
+    });
+    const apiToken = await ensureApiToken(secrets);
+    const redactor = createRedactor([apiToken]);
+    const log = { level: options.logLevel ?? "info", destination: options.logDestination, redactor };
+    store = await openStore(paths.database, { redactor });
     daemon = await startDaemon({ apiToken, store, ...ports, log, version: options.version });
-  } catch (error) {
-    store.close();
-    throw error;
-  }
-
-  try {
     store.appendAudit(
       "daemon.started",
       { version: options.version, apiPort: daemon.apiPort, hooksPort: daemon.hooksPort },
       clock(),
     );
+    // Listen for signals before announcing readiness, so a stop request is never missed.
+    shutdown = nextShutdownSignal(options.signals);
+    daemon.log.info({ apiUrl: daemon.apiUrl, hooksUrl: daemon.hooksUrl }, "hotline daemon listening");
+    options.onReady?.(daemon);
   } catch (error) {
-    await daemon.close();
+    shutdown?.cancel();
+    if (daemon !== undefined) await daemon.close();
+    else store?.close();
+    await lock.release();
     throw error;
   }
 
-  // Listen for signals before announcing readiness, so a stop request is never missed.
-  const signal = nextShutdownSignal(options.signals);
-  daemon.log.info({ apiUrl: daemon.apiUrl, hooksUrl: daemon.hooksUrl }, "hotline daemon listening");
-  options.onReady?.(daemon);
-
-  const received = await signal;
+  const received = await shutdown.received;
   daemon.log.info({ signal: received }, "hotline daemon shutting down");
   try {
     store.appendAudit("daemon.stopping", { signal: received }, clock());
@@ -128,6 +143,7 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
   });
   const result = await Promise.race([daemon.close().then(() => false as const), timedOut]);
   clearTimeout(timer);
+  await lock.release();
   if (result === true) {
     daemon.log.error({ timeoutMs }, "hotline daemon did not stop in time");
     return 1;

@@ -5,7 +5,7 @@
 //
 // Times are passed in by callers (the daemon's injected clock); the store never
 // reads the wall clock.
-import { chmod, mkdir } from "node:fs/promises";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Answer, Ask, type AskStatus, answerProblem, CallRecord, Session } from "@hotline/core";
@@ -119,6 +119,18 @@ export async function openStore(path: string, options: OpenStoreOptions = {}): P
   const problem = await privatePathProblem(path);
   if (problem !== undefined && problem !== "missing") {
     throw new StoreError(`Hotline database ${path} ${problem}`);
+  }
+  if (problem === "missing") {
+    // Create the file 0600 ourselves, so it never exists with umask permissions.
+    // SQLite treats an empty file as a new database. If another process created it
+    // in the meantime, re-check it instead.
+    try {
+      await writeFile(path, "", { flag: "wx", mode: 0o600 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const again = await privatePathProblem(path);
+      if (again !== undefined) throw new StoreError(`Hotline database ${path} ${again}`);
+    }
   }
   const db = new DatabaseSync(path, { enableForeignKeyConstraints: true });
   try {

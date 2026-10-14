@@ -4,6 +4,11 @@
 runs in the foreground until SIGINT or SIGTERM. This page covers the skeleton from
 HL-04; call orchestration (HL-09) and the inbound line (HL-10) build on it.
 
+Only one daemon runs per hotline home. On start it creates `daemon.lock` (its
+process id, mode 0600) before it creates the token or opens the database, and a
+second daemon on the same home exits with "already running". A lock left by a
+process that no longer exists is replaced. A clean stop removes it.
+
 ## Listeners
 
 Both listeners bind `127.0.0.1` only. The address is a constant, not a setting.
@@ -52,7 +57,8 @@ add the Twilio and ElevenLabs routes through `startDaemon({ webhookRoutes })`.
 ## Store
 
 SQLite through Node's built-in `node:sqlite`, at `hotline.db` in the hotline home,
-mode `0600` in a `0700` directory. A symlinked database, or one in a directory
+mode `0600` in a `0700` directory. A new file is created `0600` before SQLite
+opens it, so it never exists with umask permissions. A symlinked database, or one in a directory
 other users can reach, is refused. Tables: `sessions`, `asks`, `answers`, `calls`
 and `audit`. Each table keeps the record as JSON validated by the HL-02 schemas,
 on write and on read, next to the columns the daemon queries by.
@@ -75,9 +81,11 @@ startup on Node 22 and 24. It is harmless.
 
 ## Logs
 
-JSON lines (pino, through Fastify) on stderr. Each line is redacted just before
-it is written, so the message, request fields, error stacks and bindings are all
-covered:
+JSON lines (pino, through Fastify) on stderr. Fastify logs every request as it
+arrives, before any token or signature check, so its request serializer is
+replaced: those lines carry the method and path only, never the query string,
+headers or body. Each line is also redacted just before it is written, so the
+message, request fields, error stacks and bindings are all covered:
 
 - Phone numbers become `***` plus their last four digits (`+15555550100` becomes
   `***0100`, `%2B`-encoded and national formats included).

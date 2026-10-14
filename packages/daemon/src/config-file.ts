@@ -13,6 +13,8 @@ export interface HotlinePaths {
   secrets: string;
   /** `hotline.db`: the daemon's SQLite store (sessions, asks, answers, calls, audit). */
   database: string;
+  /** `daemon.lock`: holds the running daemon's process id, so only one runs per home. */
+  lock: string;
 }
 
 export interface PathOptions {
@@ -34,6 +36,7 @@ export function hotlinePaths({ env, homeDir }: PathOptions): HotlinePaths {
     config: join(home, "config.json"),
     secrets: join(home, "secrets.json"),
     database: join(home, "hotline.db"),
+    lock: join(home, "daemon.lock"),
   };
 }
 

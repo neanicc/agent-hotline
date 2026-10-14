@@ -164,11 +164,21 @@ describe("agent API", () => {
   it("never logs the token, and logs rejected requests without their query", async () => {
     const daemon = await start();
     await send({ port: daemon.apiPort, path: "/v1/health", headers: auth() });
-    await send({ port: daemon.apiPort, path: `/v1/health?to=${encodeURIComponent(OWNER)}` });
+    await send({
+      port: daemon.apiPort,
+      path: `/v1/health?to=${encodeURIComponent(OWNER)}&note=query-marker`,
+    });
     expect(logText()).not.toContain(token);
     expect(logText()).not.toContain("5555550100");
+    // Not even Fastify's own "incoming request" line carries the query.
+    expect(logText()).not.toContain("query-marker");
     const rejected = logEntries().find((entry) => entry.msg === "agent API: missing or wrong token");
     expect(rejected).toMatchObject({ method: "GET", path: "/v1/health" });
+    const incoming = logEntries().filter((entry) => entry.msg === "incoming request");
+    expect(incoming.map((entry) => entry.req)).toEqual([
+      { method: "GET", path: "/v1/health" },
+      { method: "GET", path: "/v1/health" },
+    ]);
   });
 });
 
@@ -208,7 +218,7 @@ describe("webhook listener", () => {
     });
     expect(response.status).toBe(403);
     const text = logText();
-    for (const marker of ["body-marker", "approve", "signature-marker", "5555550100"]) {
+    for (const marker of ["body-marker", "approve", "signature-marker", "query-marker", "5555550100"]) {
       expect(text).not.toContain(marker);
     }
     const rejected = logEntries().find((entry) => entry.msg === "rejected webhook");

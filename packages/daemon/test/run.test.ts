@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -45,12 +45,12 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-function paths() {
-  return hotlinePaths({ env: { HOTLINE_HOME: join(dir, "home") }, homeDir: "/nonexistent" });
+function paths(home = "home") {
+  return hotlinePaths({ env: { HOTLINE_HOME: join(dir, home) }, homeDir: "/nonexistent" });
 }
 
-async function writeConfig(config: unknown = CONFIG): Promise<void> {
-  await writePrivateFile(paths().config, JSON.stringify(config));
+async function writeConfig(config: unknown = CONFIG, home = "home"): Promise<void> {
+  await writePrivateFile(paths(home).config, JSON.stringify(config));
 }
 
 /** Starts runDaemon and resolves once it is listening. */
@@ -174,14 +174,16 @@ describe("runDaemon", () => {
     for (const name of SHUTDOWN_SIGNALS) expect(signals.listenerCount(name)).toBe(0);
   });
 
-  it("fails to start on a port in use and leaves the running daemon alone", async () => {
+  it("refuses a second daemon on the same home before it touches the token", async () => {
     await writeConfig();
     const first = await launch();
-    // Same home, so the same database; the configured port is the one already in use.
-    await writeConfig({ ...CONFIG, daemon: { port: first.daemon.apiPort } });
-    await expect(launch({ port: undefined })).rejects.toThrow(/EADDRINUSE/);
-    expect(first.daemon.store.isOpen).toBe(true);
     const token = await new FileSecretStore(paths().secrets).get("daemon.apiToken");
+    const second = new EventEmitter();
+    await expect(launch({ signals: second })).rejects.toThrow(/already running/);
+    expect(second.listenerCount("SIGTERM")).toBe(0);
+    // The running daemon, its token and its lock are untouched.
+    expect(await new FileSecretStore(paths().secrets).get("daemon.apiToken")).toBe(token);
+    expect(await readFile(paths().lock, "utf8")).toBe(`${process.pid}\n`);
     const response = await send({
       port: first.daemon.apiPort,
       path: "/v1/health",
@@ -190,6 +192,48 @@ describe("runDaemon", () => {
     expect(response.status).toBe(200);
     signals.emit("SIGTERM");
     expect(await first.exit).toBe(0);
+    // A clean stop releases the lock.
+    await expect(stat(paths().lock)).rejects.toThrow(/ENOENT/);
+  });
+
+  it("closes everything it opened when a port is in use", async () => {
+    await writeConfig();
+    const first = await launch();
+    // A second home whose configured port is the one the first daemon holds.
+    await writeConfig({ ...CONFIG, daemon: { port: first.daemon.apiPort } }, "other");
+    const other = new EventEmitter();
+    await expect(
+      launch({ env: { HOTLINE_HOME: paths("other").home }, port: undefined, signals: other }),
+    ).rejects.toThrow(/EADDRINUSE/);
+    await expect(stat(paths("other").lock)).rejects.toThrow(/ENOENT/);
+    expect(other.listenerCount("SIGTERM")).toBe(0);
+    expect(first.daemon.store.isOpen).toBe(true);
+    signals.emit("SIGTERM");
+    expect(await first.exit).toBe(0);
+  });
+
+  it("stops again, releasing everything, when announcing readiness fails", async () => {
+    await writeConfig();
+    let started: Daemon | undefined;
+    const exit = runDaemon({
+      env: { HOTLINE_HOME: paths().home },
+      homeDir: "/nonexistent",
+      platform: process.platform,
+      signals,
+      logDestination: { write: (line) => lines.push(line) },
+      version: "0.0.0-test",
+      port: 0,
+      clock: () => NOW,
+      onReady: (daemon) => {
+        started = daemon;
+        throw new Error("could not print the ready line");
+      },
+    });
+    await expect(exit).rejects.toThrow(/ready line/);
+    expect(started?.store.isOpen).toBe(false);
+    for (const name of SHUTDOWN_SIGNALS) expect(signals.listenerCount(name)).toBe(0);
+    await expect(send({ port: started?.apiPort ?? 0, path: "/v1/health" })).rejects.toThrow(/ECONNREFUSED/);
+    await expect(stat(paths().lock)).rejects.toThrow(/ENOENT/);
   });
 });
 
@@ -211,7 +255,14 @@ describe("nextShutdownSignal", () => {
     expect(source.listenerCount("SIGINT")).toBe(1);
     expect(source.listenerCount("SIGTERM")).toBe(1);
     source.emit(signal);
-    expect(await next).toBe(signal);
+    expect(await next.received).toBe(signal);
+    expect(source.listenerCount("SIGINT")).toBe(0);
+    expect(source.listenerCount("SIGTERM")).toBe(0);
+  });
+
+  it("removes its listeners when cancelled", () => {
+    const source = new EventEmitter();
+    nextShutdownSignal(source).cancel();
     expect(source.listenerCount("SIGINT")).toBe(0);
     expect(source.listenerCount("SIGTERM")).toBe(0);
   });

@@ -19,7 +19,7 @@ import Fastify, {
   type FastifyRequest,
 } from "fastify";
 import { bearerToken, tokensMatch } from "./api-token.js";
-import { fastifyLoggerOptions, type LogOptions } from "./logger.js";
+import { fastifyLoggerOptions, type LogOptions, urlPath } from "./logger.js";
 import type { HotlineStore } from "./store.js";
 
 /** The only address the daemon listens on. Not configurable. */
@@ -45,12 +45,6 @@ export interface WebhookRoute {
   url: string;
   verify: WebhookVerifier;
   handler: (request: FastifyRequest, reply: FastifyReply) => unknown;
-}
-
-/** Path of a request URL without its query string, which may carry provider parameters. */
-function pathOnly(url: string): string {
-  const end = url.search(/[?#]/);
-  return end === -1 ? url : url.slice(0, end);
 }
 
 function boundPort(app: FastifyInstance): number | undefined {
@@ -95,7 +89,7 @@ export function buildAgentApi({ apiToken, log, version }: AgentApiOptions): Fast
     const host = request.headers.host?.toLowerCase();
     if (port === undefined || (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`)) {
       request.log.warn(
-        { method: request.method, path: pathOnly(request.url) },
+        { method: request.method, path: urlPath(request.url) },
         "agent API: wrong Host header",
       );
       return reply.code(403).send({ error: "forbidden" });
@@ -103,7 +97,7 @@ export function buildAgentApi({ apiToken, log, version }: AgentApiOptions): Fast
     const presented = bearerToken(request.headers.authorization);
     if (presented === undefined || !tokensMatch(presented, apiToken)) {
       request.log.warn(
-        { method: request.method, path: pathOnly(request.url) },
+        { method: request.method, path: urlPath(request.url) },
         "agent API: missing or wrong token",
       );
       return reply
@@ -136,7 +130,7 @@ export function buildWebhookServer({ log, routes = [] }: WebhookServerOptions): 
 
   const reject = (request: FastifyRequest, reply: FastifyReply, reason: string) => {
     // Method and path only: never the body, headers or query of an unverified request.
-    request.log.warn({ method: request.method, path: pathOnly(request.url), reason }, "rejected webhook");
+    request.log.warn({ method: request.method, path: urlPath(request.url), reason }, "rejected webhook");
     return reply.code(403).send({ error: "forbidden" });
   };
 

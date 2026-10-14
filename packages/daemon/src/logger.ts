@@ -35,7 +35,28 @@ export function redactingStream(
   };
 }
 
+/** Path of a request URL without its query string or fragment, which may carry provider parameters. */
+export function urlPath(url: string): string {
+  const end = url.search(/[?#]/);
+  return end === -1 ? url : url.slice(0, end);
+}
+
+/**
+ * Fastify logs every request it receives, before any auth or verification hook
+ * runs. This replaces its request serializer so those lines carry the method and
+ * path only: never the query string, headers or body of a request that may later
+ * be rejected.
+ */
+export function requestSerializer(request: { method?: string; url?: string }): Record<string, string> {
+  return { method: request.method ?? "", path: urlPath(request.url ?? "") };
+}
+
 /** The `logger` option for a Fastify instance; `name` labels its lines (`agent-api`, `webhooks`). */
 export function fastifyLoggerOptions({ level = "info", destination, redactor }: LogOptions, name: string) {
-  return { level, name, stream: redactingStream(destination, redactor) };
+  return {
+    level,
+    name,
+    serializers: { req: requestSerializer },
+    stream: redactingStream(destination, redactor),
+  };
 }

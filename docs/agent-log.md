@@ -132,7 +132,7 @@ Template:
   its own Keychain access list would close the gap. That is Tier 2 work, not a
   Tier 1 ticket.
 
-## 2026-10-13 — HL-04 Daemon skeleton (#PR)
+## 2026-10-13 — HL-04 Daemon skeleton (#25)
 
 - Decision / change: `packages/daemon` gains the server, store, logging and
   lifecycle, and `apps/cli` gains `hotline daemon [--port <n>]`. Fastify is pinned
@@ -187,6 +187,22 @@ Template:
   SIGTERM and a real SIGINT each exited 0 in about 5 ms, and the logs held
   neither the token nor the number. No scenario suite exists yet (HL-12). Real
   agent integration and live calls do not apply.
+- Review fixes (staff review and Greptile on #25):
+  - Fastify's automatic "incoming request" line logged the full URL, query
+    included, before any auth hook ran. Its `req` serializer now logs method and
+    path only, and tests assert that a query marker never reaches the log on
+    either listener. Without the serializer, 2 tests fail.
+  - Two daemons starting at once on the same home could each store a different
+    token. A `daemon.lock` pid file, created exclusively before the token and the
+    database, now refuses a second daemon. Stale locks from dead processes are
+    replaced, and the lock is released on stop and on any startup failure.
+  - `runDaemon` now closes the listeners and store, removes its signal handlers
+    and releases the lock if anything fails after the listeners start,
+    `onReady` included.
+  - The database file is created `0600` before SQLite opens it.
+  - Not changed: webhook verification still runs after body parsing (256 KiB
+    cap), which signatures over form parameters need. HL-07 can refuse a
+    missing signature header earlier.
 - Open issues or follow-ups: add `daemon.webhookPort` to the config contract
   (lane:core) if the `port + 1` convention gets in the way. HL-07 needs a
   urlencoded body parser on the webhook listener and HL-08 the raw body for
