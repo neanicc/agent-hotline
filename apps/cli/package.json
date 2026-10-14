@@ -1,0 +1,22 @@
+{
+  "name": "@hotline/cli",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "hotline": "./dist/main.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/cli.d.ts",
+      "default": "./dist/cli.js"
+    }
+  },
+  "scripts": {
+    "test": "vitest run --root ../.. --project cli"
+  },
+  "dependencies": {
+    "@hotline/core": "workspace:*"
+  }
+}

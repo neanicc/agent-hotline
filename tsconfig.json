@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/core" },
+    { "path": "packages/daemon" },
+    { "path": "packages/providers" },
+    { "path": "packages/agents" },
+    { "path": "apps/cli" }
+  ]
+}
