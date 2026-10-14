@@ -20,8 +20,11 @@ describe("classifyPermission (plan question 6 default)", () => {
     "pnpm run typecheck -- --pretty",
     "yarn lint",
     "git status && git diff --stat",
-    "git log --oneline -5 HEAD~3",
+    "git log --oneline -5 main",
+    "git log --format=%H -3",
     "git show HEAD:src/a.ts",
+    "grep -f./patterns.txt src",
+    "grep 'it(\"*' src",
     "git branch -a",
     "cat README.md | head -20",
     "echo hi > out.txt",
@@ -41,8 +44,96 @@ describe("classifyPermission (plan question 6 default)", () => {
     ["node scripts/check.js 2>&1", "runs a command Hotline does not recognise as read-only"],
     [`cp src/a.ts ${cwd}/src/b.ts`, "runs a command Hotline does not recognise as read-only"],
     ["find . -name '*.log' -exec ls {} +", "runs a command Hotline does not recognise as read-only"],
+    // `~` outside quotes is an expansion: refused even inside a revision.
+    ["git log --oneline -5 HEAD~3", "runs a command Hotline does not recognise as read-only"],
   ])("now treats `%s` as high risk: %s", (command, reason) => {
     expect(bash(command)).toEqual({ risk: "high", reasons: [reason] });
+  });
+
+  // Second review: expansions the tokenizer did not model, attached option values,
+  // and parser differentials between Hotline, bash and zsh.
+  it.each([
+    // Brace, glob and tilde expansion.
+    "cat {/etc/passwd,x}",
+    "cat .e*",
+    "cat .en?",
+    "cat [.]env",
+    "cat ~/x",
+    "ls ~",
+    // zsh expansions: `=cmd`, numeric globs, glob qualifiers, `^` negation, extended `#`.
+    "ls =rm",
+    "cat <1-10>",
+    "cat <->",
+    "ls *(e:rm:)",
+    "ls ^src",
+    "ls a#",
+    "ls =(rm x)",
+    // Attached option values.
+    "grep -f/home/u/.ssh/id_rsa x",
+    "head -c1/etc/x",
+    "grep -f../../x src",
+    "grep --file=/etc/passwd src",
+    "git log -p/etc/x",
+    "ls --x/y",
+    // ANSI-C quoting, quotes and escapes.
+    "ls $'\\x2fetc'",
+    'ls "$HOME"',
+    'ls "a!b"',
+    'ls "`id`"',
+    'ls "a\\"b"',
+    // Control characters: CR, NUL, vertical tab, form feed, DEL, a C1 control.
+    "ls\rrm -rf x",
+    "ls\u0000rm",
+    "ls\u000brm",
+    "ls\u000crm",
+    "ls\u007f",
+    "ls\u0085rm",
+    // Unicode lookalike separators and spaces.
+    "ls;rm -rf x",
+    "ls；rm -rf x",
+    "ls｜rm",
+    "ls rm",
+    "ls -la",
+    "ls　-la",
+    // zsh and bash operators Hotline does not model.
+    "ls &! rm",
+    "ls >! out.txt",
+    "ls |& wc",
+    "ls <> x",
+    "ls &",
+  ])("fails closed on the expansion or differential `%j`", (command) => {
+    expect(bash(command).risk).toBe("high");
+  });
+
+  it.each([
+    ".git/config",
+    ".git/hooks/pre-commit",
+    ".gitattributes",
+    ".gitmodules",
+    ".husky/pre-commit",
+    ".npmrc",
+    ".yarnrc.yml",
+    ".pnpmfile.cjs",
+    "package.json",
+    "packages/core/package.json",
+    "node_modules/.bin/vitest",
+    "bunfig.toml",
+  ])("treats writing repository config %s as high risk, even inside the project", (path) => {
+    const write = classifyPermission({ toolName: "Write", toolInput: { file_path: path }, cwd });
+    expect(write).toEqual({ risk: "high", reasons: ["touches credentials or agent settings"] });
+    expect(bash(`echo x > ${path}`).risk).toBe("high");
+    const patch = `*** Begin Patch\n*** Update File: ${path}\n*** End Patch\n`;
+    expect(classifyPermission({ toolName: "apply_patch", toolInput: { command: patch }, cwd }).risk).toBe(
+      "high",
+    );
+  });
+
+  it("still reads repository config as low risk; only writes are sensitive", () => {
+    expect(bash("cat package.json")).toEqual({ risk: "low", reasons: [] });
+    expect(bash("echo x > .gitignore")).toEqual({ risk: "low", reasons: [] });
+    expect(
+      classifyPermission({ toolName: "Edit", toolInput: { file_path: "src/package.ts" }, cwd }).risk,
+    ).toBe("low");
   });
 
   it.each([

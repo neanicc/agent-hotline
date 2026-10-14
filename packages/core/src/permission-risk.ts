@@ -9,6 +9,16 @@
 // with safe arguments. Anything else, including anything Hotline cannot parse,
 // is high. The denylist below only names the reasons the owner hears.
 //
+// The tokenizer accepts only what bash and zsh read the same way (no
+// expansions, substitutions, escapes or non-ASCII), and Hotline does not see the
+// shell's aliases or PATH, so this is a classification of the text, not a
+// sandbox. The allowlisted package scripts (`test`, `build`, `lint`,
+// `typecheck`) and git commands run project code and repository config: writing
+// that config (`.git/`, `package.json`, `node_modules/`, package-manager rc
+// files) is high risk, but a script the owner already let the agent edit runs
+// as low risk. What protects the owner there is that low risk still needs their
+// explicit "yes" to this command.
+//
 // It decides how much proof the owner gives. A low-risk request still needs the
 // owner's own "yes", and every failure denies.
 // Pure: no I/O, no Node modules. Paths are resolved as POSIX strings.
@@ -115,11 +125,31 @@ export function insideProject(cwd: string, path: string): boolean {
 const CREDENTIAL_PATH =
   /(?:^|[/\\\s'"=])(?:\.env(?:\.[\w.-]+)?|\.envrc|\.ssh|\.aws|\.gnupg|\.netrc|\.npmrc|\.pypirc|\.docker|\.kube|\.hotline|\.claude|\.codex|\.config\/gh|\.git\/(?:config|hooks)|\.gitattributes|id_rsa|id_ed25519|id_ecdsa|id_dsa|credentials?(?:\.\w+)?|secrets?(?:\.\w+)?|[\w.-]+\.(?:pem|key|p12|pfx|keystore|jks))(?=$|[/\\\s'"])|keychain/i;
 
+/**
+ * Files that make a later "read-only" command run code: git config, hooks and
+ * attributes (`core.fsmonitor`, diff and textconv drivers, hooks run by `git
+ * status`), package-manager config and lifecycle files, and installed binaries
+ * that `pnpm test` runs. Writing one is high risk even inside the project.
+ */
+const CODE_CONFIG_PATH =
+  /(?:^|\/)(?:\.git(?:\/|$)|\.gitattributes$|\.gitmodules$|\.husky(?:\/|$)|\.npmrc$|\.yarnrc(?:\.yml)?$|\.yarn(?:\/|$)|\.pnpmfile\.c?js$|bunfig\.toml$|package\.json$|node_modules(?:\/|$)|\.envrc$)/;
+
+/** The part of `path` that is judged: below the project root when inside it, else the whole path. */
+function judgedPart(cwd: string, path: string): string {
+  const root = projectRoot(cwd);
+  if (root === undefined || !insideProject(cwd, path)) return path;
+  return resolvePosix(root, path).slice(root.length);
+}
+
 /** Whether `path` names a credential or settings file. Inside the project only the part below it counts. */
 function credentialPath(cwd: string, path: string): boolean {
-  const root = projectRoot(cwd);
-  if (root === undefined || !insideProject(cwd, path)) return CREDENTIAL_PATH.test(path);
-  return CREDENTIAL_PATH.test(resolvePosix(root, path).slice(root.length));
+  return CREDENTIAL_PATH.test(judgedPart(cwd, path));
+}
+
+/** Whether writing `path` could make a later read-only command run code (see `CODE_CONFIG_PATH`). */
+function codeConfigPath(cwd: string, path: string): boolean {
+  const judged = judgedPart(cwd, path);
+  return CODE_CONFIG_PATH.test(judged.startsWith("/") ? judged : `/${judged}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -228,25 +258,43 @@ interface SimpleCommand {
 }
 
 /**
+ * Characters allowed outside quotes. Everything else (globs `* ? [ ]`, braces,
+ * `~`, `$`, backticks, backslashes, `!`, `^`, `#`, parentheses, non-ASCII
+ * characters such as lookalike separators) is something bash or zsh may expand
+ * or treat specially, so the command is not understood. `=` is allowed only
+ * inside a word: zsh expands a word that starts with `=` (`=cmd`).
+ */
+const UNQUOTED = /^[A-Za-z0-9_./:@%+,=-]$/;
+/** Refused anywhere, quoted or not: substitutions, escapes, and C0 and C1 control characters except tab and newline. */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are refused, not matched for display.
+const NEVER = /[`$\\\u0000-\u0008\u000b-\u001f\u007f-\u009f]/;
+
+/**
  * Splits a command line into simple commands on `;`, `&&`, `||`, `|` and
- * newlines, with single and double quotes. Returns undefined for anything it
- * does not fully understand: substitutions, variables, escapes, globs of
- * control characters, subshells, background jobs, here-documents, comments and
- * unbalanced quotes. Undefined always means high risk.
+ * newlines, with single and double quotes, the way both bash and zsh would.
+ * Returns undefined for anything it does not fully understand: substitutions,
+ * variables, escapes, expansions (globs, braces, `~`, zsh `=cmd`, `<1-10>`),
+ * history expansion, subshells, background jobs, here-documents, comments,
+ * control and non-ASCII characters, and unbalanced quotes. Single-quoted text
+ * may hold anything else; double-quoted text may not hold `!`. Undefined always
+ * means high risk.
  */
 export function splitShell(command: string): SimpleCommand[] | undefined {
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are refused, not matched for display.
-  if (/[`$\\\u0000-\u0008\u000b-\u001f\u007f]/.test(command)) return undefined;
+  if (NEVER.test(command)) return undefined;
   const commands: SimpleCommand[] = [];
   let current: SimpleCommand = { words: [], redirects: [] };
   let word = "";
   let inWord = false;
+  let quoted = false;
   let pending: string | undefined;
   let needsCommand = false;
+  let doubt = false;
 
   const endWord = (): boolean => {
     if (!inWord) return true;
     if (pending !== undefined) {
+      // zsh reads `<1-10>` and `<->` as a numeric glob, not a redirection.
+      if (pending === "<" && /^\d*-\d*$/.test(word)) doubt = true;
       if (pending === "dup" && !/^(?:\d+|-)$/.test(word)) current.redirects.push({ op: ">", target: word });
       else current.redirects.push({ op: pending, target: word });
       pending = undefined;
@@ -255,6 +303,7 @@ export function splitShell(command: string): SimpleCommand[] | undefined {
     }
     word = "";
     inWord = false;
+    quoted = false;
     return true;
   };
   const endCommand = (strict: boolean): boolean => {
@@ -276,8 +325,12 @@ export function splitShell(command: string): SimpleCommand[] | undefined {
     } else if (c === "'" || c === '"') {
       const close = command.indexOf(c, i + 1);
       if (close === -1) return undefined;
-      word += command.slice(i + 1, close);
+      const inside = command.slice(i + 1, close);
+      // `!` is history expansion inside double quotes in interactive bash and zsh.
+      if (c === '"' && inside.includes("!")) return undefined;
+      word += inside;
       inWord = true;
+      quoted = true;
       i = close;
     } else if (c === ";" || c === "\n") {
       if (!endCommand(false)) return undefined;
@@ -299,8 +352,8 @@ export function splitShell(command: string): SimpleCommand[] | undefined {
         return undefined;
       }
     } else if (c === ">" || c === "<") {
-      // A bare number right before the operator is a file descriptor (`2>`).
-      if (inWord && /^\d+$/.test(word)) {
+      // A bare, unquoted number right before the operator is a file descriptor (`2>`).
+      if (inWord && !quoted && /^\d+$/.test(word)) {
         word = "";
         inWord = false;
       } else {
@@ -318,14 +371,14 @@ export function splitShell(command: string): SimpleCommand[] | undefined {
       } else {
         pending = c;
       }
-    } else if (c === "(" || c === ")" || (c === "#" && !inWord)) {
-      return undefined;
-    } else {
+    } else if (UNQUOTED.test(c) && !(c === "=" && !inWord)) {
       word += c;
       inWord = true;
+    } else {
+      return undefined;
     }
   }
-  if (!endCommand(false) || needsCommand) return undefined;
+  if (!endCommand(false) || needsCommand || doubt) return undefined;
   return commands;
 }
 
@@ -375,8 +428,12 @@ const PACKAGE_SCRIPTS: ReadonlySet<string> = new Set(["test", "build", "lint", "
 /** An argument is safe when it is inside a known project and names no credential. */
 function safeArgument(arg: string, cwd: string): boolean {
   if (arg.startsWith("-")) {
-    const value = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : "";
-    return value === "" || safeArgument(value, cwd);
+    if (arg.includes("=")) return safeArgument(arg.slice(arg.indexOf("=") + 1), cwd);
+    // An option with a path-like value attached (`-f/home/u/.ssh/id_rsa`): the
+    // value must split cleanly off the option letters and be safe itself.
+    if (!/[/~]|\.\./.test(arg)) return true;
+    const attached = /^-[A-Za-z]+([/.].*)$/.exec(arg);
+    return attached?.[1] !== undefined && safeArgument(attached[1], cwd);
   }
   if (CREDENTIAL_PATH.test(arg) && credentialPath(cwd, arg)) return false;
   return insideProject(cwd, arg);
@@ -398,6 +455,7 @@ function readOnlyCommand({ words, redirects }: SimpleCommand, cwd: string): bool
     if (op === "dup") continue;
     if (target === "/dev/null") continue;
     if (!safeArgument(target, cwd) || target.startsWith("-")) return false;
+    if (op !== "<" && codeConfigPath(cwd, target)) return false;
   }
   const [name, ...args] = words;
   if (name === undefined || name.includes("/") || name.includes("=")) return false;
@@ -411,8 +469,8 @@ function readOnlyCommand({ words, redirects }: SimpleCommand, cwd: string): bool
     if (sub === "branch") return rest.every((arg) => GIT_BRANCH_LIST_OPTIONS.has(arg));
     // Revisions (`HEAD~2`, `main`) pass; anything that could be a path is checked like one.
     const pathLike = (arg: string) => /[/~]/.test(arg) || arg.startsWith(".") || CREDENTIAL_PATH.test(arg);
-    return rest.every(
-      (arg) => (arg.startsWith("-") && !arg.includes("=")) || !pathLike(arg) || safeArgument(arg, cwd),
+    return rest.every((arg) =>
+      arg.startsWith("-") ? safeArgument(arg, cwd) : !pathLike(arg) || safeArgument(arg, cwd),
     );
   }
   if (PACKAGE_MANAGERS.has(name)) {
@@ -472,7 +530,8 @@ function pathReasons(paths: readonly string[], cwd: string): RiskReason[] {
   for (const path of paths) {
     if (path.trim() === "") reasons.add("has input Hotline cannot read");
     else if (!insideProject(cwd, path)) reasons.add("writes outside the project");
-    if (credentialPath(cwd, path)) reasons.add("touches credentials or agent settings");
+    if (credentialPath(cwd, path) || codeConfigPath(cwd, path))
+      reasons.add("touches credentials or agent settings");
   }
   return [...reasons];
 }

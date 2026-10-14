@@ -84,19 +84,53 @@ arguments:
 | `git branch` | Listing only: `-a`, `-r`, `-l`, `-v`, `-vv`, `--list`, `--all`, `--remotes`, `--show-current`, `--no-color` |
 | `npm`, `pnpm`, `yarn`, `bun` | `test`, `build`, `lint` or `typecheck` (directly or after `run`), then only options, `--` and paths inside the project |
 
-Redirections are allowed only to `/dev/null`, to file descriptors (`2>&1`), or
-to and from paths inside the project. Anything else is high: any `$` (variables
-and `$(...)`), backticks, backslashes, subshells, `&` background jobs,
-here-documents, process substitution, comments, unbalanced quotes, `FOO=1 cmd`
-assignments, a command name with a slash (`/bin/rm`, `./x`), wrappers (`env`,
-`command`, `xargs`, `nohup`, `time`), and every command not in the table. The
-owner hears the matching reason from the table below, or "runs a command Hotline
-does not recognise as read-only" when none fits.
+The tokenizer accepts only text that bash and zsh read the same way. Claude Code
+and Codex may run commands under zsh on macOS.
 
-Running `test`, `build`, `lint` or `typecheck` runs the project's own scripts,
-which the agent may have edited; and a repository's git config can set external
-diff drivers. Writes to `.git/config`, `.git/hooks` and `.gitattributes` are high
-risk for that reason.
+- Outside quotes, only `A-Z a-z 0-9 _ . / : @ % + , - =` are allowed, with `=`
+  never at the start of a word (zsh `=cmd`). That rules out globs (`*`, `?`,
+  `[...]`), braces, `~`, `^`, `#`, `!`, parentheses and every non-ASCII
+  character, lookalike separators included.
+- Single-quoted text may hold anything else. Double-quoted text may not hold
+  `!` (history expansion).
+- `$` (variables, `$(...)`, ANSI-C `$'...'`), backticks and backslashes are
+  refused anywhere. So are C0 and C1 control characters other than tab and
+  newline (CR, NUL, DEL, ...).
+- zsh numeric globs (`<1-10>`, `<->`) are refused.
+
+Redirections are allowed only to `/dev/null`, to file descriptors (`2>&1`), or
+to and from paths inside the project.
+
+An option with a path-like value attached (`-f/path`, `--file=/path`) must split
+cleanly into option letters and a path that is itself safe; `head -c1/etc/x`
+does not, so it is high.
+
+Anything else is high, including:
+
+- subshells, `&` background jobs (and zsh `&!`, `|&`), here-documents and
+  process substitution;
+- `FOO=1 cmd` assignments, and a command name with a slash (`/bin/rm`, `./x`);
+- wrappers (`env`, `command`, `xargs`, `nohup`, `time`);
+- every command not in the table.
+
+The owner hears the matching reason from the table below, or "runs a command
+Hotline does not recognise as read-only" when none fits.
+
+**Project code still runs.** Allowlisted `test`, `build`, `lint` and `typecheck`
+scripts run the project's own code, and git commands honour repository config
+(`core.fsmonitor`, diff and textconv drivers, hooks). Writing any file that sets
+these is high risk ("touches credentials or agent settings"), even inside the
+project:
+
+- `.git/` (anything in it), `.gitattributes`, `.gitmodules`, `.husky/`;
+- `package.json`, `node_modules/`;
+- `.npmrc`, `.yarnrc*`, `.yarn/`, `.pnpmfile.cjs`, `bunfig.toml`, `.envrc`.
+
+Reading them stays low. Other project code the owner already approved an edit
+to (a test file, a build script it imports) runs as low risk. There the
+protection is that a low-risk request still needs the owner's explicit "yes" to
+the command they hear. Hotline also cannot see the shell's aliases or `PATH`.
+This is a classification of the command text, not a sandbox.
 
 **Unknown project.** When the session's `cwd` is empty, relative, `/`, a
 top-level directory such as `/tmp`, or a home directory (`/Users/<name>`,

@@ -669,6 +669,24 @@ Template:
   - The Stop hook rechecks away mode before continuing.
   - Every non-continuing Stop exit clears the count.
   - `hotline away` and `.hotline/` paths are high risk.
+- Second security review (coordinator, of f85b69b):
+  - Expansions were not modelled: `cat {/etc/passwd,x}` and `cat .e*` passed.
+    The tokenizer now allows only `[A-Za-z0-9_./:@%+,-]` and a non-leading `=`
+    outside quotes. Single quotes may hold anything else. Double quotes may not
+    hold `!`. `$`, backticks, backslashes and C0/C1 controls are refused
+    everywhere. zsh numeric globs (`<1-10>`) are refused.
+  - Attached option values (`grep -f/home/u/.ssh/id_rsa`, `head -c1/etc/x`)
+    are checked as paths, and are high when they do not split cleanly.
+  - Writes to `.git/`, `.gitattributes`, `.gitmodules`, `.husky/`,
+    `package.json`, `node_modules/` and package-manager rc files are high even
+    inside the project, because git and the allowlisted package scripts honour
+    them. Reads stay low.
+  - Package scripts stay low. The module comment and `docs/hooks.md` say they
+    run project code, and that the owner's explicit "yes" is the protection.
+  - Parser-differential tests cover each class: brace, glob, tilde, zsh `=cmd`,
+    numeric glob, qualifier, `^` and `#`, ANSI-C `$'..'`, double-quote `$`, `!`
+    and backticks, CR, NUL, other C0 and C1 controls, Unicode lookalike
+    separators and spaces, and `&!`, `>!`, `|&`, `<>`.
 - Daemon: `POST /v1/sessions/:id/asks` accepts `permission` (requires
   `toolName`, identifier characters up to 100, and `risk`) and `stop`; text and
   tool name are redacted before storage. Caps per session / total: permission
@@ -689,7 +707,7 @@ Template:
   fixtures README.
 - Evidence (worktree, Node 24.11.0):
   - `scripts/ci/run.sh setup`, `build` and `test` pass: 682 tests in 34 files
-    at ce62b97, and 766 after the security and review fixes.
+    at ce62b97, 766 at f85b69b, and 824 after the second security review.
   - The security fixes have a bypass test for each case the review listed,
     plus unknown-project, shortened-preview and reassuring-description tests.
     Earlier expectations only moved from low to high. Mutations: treating
