@@ -1208,7 +1208,7 @@ Template:
   - P2 (split the orchestrator before HL-10) and P3 (measure false "no answer"
     in the live check) stay follow-ups.
 
-## 2026-10-14 — HL-14b Persona reads each ask on its own turn (#PR)
+## 2026-10-14 — HL-14b Persona reads each ask on its own turn (#40)
 
 - Decision / change: the voice agent prompt now tells the model how to read
   asks so the daemon's voice confirmation (`voice-confirm.ts`) can match the
