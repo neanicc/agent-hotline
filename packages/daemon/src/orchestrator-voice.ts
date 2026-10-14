@@ -4,9 +4,10 @@
 //
 // A voice answer is never taken on the model's word: it is held until the
 // post-call transcript confirms it (`confirmVoiceDecision`: the owner's own
-// turns, after the ask was read and before the next one). Only confirmed
-// answers and `unclear` reports become queue events; everything else (no
-// pickup, a dropped call, a conflict, an unconfirmed answer) is no answer.
+// turns, after the ask was read and before the next one; an allow, the owner's
+// reply to the read-back). Only confirmed answers and `unclear` reports become
+// queue events; everything else (no pickup, a dropped call, a conflict, an
+// unconfirmed answer, an owner who stayed unclear) is no answer.
 import { Answer, type Ask, type QueueAction, type QueueEvent } from "@hotline/core";
 import type { PostCallEvent, VoiceAsk, VoiceProvider } from "@hotline/providers";
 import type { SubmitAnswerResult, VoiceAnswer } from "./elevenlabs-webhook.js";
@@ -19,10 +20,19 @@ import {
   type PendingVoiceAnswer,
 } from "./orchestrator-state.js";
 import type { HotlineStore } from "./store.js";
-import { confirmVoiceDecision, type ReadAsk } from "./voice-confirm.js";
+import { answerWindows, judgeVoiceDecision, type ReadAsk, type ReplyJudge } from "./voice-confirm.js";
 
 /** Rough cost of a call minute in US cents (Twilio voice plus ElevenLabs Agents), for `hotline doctor`. */
 export const CALL_CENTS_PER_MINUTE = 12;
+
+/**
+ * How a call ended, as the call log and audit record it: the queue's result, or
+ * `owner-unclear` for a call the queue sees as `dropped` where every ask left
+ * open was read and replied to, but no decision for it was confirmed (the owner
+ * stayed unclear and the voice agent moved on, or the answer could not be
+ * confirmed). The queue still gets `dropped`, which texts those asks.
+ */
+type CallResult = "answered" | "no-pickup" | "dropped" | "failed" | "owner-unclear";
 
 export interface VoiceCallsOptions {
   store: HotlineStore;
@@ -33,6 +43,13 @@ export interface VoiceCallsOptions {
   log: () => OrchestratorLog;
   /** Steps the queue with an event and everything it leads to. */
   process: (event: QueueEvent) => Promise<QueueAction[]>;
+  /**
+   * Judges an owner's reply to a read-back that the fast path could not
+   * decide. Default `FailClosedJudge`: such a reply is never an approval.
+   */
+  judge?: ReplyJudge;
+  /** How long to wait for `judge`; default `JUDGE_TIMEOUT_MS`. */
+  judgeTimeoutMs?: number;
 }
 
 function sameDecision(a: PendingVoiceAnswer["decision"], b: PendingVoiceAnswer["decision"]): boolean {
@@ -214,43 +231,63 @@ export class VoiceCalls {
     }
     const events: QueueEvent[] = [];
     let result: "answered" | "no-pickup" | "dropped" | "failed";
+    let logged: CallResult;
     if (event.type === "initiation-failure") {
       result = event.reason === "unknown" ? "failed" : "no-pickup";
+      logged = result;
     } else {
       const asks = call.askIds.map((askId) => this.#readAsk(askId));
-      let settled = 0;
-      call.askIds.forEach((askId, index) => {
+      const settledIds = new Set<string>();
+      // Every held decision is checked at once, so a slow judge costs one
+      // timeout per call, not one per ask.
+      const checks = new Map(
+        await Promise.all(
+          call.askIds.flatMap((askId, index) => {
+            const held = call.answers[askId];
+            if (held === undefined || held.conflict || held.decision === "unclear") return [];
+            const input = {
+              transcript: event.transcript,
+              asks,
+              index,
+              decision: held.decision,
+              ownerWords: held.ownerWords,
+            };
+            return [
+              judgeVoiceDecision(input, this.#options.judge, this.#options.judgeTimeoutMs).then(
+                (check) => [askId, check] as const,
+              ),
+            ];
+          }),
+        ),
+      );
+      for (const askId of call.askIds) {
         const held = call.answers[askId];
-        if (held === undefined) return;
+        if (held === undefined) continue;
         if (held.conflict) {
           this.#store.appendAudit("voice.answer-conflict", {}, receivedAt, { askId, callId: call.callId });
-          return;
+          continue;
         }
         if (held.decision === "unclear") {
           events.push({ type: "unclear", askId });
-          settled += 1;
-          return;
+          settledIds.add(askId);
+          continue;
         }
-        const check = confirmVoiceDecision({
-          transcript: event.transcript,
-          asks,
-          index,
-          decision: held.decision,
-          ownerWords: held.ownerWords,
-        });
+        const check = checks.get(askId);
+        if (check === undefined) continue;
         if (!check.confirmed) {
           this.#store.appendAudit("voice.answer-unconfirmed", { reason: check.reason }, receivedAt, {
             askId,
             callId: call.callId,
           });
-          if (held.decision.type === "deny") {
+          if (held.decision.type === "deny" || check.declined === true) {
             // A refusal takes effect even unconfirmed: nothing is recorded as the
             // owner's words, but the request ends now as no answer (a deny), and is
-            // never sent out again for approval.
+            // never sent out again for approval. So does an allow the owner said
+            // no to at its read-back.
             events.push({ type: "unclear", askId });
-            settled += 1;
+            settledIds.add(askId);
           }
-          return;
+          continue;
         }
         events.push({
           type: "answer",
@@ -264,10 +301,27 @@ export class VoiceCalls {
             answeredAt: held.answeredAt,
           },
         });
-        settled += 1;
-      });
+        settledIds.add(askId);
+      }
       const ownerSpoke = event.transcript.some((turn) => turn.role === "owner");
-      result = !ownerSpoke ? "no-pickup" : settled === call.askIds.length ? "answered" : "dropped";
+      const open = call.askIds.flatMap((askId, index) => (settledIds.has(askId) ? [] : [{ askId, index }]));
+      result = !ownerSpoke ? "no-pickup" : open.length === 0 ? "answered" : "dropped";
+      // An open ask the owner replied to after it was read and again after it
+      // was asked again (a read-back, "is that a yes or a no?", or a
+      // re-reading) stayed unclear: it was heard, not cut off. It is texted
+      // all the same. One reply to one reading is not enough to say so.
+      const unclear = open.filter(
+        ({ index }) =>
+          (answerWindows(event.transcript, asks, index) ?? []).filter((window) =>
+            window.some((turn) => turn.role === "owner"),
+          ).length >= 2,
+      );
+      if (result === "dropped") {
+        for (const { askId } of unclear) {
+          this.#store.appendAudit("voice.ask-unclear", {}, receivedAt, { askId, callId: call.callId });
+        }
+      }
+      logged = result === "dropped" && unclear.length === open.length ? "owner-unclear" : result;
     }
     events.push({ type: "call-ended", callId: call.callId, result });
     // The call stays live (with its held answers) until every event is applied:
@@ -276,7 +330,7 @@ export class VoiceCalls {
     for (const next of events) await this.#options.process(next);
     this.#state.data.calls = this.#state.data.calls.filter((other) => other !== call);
     this.#state.save();
-    this.#recordCall(call, event, result, receivedAt);
+    this.#recordCall(call, event, logged, receivedAt);
   }
 
   #readAsk(askId: string): ReadAsk {
@@ -285,6 +339,7 @@ export class VoiceCalls {
     return {
       text: ask?.text ?? "",
       nickname,
+      ...(ask === undefined ? {} : { kind: ask.kind }),
       options: ask?.options ?? [],
       ...(ask?.toolName === undefined ? {} : { toolName: ask.toolName }),
     };
@@ -293,7 +348,7 @@ export class VoiceCalls {
   #recordCall(
     call: LiveCall,
     event: Exclude<PostCallEvent, { type: "other" }>,
-    result: string,
+    result: CallResult,
     endedAt: Date,
   ): void {
     const duration = event.type === "transcription" ? (event.durationSeconds ?? 0) : 0;
@@ -309,7 +364,7 @@ export class VoiceCalls {
         },
         askIds: call.askIds,
         outcome:
-          result === "answered" || result === "dropped"
+          result === "answered" || result === "dropped" || result === "owner-unclear"
             ? "answered"
             : result === "failed"
               ? "failed"

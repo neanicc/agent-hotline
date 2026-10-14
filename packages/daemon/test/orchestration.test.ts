@@ -114,7 +114,7 @@ describe("ask, call, answer, delivery", () => {
 
     h.voice.script(
       scriptedHuman.says(
-        { kind: "answer", ask: 1, decision: "allow", words: "yes, start it" },
+        { kind: "read-back", ask: 1, words: "sure", reply: "yes, start it", decision: "allow" },
         { kind: "answer", ask: 2, decision: "text", text: "wait for QA", words: "wait for QA" },
       ),
     );
@@ -331,7 +331,7 @@ describe("permission approvals by risk class", () => {
     await h.advance(BATCH_MS);
     h.voice.script(
       scriptedHuman.says(
-        { kind: "answer", ask: 1, decision: "allow", words: "yes go ahead" },
+        { kind: "read-back", ask: 1, words: "sure", reply: "yes go ahead", decision: "allow" },
         { kind: "answer", ask: 2, decision: "deny", words: "no, leave the build folder" },
       ),
     );
@@ -359,7 +359,7 @@ describe("permission approvals by risk class", () => {
     h.voice.script(
       scriptedHuman.says(
         { kind: "pin", digits: PIN },
-        { kind: "answer", ask: 1, decision: "allow", words: "yes push it" },
+        { kind: "read-back", ask: 1, words: "yes push it", reply: "yes", decision: "allow" },
       ),
     );
     await h.voice.playPending();
@@ -457,7 +457,7 @@ describe("decisions come only from the owner's words, in order", () => {
     await h.advance(BATCH_MS);
     h.voice.script(
       scriptedHuman.says(
-        { kind: "answer", ask: 2, decision: "allow", words: "yes" },
+        { kind: "read-back", ask: 2, words: "sure", reply: "yes", decision: "allow" },
         { kind: "answer", ask: 1, decision: "allow", words: "yes", spoken: null },
       ),
     );

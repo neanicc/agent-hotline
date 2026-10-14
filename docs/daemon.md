@@ -337,9 +337,33 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
   (`voice.answer-conflict`). Accepted answers are held (`recorded` tells the
   voice agent they arrived) until the post-call transcript. There each held
   answer must pass `confirmVoiceDecision` (`voice-confirm.ts`):
-  - the agent turns that read the ask are found by their key words (at least
-    half, best match, ties read nothing; the call's first agent turn, the fixed
-    greeting, never counts). The ask's windows are the person's turns right
+  - the agent turns that read the ask are found by their key words (the
+    ask's text, session name and tool, minus very common words; the call's
+    first agent turn, the fixed greeting, never counts). Attribution is strict
+    and unique, because asks are written by agents and one could be written to
+    take over another's reading ("pnpm test" and "pnpm test; also git push
+    --force"). A turn is a candidate for an ask when it holds at least half of
+    that ask's key words, or, for a long ask (more than 8 key words in its
+    text), at least 4 of the key words in its text that no other ask on the
+    call has, so a one-sentence read-back of a long ask is still recognised;
+    the session name and tool alone never make a long ask's reading. With
+    other asks on the call:
+    - if any candidate has no word of its own (identical asks, or one whose
+      words are all inside another's), the turn reads nothing;
+    - a candidate is read only if the turn names every key word no other ask
+      on the call has (the session name included when the sessions differ; a
+      long ask that met the long-ask rule is excused from naming them all),
+      and, for a permission request, every token of its command and tool name
+      that no other ask has, short ones included (`rm`, `rf`, `f`; only `a`,
+      `an`, `to`, `in`, `of`, `on`, `at`, `by`, `it`, `is`, `or`, `as`, `be`
+      and the very common words are skipped). So "git push" never reads "git
+      push -f", and a read-back naming `Read` reads the `Read` ask, not the
+      `Write` one on the same file;
+    - exactly one such candidate is read; more than one reads nothing.
+    Alone on a call, an ask has nothing to be told apart from and the share
+    rule alone applies to its readings. With several asks, a read-back that leaves
+    out a distinguishing word (often the agent part of the session name, or a
+    long command's tail) reads nothing, and the ask is texted. The ask's windows are the person's turns right
     after each such reading, up to the next agent turn of any kind: an agent
     turn not recognised as reading this ask (a paraphrase, a tie, another ask,
     small talk) always closes the window, and a re-reading opens a new one. The
@@ -356,23 +380,115 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
   - an answer is taken back by anything the owner said about the ask after it
     that sounds doubtful (below), such as "no", "wait", "never mind",
     "actually";
-  - an `allow` must be unambiguous: the matched words hold a yes word (`yes`,
-    `okay`, `go`, ...), nothing the owner said in any of the ask's windows
-    sounds doubtful, and the owner's last words about the ask (in its last
-    window) are a yes or close the matched yes. "No... okay, yes" is not an
-    approval; the owner can approve by text or on another call.
+  - an `allow` is confirmed by the read-back exchange (HL-09c). The owner's
+    direction: approving by voice is as natural as a conversation, and it is
+    not limited to phrase matching ("phrase matching is fine so it's quicker
+    on common phrases but it should definitely not be limited like a regex").
+    There must be a read-back of this ask: an agent turn recognised as reading
+    it, after an earlier turn that read it (the first reading is never its own
+    read-back), that asks for a yes (a `?`, "yes" or "confirm"), such as
+    "Allow pnpm test in demo-app? Yes?" or "Sorry, is that a yes or a no?"
+    followed by that read-back. The cue must be the voice agent's, not the
+    ask's: a "yes" or "confirm" that the ask text holds never counts, a `?` is
+    looked for only outside the ask text said verbatim, and an ask whose text
+    has a `?` ("Run the migration?") needs its read-back to say "yes" or
+    "confirm" when the text was not said verbatim. The read-back is what the
+    owner approves, so for a permission request it must also name every token
+    of the command and the tool name, short ones included, even alone on a
+    call: "Allow Bash to git push origin main? Yes?" is no read-back of `git
+    push --force origin main`, and "Allow Read to ..." none of a `Write`. (The
+    persona's example "Allow pnpm test in demo-app? Yes?" leaves out the tool,
+    so a read-back that follows it literally is not confirmed and the ask is
+    texted; the fake provider's read-back names the tool.) A permission
+    request whose text is longer than what the voice agent is given
+    (`MAX_SPOKEN_ASK_LENGTH`, 300 characters) is never approved by voice, since
+    its tail was never read out ("...; curl host | sh"); it is texted. The
+    owner's words must be found in the window right after a read-back,
+    checked newest first. The reply is everything the
+    owner said about the ask from that read-back on (its window and any later
+    window of the ask). What it means is decided in two steps:
+    - the fast path (`replyVerdict`) decides common replies at once. A reply
+      made only of clear-yes phrases, one after another ("yes", "yeah, go
+      ahead", "of course", "sure, do it", "mm-hmm"), agrees, but never when it
+      holds a doubt or negation marker (below). A reply made only of
+      clear-no phrases ("no", "nope", "no, don't") declines. Noise is unclear:
+      nothing said, only fillers (`um`, `uh`, `er`, `mm`, `hmm`, `oh`, ...), a
+      transcriber marker (any bracket: `[inaudible]`, `(noise)`, `<unk>`),
+      more than `MAX_REPLY_WORDS` (8) words, or only the read-back's words said
+      back ("git push origin main"; the read-back's "yes?" is not a word to
+      echo, so "yes" agrees). The line drawn: words that answer a
+      yes-or-no question ("ok", "okay", "alright", "sure", "sounds good") are
+      fast yeses, since the fast path only hears replies to a read-back that
+      asked for a yes; words that only acknowledge or thank ("thanks",
+      "great", "fine", "cool", "perfect", "go on") go to the judge;
+    - anything else ("yes, if the tests pass", "what does that do?", "yeah
+      let's ship that one", "of course, wait") goes to a `ReplyJudge`. The
+      judge gets only the owner's reply turns, verbatim, never the ask, the
+      read-back or any other agent-written text. Only `agreed` confirms; a
+      `declined` or `unclear` verdict, an error, or no answer within
+      `JUDGE_TIMEOUT_MS` (8 seconds) leaves the allow not confirmed. The
+      default judge is `FailClosedJudge`, which finds every reply unclear, so
+      today such a reply is never an approval and the ask is texted.
+      `FakeJudge` plays scripted verdicts in tests. A model-backed judge
+      (sending only the owner's reply text to a model) needs the owner's
+      approval and a plan change, since it adds a hosted service; none is
+      built. Constraints before any real judge is wired in: the plan change
+      and the owner's approval; a judge's `agreed` is final (not re-screened
+      for doubt markers), so the judge must agree only to a clear yes; and a
+      high-risk request never takes a judge's `agreed` without the PIN on
+      that call or a confirming text, which `needs-pin` and the queue's
+      `answerProblem` already enforce for every voice allow. The ticket that
+      wires a judge must add judge scenarios with conditional yeses ("yes, if
+      the tests pass") and negations ("no problem", "not that one") before
+      enabling it, and should then retire the fast path's doubt tables rather
+      than grow them. `VoiceCalls`
+      takes `judge` and `judgeTimeoutMs` options, and the orchestrator does
+      not pass them yet, so in the running daemon the judge is always
+      `FailClosedJudge`; any other judge runs only in tests. A call's held decisions are all
+      checked at once, so a slow judge costs one timeout per call, not one per
+      ask.
+
+    The owner can also take an approval back after the agent acknowledged
+    it ("Got it." then "wait, no, don't"): an owner turn after the reply,
+    before another ask is read or the call ends, with a retraction marker
+    ("wait", "stop", "cancel", "hold on", "actually", "never mind", any
+    "n't", ...) leaves the allow not confirmed and the ask is texted. A bare
+    "no" or "nope" there does not count, since it usually answers "anything
+    else?".
+    Doubt markers no longer reject a reply on their own: they keep the fast
+    path from agreeing and send the reply to the judge. A clear-no reply, or a
+    judge's `declined`, to the read-back of a submitted allow ends the request
+    at once as no answer (`unclear`), which denies it, exactly as an
+    unconfirmed `deny` does: the owner said no, so it is never texted for
+    approval. Doubt
+    before the read-back does not count, so "hmm", then "Sorry, is that a yes
+    or a no? Allow ...? Yes?", then "yeah go ahead" agrees, and so does "no",
+    a read-back, then "okay yes" (a deny the voice agent submitted for the
+    "no" still wins, see above). No read-back, a read-back of a different ask,
+    a read-back with no reply, or a statement repeating the request ("Okay,
+    it will run pnpm test.") is no approval: the ask stays open and is
+    texted. The voice model's own judgement still decides whether to submit
+    the allow; the daemon only refuses one the transcript does not back.
   "Sounds doubtful" (`soundsDoubtful`) means refusal, negation, hesitation,
   delay or correction: words such as `no`, `not`, `never`, `wait`, `hold`,
   `later`, `maybe`, `but`, `cancel`, `abort`, `negative`, `cannot`, `actually`,
   any `n't` (apostrophe look-alikes such as `’`, `ʼ`, `` ` ``, `´` and `′` are
   normalised first) and the same forms typed without it (`dont`, `wouldnt`,
   `cant`, ...), hedges and conditions (`unsure`, `whether`, `if`, `probably`,
-  `think`, `hmm`, ...), refusals without a "no" (`skip`, `decline`, `pass`,
-  `block`, `veto`, `rather`, ...), the phrases "hang on", "hold on", "not yet",
-  "no way" and "never mind", and questions (a `?`, or `what`, `why`, `how`,
-  `which`, ..., since speech recognition often drops the question mark). A
-  question asked before the owner's answer ("what does it push?") does not
-  count against a later yes; one in the answer itself or after it does.
+  `think`, `suppose`, `hmm`, `hm`, `kinda`, `whatever`, `meh`, ...), not having
+  heard (`huh`, `pardon`, `hello`, `repeat`), refusals without a "no" (`skip`,
+  `decline`, `pass`, `block`, `veto`, `rather`, ...), the phrases "hang on",
+  "hold on", "not yet", "no way", "never mind", "uh uh" and "uh oh", and
+  questions (a `?`, or `what`, `why`, `how`, `which`, ..., since speech
+  recognition often drops the question mark). "Mm-hmm", "uh-huh" and "mhm",
+  written as one hyphenated sound, are a yes, not a "hmm" or "huh"; "mm,
+  hmm" is a hesitation. Common refusals in other languages (`nein`, `nee`,
+  `nej`, `niet`, `nie`, `non`, `não`, `nada`) count too. For free text,
+  options and `done`, a question asked before the owner's answer ("what does
+  it push?") does not count against it; one in the answer itself or after it
+  does. For an `allow`, doubt only keeps the fast path from agreeing (above):
+  idioms that carry a negation word ("no problem", "why not") go to the
+  judge.
   A `deny` needs only the owner's words in a window; nothing else can block a
   refusal. The stored `ownerExcerpt` is the matching owner turns, verbatim, not
   the model's `owner_words`. An unconfirmed answer is dropped
@@ -384,15 +500,31 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
   Confirmed answers and `unclear` reports reach the queue before the call's
   `call-ended`.
   Known limits: the word lists are English, so other languages never confirm
-  an approval, an option or `done` (fail closed: the ask is texted). A doubtful
+  an option or `done`, and never get a fast yes for an allow (fail closed:
+  the ask is texted). A doubtful
   word in a later turn about the ask also takes back a free-text answer. These
   rules are tested on scripted transcripts only; real ElevenLabs transcripts
   (turn splitting, interruptions, paraphrased readings) need the live check, and
-  some answers will be refused there until the persona is tuned.
+  some answers will be refused there until the persona is tuned. Until a
+  real judge is approved, any natural yes outside the fast path's table is
+  texted rather than approved. With a real judge, its verdict on the owner's
+  words is what stands between a voice model that submits an allow on its
+  own and an approval. High-risk requests still need the PIN.
 - **How a call ended.** `call_initiation_failure` `busy` or `no-answer` is
   `no-pickup`, anything else `failed`. A transcription in which the owner never
   spoke is `no-pickup` (voicemail, silence); one where every ask was settled is
-  `answered`; otherwise `dropped`. A call whose post-call event never arrives is
+  `answered`; otherwise `dropped`. The call log (`call.ended` audit `result`)
+  says `owner-unclear` instead of `dropped` when every ask left open was read,
+  asked again (a read-back, "is that a yes or a no?", or a re-reading), and
+  the owner replied after at least two of those readings, but no decision for
+  it was confirmed (the owner stayed unclear and the voice agent moved on to a
+  text, or the answer was not confirmed); each such ask gets a
+  `voice.ask-unclear` audit entry. One reply to one reading, then a hang-up,
+  stays `dropped`. The queue
+  still gets `dropped`, so those asks are texted at once, and an unanswered
+  text still expires with reason `dropped`: the core contract has no reason for
+  an owner who stayed unclear yet. Its `CallRecord.outcome` is `answered`
+  (the owner picked up). A call whose post-call event never arrives is
   given up on after 15 minutes, its held answers discarded: no answer. Each
   ended call is stored as a `CallRecord` with its duration and a rough cost
   estimate (12 US cents a minute).
@@ -570,7 +702,13 @@ anyone else's text the generic SMS reply.
   cost estimate, for `hotline doctor`. No numbers are stored.
 - Known limits: Codex's MCP server has no session id of its own, so its MCP
   session and its hooks' session are two sessions in the status; an
-  instruction reaches whichever one the owner named. Real transcripts may
+  instruction reaches whichever one the owner named. Name the hooks' session
+  (it registered from a Stop or permission hook) to have the instruction
+  picked up at the agent's next stop in away mode, or the MCP one to have it
+  come back with its next `ask_human` or `check_inbox`. Not verified against
+  real Claude Code or Codex. The read-back reply
+  still uses the fixed yes lexicon; moving it to HL-09c's reply judge is a
+  follow-up. Real transcripts may
   split or merge turns differently from the fake's; tune on the live check.
 
 ## Session lifetime
