@@ -190,6 +190,12 @@ export function buildWebhookServer({ log, routes = [] }: WebhookServerOptions): 
       }
     },
   );
+  // JSON webhook bodies stay raw text: a verifier checks an HMAC over the exact
+  // bytes, and the route parses the JSON only after verification.
+  app.removeContentTypeParser("application/json");
+  app.addContentTypeParser("application/json", { parseAs: "string" }, (_request, body, done) => {
+    done(null, body);
+  });
 
   void app.register(
     async (hooks) => {

@@ -4,12 +4,13 @@ import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { twilioSignature } from "@hotline/providers";
+import { postCallSignatureHeader, twilioSignature } from "@hotline/providers";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   type Daemon,
   daemonPorts,
   FileSecretStore,
+  hashPin,
   hotlinePaths,
   nextShutdownSignal,
   type RunDaemonOptions,
@@ -201,6 +202,94 @@ describe("runDaemon", () => {
     const text = lines.join("");
     expect(text).not.toContain(authToken);
     expect(text).not.toContain("5555550199");
+  });
+
+  it("leaves the ElevenLabs routes off until the agent and secrets are configured", async () => {
+    await writeConfig();
+    const { daemon, exit } = await launch();
+    const response = await send({
+      port: daemon.hooksPort,
+      method: "POST",
+      path: "/hooks/el/tools/verify_pin",
+      headers: { "content-type": "application/json", "x-hotline-tool-secret": "anything" },
+      body: "{}",
+    });
+    expect([response.status, response.body]).toEqual([403, ""]);
+    signals.emit("SIGTERM");
+    expect(await exit).toBe(0);
+    const off = lines
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .find((e) => e.msg === "voice webhooks off");
+    expect(off).toMatchObject({ reason: "voice.agentId is not set" });
+  });
+
+  it("serves the ElevenLabs routes with the PIN check when configured, recording answers by kind only", async () => {
+    const publicUrl = "https://hotline.example.test";
+    const toolSecret = "fake-elevenlabs-tool-secret-run";
+    const webhookSecret = "fake-elevenlabs-webhook-secret-run";
+    const pinHash = await hashPin("4821");
+    await writeConfig({
+      ...CONFIG,
+      owner: { phoneNumber: OWNER, pinHash },
+      voice: { agentId: "agent_fake" },
+      tunnel: { publicUrl },
+    });
+    const secrets = new FileSecretStore(paths().secrets);
+    await secrets.set("elevenlabs.toolSecret", toolSecret);
+    await secrets.set("elevenlabs.webhookSecret", webhookSecret);
+    const { daemon, exit } = await launch();
+
+    const tool = (name: string, body: Record<string, unknown>, secret = toolSecret) =>
+      send({
+        port: daemon.hooksPort,
+        method: "POST",
+        path: `/hooks/el/tools/${name}`,
+        headers: { "content-type": "application/json", "x-hotline-tool-secret": secret },
+        body: JSON.stringify({
+          conversation_id: "conv_run",
+          caller_id: "+15555550101",
+          called_number: OWNER,
+          ...body,
+        }),
+      });
+    expect((await tool("verify_pin", { pin: "4821" }, "wrong")).status).toBe(403);
+    expect(JSON.parse((await tool("verify_pin", { pin: "4821" })).body)).toMatchObject({ verified: true });
+    const answer = await tool("submit_answer", {
+      ask_number: 1,
+      decision: "allow",
+      owner_words: "yes go ahead",
+    });
+    expect(JSON.parse(answer.body)).toEqual({ result: "not-recorded" });
+    const raw = JSON.stringify({
+      type: "call_initiation_failure",
+      event_timestamp: NOW.getTime() / 1000,
+      data: { agent_id: "agent_fake", conversation_id: "conv_run2", failure_reason: "busy" },
+    });
+    const posted = await send({
+      port: daemon.hooksPort,
+      method: "POST",
+      path: "/hooks/el/post-call",
+      headers: {
+        "content-type": "application/json",
+        "elevenlabs-signature": postCallSignatureHeader(webhookSecret, NOW.getTime() / 1000, raw),
+      },
+      body: raw,
+    });
+    expect(posted.status).toBe(200);
+
+    signals.emit("SIGTERM");
+    expect(await exit).toBe(0);
+    const db = new DatabaseSync(paths().database, { readOnly: true });
+    const audit = db.prepare("SELECT event, detail FROM audit WHERE event LIKE 'voice.%' ORDER BY seq").all();
+    db.close();
+    expect(audit).toEqual([
+      { event: "voice.answer", detail: JSON.stringify({ decision: "allow", recorded: false }) },
+      { event: "voice.initiation-failure", detail: JSON.stringify({ reason: "busy" }) },
+    ]);
+    const text = lines.join("");
+    expect(text).not.toContain(toolSecret);
+    expect(text).not.toContain("4821");
+    expect(text).not.toContain("yes go ahead");
   });
 
   it("reuses the stored token across restarts", async () => {

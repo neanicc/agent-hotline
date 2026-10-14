@@ -54,6 +54,8 @@ fails closed in three places:
    UTF-8, an unsupported content type, over 256 KiB) gets `403`, not a 4xx that
    would show the route exists. Form bodies are parsed strictly by
    `parseFormBody`, which keeps repeated names so a verifier can refuse them.
+   JSON bodies are not parsed here: they stay raw text, so a verifier can check
+   an HMAC over the exact bytes, and the route parses them after verification.
 3. After parsing, the verifier runs. Anything other than a literal `true`
    (`false`, a truthy value, a throw or a rejected promise) gets `403`.
 
@@ -62,7 +64,7 @@ tell a missing route from a bad signature or a malformed body. A rejected reques
 is logged with its method, path and reason (`no verifier`, `precheck failed`,
 `unreadable request`, `verification failed`) only, never its body, headers or
 query string. Paths outside `/hooks` get `404`. Routes are added through
-`startDaemon({ webhookRoutes })`; HL-08 adds the ElevenLabs ones.
+`startDaemon({ webhookRoutes })`.
 
 ### Twilio SMS (`POST /hooks/twilio/sms`)
 
@@ -106,6 +108,60 @@ the `twilio.accountSid` and `twilio.authToken` secrets exist. Otherwise it logs
 Until call orchestration (HL-09) answers asks by text, an owner's text is
 recorded in the audit log as `sms.received` with its SID and reply type
 (`yes`, `option`, `status`, ...), not its words, and gets no reply.
+
+### ElevenLabs (`/hooks/el/*`)
+
+`elevenLabsRoutes` (`elevenlabs-webhook.ts`) serves the voice agent's four
+server tools and the post-call webhook. `runDaemon` registers them only when
+`voice.provider` is `elevenlabs`, `voice.agentId` and `tunnel.publicUrl` are set,
+and the `elevenlabs.toolSecret` and `elevenlabs.webhookSecret` secrets exist.
+Otherwise it logs `voice webhooks off` with the reason and the paths stay a
+`403`. The tool definitions that point ElevenLabs at these URLs are in
+`@hotline/providers` (`hotlineToolConfigs`; see [contracts](contracts.md#voice-providers)).
+
+**Server tools** (`POST /hooks/el/tools/<name>`):
+
+- **Precheck:** an `x-hotline-tool-secret` header and a JSON content type, or
+  `403` before the body is read.
+- **Verify:** the header must equal `elevenlabs.toolSecret`, compared in
+  constant time (both sides hashed with SHA-256). An empty secret never matches.
+- **Owner on the call:** the body's `caller_id` or `called_number`, which
+  ElevenLabs fills from `system__caller_id` and `system__called_number`, must be
+  `owner.phoneNumber`. Otherwise the answer is `{"result": "refused",
+  "end_call": true}` and no handler runs. The voice model cannot set these
+  fields: they are dynamic-variable parameters, not model-filled ones.
+- A verified request whose JSON or fields do not parse gets `{"result": "invalid"}`.
+
+| Tool | What the route does |
+| --- | --- |
+| `verify_pin` | Checks the PIN with the `PinGate`: 2 wrong PINs per call, then `end_call: true` and no further checks on that call; 6 wrong PINs across all calls in a rolling hour lock every check, the right PIN included, until the hour has passed. Answers `{verified, attempts_left, end_call}`. A verified PIN is registered with the redactor (`addShortSecret`). The PIN is checked against `owner.pinHash` with scrypt and never logged or stored |
+| `submit_answer` | Passes the ask number, decision (`option`, `allow`, `deny`, `text`, `done` or `unclear`), the owner's words and the call ids to the `submitAnswer` handler. `confirmation` is `pin` only when this call passed `verify_pin`; nothing in the request can set it |
+| `get_status` | `{"result": "pin-required"}` until this call passed `verify_pin`. Then the `getStatus` handler's text, redacted and cut to 1500 characters |
+| `send_instruction` | `pin-required` until this call passed `verify_pin`. Then the `sendInstruction` handler gets the session number, instruction and the owner's words |
+
+**Post-call webhook** (`POST /hooks/el/post-call`):
+
+- **Precheck:** an `ElevenLabs-Signature` header and a JSON content type.
+- **Verify:** `t=<seconds>,v0=<hex HMAC-SHA256(webhookSecret, "<t>.<raw body>")>`,
+  the algorithm of ElevenLabs' SDK, compared in constant time over the raw body.
+  A timestamp more than 30 minutes old or 5 minutes ahead fails.
+- **Once per event:** a `post_call_transcription` or `call_initiation_failure`
+  for a conversation is handled once. A replay, or a retry after success, gets
+  `200` and is ignored, whatever its signature header looks like. Events are
+  remembered for 35 minutes, past the signature's age limit. A failed handler
+  leaves the event unhandled, so ElevenLabs' retry gets through. Durable replay
+  protection is HL-13.
+- Events for another agent id and other webhook types (such as
+  `post_call_audio`) get `200` and are ignored. Do not enable audio webhooks:
+  bodies over 256 KiB are refused.
+- **Logs:** tool name and result, event kind. Never bodies, words, transcripts,
+  PINs or numbers.
+
+Until call orchestration (HL-09) and the inbound line (HL-10) provide the
+handlers, `runDaemon` records `voice.answer` (decision kind only),
+`voice.instruction` and `voice.<event>` in the audit log, answers
+`not-recorded` and `unknown-session`, and reads out no status. The PIN check
+and its limits are live.
 
 ## Store
 
