@@ -332,8 +332,10 @@ function applyEvent(ctx: Context, event: QueueEvent): string | undefined {
  */
 function callMe(ctx: Context): string | undefined {
   const { s, settings, t } = ctx;
-  // A call already given up on does not hold the owner's request back.
+  // A call already given up on does not hold the owner's request back. (`step` runs this
+  // again afterwards; with the call gone, that second run does nothing.)
   giveUpStuckCall(ctx);
+  if (s.call !== undefined) return "a call is already in progress";
   const asks = s.open
     .filter(
       (q) =>
@@ -344,7 +346,6 @@ function callMe(ctx: Context): string | undefined {
     )
     .sort((a, b) => comparePriority(a.ask, b.ask));
   if (asks.length === 0) return "no open asks to call about";
-  if (s.call !== undefined) return "a call is already in progress";
   if (!rateLimitAllows(s.callTimes, callLimit(settings), t)) {
     return "over the call limit; open asks keep going by text";
   }

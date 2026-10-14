@@ -311,7 +311,12 @@ Rules:
   answer; each ask on that call still needs the owner's own words. When the call
   ends with an ask that was texted before it still open, the ask goes back to
   awaiting its text reply (no retry, no second text); an ask that was never texted
-  follows the usual no-pickup rules.
+  follows the usual no-pickup rules. A call-me call counts as a call attempt for
+  each ask on it, so it uses up automatic retries (`DEFAULT_MAX_CALL_ATTEMPTS`)
+  like any other call. The queue has no call-me cooldown beyond the call limit and
+  the one-call-at-a-time rule; the daemon must deliver each inbound text once
+  (dedupe on the provider message id), so a redelivered webhook cannot place a
+  second call.
 - **Rate limits** count over a rolling hour and a rolling 24 hours; a send stamped
   after `now` (the clock moved back) still counts. With no call
   left, a due ask is texted; with no text left either, it waits for a slot or its

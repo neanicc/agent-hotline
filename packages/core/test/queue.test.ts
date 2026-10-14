@@ -548,6 +548,14 @@ describe("call me", () => {
     ]);
     expect(h.state.call?.askIds).toEqual(["q1"]);
     expect(h.state.callTimes).toHaveLength(1);
+
+    // The reason is the live call even when every open ask is already on it.
+    const busy = new Harness(settings);
+    busy.ask({ id: "q1" });
+    busy.advance(20 * SECOND);
+    expect(busy.send(callMe)).toEqual([
+      { type: "ignored", event: "call-me", reason: "a call is already in progress" },
+    ]);
   });
 
   it("hangs up a call already given up on as stuck, then calls", () => {

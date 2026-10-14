@@ -415,5 +415,13 @@ Template:
   keep a stuck call blocking, retry or re-text an already texted ask);
   each made the tests fail. `scripts/ci/run.sh eval` is not built yet (HL-12);
   no real agent or live call evidence applies.
+- Review fixes (bot staff review): a `call-me` during a live call now always
+  reports "a call is already in progress", even when every open ask is on that
+  call. `docs/contracts.md` states that a call-me call counts as a call attempt
+  (it uses up automatic retries) and that the queue has no call-me cooldown beyond
+  the call limit and one call at a time. Repeated owner texts after a call ended
+  are honored as fresh requests; a redelivered webhook is the daemon's to dedupe
+  by message id.
 - Open issues or follow-ups: HL-07 parses `call me` from a text and HL-09 maps it
-  to this event and turns its ignore reasons into owner replies.
+  to this event, dedupes inbound texts by message id, and turns the ignore
+  reasons into owner replies.
