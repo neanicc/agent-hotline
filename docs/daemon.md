@@ -435,7 +435,11 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
       for doubt markers), so the judge must agree only to a clear yes; and a
       high-risk request never takes a judge's `agreed` without the PIN on
       that call or a confirming text, which `needs-pin` and the queue's
-      `answerProblem` already enforce for every voice allow. `VoiceCalls`
+      `answerProblem` already enforce for every voice allow. The ticket that
+      wires a judge must add judge scenarios with conditional yeses ("yes, if
+      the tests pass") and negations ("no problem", "not that one") before
+      enabling it, and should then retire the fast path's doubt tables rather
+      than grow them. `VoiceCalls`
       takes `judge` and `judgeTimeoutMs` options, and the orchestrator does
       not pass them yet. A call's held decisions are all
       checked at once, so a slow judge costs one timeout per call, not one per

@@ -358,6 +358,13 @@ interface ReadingWindow {
   turns: readonly TranscriptTurn[];
 }
 
+/**
+ * The owner's turns right after each agent turn that reads ask `index`, up to
+ * the next agent turn of any kind. That boundary is deliberate: a reply after
+ * the agent's acknowledgement ("Got it." then "wait, no!") is not part of the
+ * judged reply. The answer was already submitted by then, and such a turn is
+ * a reply to the acknowledgement, which the agent then has to take up itself.
+ */
 function readingWindows(
   transcript: readonly TranscriptTurn[],
   read: readonly (number | undefined)[],

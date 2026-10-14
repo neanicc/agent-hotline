@@ -2169,3 +2169,18 @@ Template:
     because the fast path only hears replies to a read-back that asked for a
     yes. Words that only acknowledge or thank go to the judge.
   - P3 (split the module): follow-up.
+- Bot staff review of c155997 (approve with nits, 86; P2 2, P3 2), answered
+  in docs and comments:
+  - P2: a judge's `agreed` is not re-screened for negation. Not vetoed in
+    code, because the owner's direction is that doubt markers no longer
+    reject on their own. Recorded as a requirement in docs/daemon.md: the
+    ticket that wires a judge adds conditional-yes and negation scenarios
+    before enabling it.
+  - P2: module size. Keep it from growing, and retire the doubt tables once
+    a judge lands (follow-up, with the module split).
+  - P3: the reading-window boundary (a retraction after the agent's
+    acknowledgement is outside the judged reply) is now commented in
+    `readingWindows`.
+  - P3: `owner-unclear` calls are stored with `CallRecord.outcome`
+    `answered`. A distinct outcome is a `packages/core` contract change and
+    joins the lane:core follow-up for an "owner stayed unclear" reason.
