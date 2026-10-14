@@ -3574,3 +3574,14 @@ Template:
   `onUnverified` (no owner text). (P3) A test shows a failed lookup gives its
   slot back: 12 failing lookups in a row are all made (with no release, the
   fifth would be refused).
+- Staff review of 5fdc568: (P2) the suggestion to cap the owner path's
+  lookups too (say 20 in flight) is not taken. Any signer can send texts
+  that look like the owner's, so a cap there would let forged traffic shut
+  out the owner's real texts, which is the failure HL-13b found and this
+  ticket's brief rules out ("don't add a plain in-flight cap to the SMS
+  route"). The cost is Twilio REST calls only; nothing is accepted without
+  the pull, and each forged owner text is audited and alarms the owner at
+  most hourly. Bounding it with capacity reserved for genuine Twilio
+  requests stays the open follow-up from HL-13b. (P3) `runWaits`' doc
+  comment already says the double count is deliberate; (P3) the whitespace
+  rule is in `docs/daemon.md` and `docs/security.md`'s verify-by-pull row.
