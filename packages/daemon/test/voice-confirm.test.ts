@@ -3,13 +3,13 @@ import { describe, expect, it } from "vitest";
 import {
   answerWindows,
   confirmVoiceDecision,
-  FakeJudge,
   judgeVoiceDecision,
   type ReadAsk,
   readings,
   replyVerdict,
   soundsDoubtful,
 } from "../src/index.js";
+import { FakeJudge } from "./fake-judge.js";
 
 const PUSH: ReadAsk = { text: "git push origin main", nickname: "Claude in demo-app", toolName: "Bash" };
 const INSTALL: ReadAsk = { text: "npm install left-pad", nickname: "Codex in api-server", toolName: "Bash" };
@@ -315,7 +315,7 @@ describe("confirmVoiceDecision", () => {
     "sounds good",
     "please do",
     "Yes.",
-  ])("approves %j after the read-back, with no yes word needed", (said) => {
+  ])("approves the clear reply %j to the read-back", (said) => {
     const transcript = [GREETING, READ_PUSH, owner("sure"), BACK_PUSH, owner(said), agent("Got it.")];
     expect(confirm(transcript, 0, said)).toEqual({ confirmed: true, excerpt: said });
   });
@@ -387,8 +387,11 @@ describe("confirmVoiceDecision", () => {
 
   it("needs the read-back to ask for a yes: a statement repeating the request is not one", () => {
     const statement = agent("Okay, Claude in demo-app will git push origin main with Bash.");
-    const transcript = [GREETING, READ_PUSH, owner("sure"), statement, owner("great")];
-    expect(confirm(transcript, 0, "great").confirmed).toBe(false);
+    const transcript = [GREETING, READ_PUSH, owner("sure"), statement, owner("yes")];
+    expect(confirm(transcript, 0, "yes")).toEqual({
+      confirmed: false,
+      reason: "the request was not read back for a yes",
+    });
   });
 
   it("approves a clear reply to 'is that a yes or a no?' after a hesitation", () => {
@@ -441,7 +444,7 @@ describe("confirmVoiceDecision", () => {
     },
   );
 
-  it("needs no yes word after a read-back, but a hedge still blocks", () => {
+  it("takes a clear reply to the read-back, but never a hedge", () => {
     const after = (said: string) => [GREETING, READ_PUSH, owner("sure"), BACK_PUSH, owner(said)];
     expect(confirm(after("whatever you think"), 0, "whatever you think").confirmed).toBe(false);
     expect(confirm(after("whatever"), 0, "whatever").confirmed).toBe(false);
@@ -760,6 +763,16 @@ describe("the fast path for a reply to a read-back", () => {
     "yeah let's ship that one",
     "nein, danke",
     "yes, I think",
+    // Acknowledgements people say to a caller whatever they mean.
+    "thanks",
+    "thank you",
+    "great",
+    "cool",
+    "fine",
+    "perfect",
+    "go",
+    "go on",
+    "please",
   ])("leaves %j to the judge", (said) => {
     expect(fast(said)).toBeUndefined();
   });

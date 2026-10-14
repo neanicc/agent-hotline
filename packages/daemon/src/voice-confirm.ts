@@ -129,18 +129,19 @@ const YES_PHRASES = new Set([
   ..."yes yeah yep yup yea ya yah aye sure ok okay alright absolutely definitely certainly totally".split(
     " ",
   ),
-  ..."fine perfect great cool correct affirmative approved proceed please thanks".split(" "),
+  // Not acknowledgements ("thanks", "great", "fine", "cool", "go on"): people say those to a
+  // caller whatever they mean, so on their own they go to the judge.
+  ..."correct affirmative approved proceed".split(" "),
   "all right",
   "of course",
   "for sure",
   "sure thing",
   "you bet",
-  "go",
   "go ahead",
-  "go on",
   "go for it",
   "do it",
   "please do",
+  "yes please",
   "send it",
   "ship it",
   "push it",
@@ -149,9 +150,7 @@ const YES_PHRASES = new Set([
   "allow it",
   "approve it",
   "sounds good",
-  "that s fine",
   "that s right",
-  "thank you",
 ]);
 /**
  * The fast path's clear refusals: a reply made only of these is a no. "Don't"
@@ -480,33 +479,13 @@ export interface ReplyJudge {
 /**
  * The default judge until a real one is approved: every reply is unclear, so
  * a reply the fast path cannot decide is never an approval and the ask is
- * texted.
+ * texted. A model-backed judge would send the owner's words to a hosted
+ * service, so it needs the owner's approval and a plan change first; it would
+ * also have to be wired in through the orchestrator's `VoiceCalls` options.
  */
 export class FailClosedJudge implements ReplyJudge {
   async judge(): Promise<ReplyVerdict> {
     return "unclear";
-  }
-}
-
-/** A scripted step for `FakeJudge`: a verdict, an error to throw, or `hang` (never answers). */
-export type FakeJudgeStep = ReplyVerdict | Error | "hang";
-
-/** A judge for tests: answers with scripted steps in order (then `unclear`) and records every input. */
-export class FakeJudge implements ReplyJudge {
-  /** Every reply it was asked about, oldest first. */
-  readonly inputs: (readonly string[])[] = [];
-  readonly #steps: FakeJudgeStep[];
-
-  constructor(...steps: FakeJudgeStep[]) {
-    this.#steps = steps;
-  }
-
-  judge(reply: readonly string[]): Promise<ReplyVerdict> {
-    this.inputs.push([...reply]);
-    const step = this.#steps.shift() ?? "unclear";
-    if (step instanceof Error) return Promise.reject(step);
-    if (step === "hang") return new Promise<ReplyVerdict>(() => {});
-    return Promise.resolve(step);
   }
 }
 

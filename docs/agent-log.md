@@ -1998,3 +1998,18 @@ Template:
     timeout (1), the judge also seeing agent text (2), the fail-closed judge
     agreeing (4); review fixes: oldest read-back first (1), template words as
     key words (1), no non-English refusals (6), no read-back required (95).
+- Bot staff review of 47e49df (approve with nits, 84; no P0 or P1):
+  - P2 fixed: acknowledgements are no longer fast yeses. "Thanks", "thank
+    you", "please", "great", "cool", "fine", "perfect", "go", "go on" and
+    "that's fine" go to the judge (today: not confirmed, texted); "yes please"
+    stays a fast yes.
+  - P2 fixed: the PR body and stale test names ("no yes word needed")
+    describe the head; evidence was rerun on the new head.
+  - P3: `FakeJudge` moved to test support (`packages/daemon/test/fake-judge.ts`).
+    `ReplyJudge` and `FailClosedJudge` stay in production as the owner
+    directed; `FailClosedJudge`'s comment says a real judge needs the owner's
+    approval and a plan change. P3 on table size: noted; table changes
+    should be treated as security-reviewed.
+  - The "no ask-for-yes cue" mutation survived once the acknowledgement
+    "great" left the fast path; its test now replies "yes" and checks the
+    reason, and the mutation fails 1 test again.

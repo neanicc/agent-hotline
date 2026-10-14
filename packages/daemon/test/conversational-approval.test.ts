@@ -54,7 +54,7 @@ describe("conversational approval by voice (HL-14c)", () => {
   });
 
   it.each(["of course", "absolutely", "do it", "go for it", "send it", "for sure"])(
-    "allows on %j in reply to the read-back, with no yes word (HL-09c)",
+    "allows on the clear reply %j to the read-back (HL-09c)",
     async (said) => {
       const h = await start();
       const session = await h.registerSession();
