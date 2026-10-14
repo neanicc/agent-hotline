@@ -11,6 +11,7 @@
 // Keeping them on separate ports means a tunnel pointed at the webhook port
 // cannot reach the agent API, whatever the tunnel's own path rules say.
 import type { AddressInfo } from "node:net";
+import type { FormParams } from "@hotline/providers";
 import Fastify, {
   type FastifyBaseLogger,
   type FastifyError,
@@ -34,9 +35,16 @@ const WEBHOOK_BODY_LIMIT = 256 * 1024;
 /** Proves a webhook came from its provider. Only a literal `true` lets the request through. */
 export type WebhookVerifier = (request: FastifyRequest) => boolean | Promise<boolean>;
 
+/**
+ * A cheap check that runs before the body is read, such as "the signature header
+ * is present". Only a literal `true` lets the request on to parsing.
+ */
+export type WebhookPrecheck = (request: FastifyRequest) => boolean;
+
 declare module "fastify" {
   interface FastifyContextConfig {
     verifyWebhook?: WebhookVerifier;
+    precheckWebhook?: WebhookPrecheck;
   }
 }
 
@@ -44,8 +52,30 @@ export interface WebhookRoute {
   method: "GET" | "POST";
   /** Path below `/hooks`, such as `/twilio/sms`. */
   url: string;
+  precheck?: WebhookPrecheck;
   verify: WebhookVerifier;
   handler: (request: FastifyRequest, reply: FastifyReply) => unknown;
+}
+
+function decodeFormComponent(text: string): string {
+  return decodeURIComponent(text.replace(/\+/g, " "));
+}
+
+/**
+ * Strictly parses an `application/x-www-form-urlencoded` webhook body into its
+ * parameters, in the order they arrived, with repeats kept so a verifier can
+ * refuse them. Unlike `URLSearchParams`, a malformed escape, invalid UTF-8 or an
+ * empty `&&` segment is an error, never a guess.
+ */
+export function parseFormBody(text: string): FormParams {
+  if (text.length === 0) return [];
+  return text.split("&").map((part): [string, string] => {
+    if (part.length === 0) throw new Error("empty form parameter");
+    const equals = part.indexOf("=");
+    const name = equals === -1 ? part : part.slice(0, equals);
+    const value = equals === -1 ? "" : part.slice(equals + 1);
+    return [decodeFormComponent(name), decodeFormComponent(value)];
+  });
 }
 
 function boundPort(app: FastifyInstance): number | undefined {
@@ -61,6 +91,27 @@ function errorHandler(error: FastifyError, request: FastifyRequest, reply: Fasti
   if (status === 500) request.log.error({ err: error }, "request failed");
   // Never echo internal error messages to the caller.
   void reply.code(status).send({ error: status === 500 ? "internal error" : "request rejected" });
+}
+
+/** A webhook rejection: the same bare 403 for every reason, so a scanner learns nothing. */
+function rejectWebhook(request: FastifyRequest, reply: FastifyReply, reason: string) {
+  // Method and path only: never the body, headers or query of an unverified request.
+  request.log.warn({ method: request.method, path: urlPath(request.url), reason }, "rejected webhook");
+  return reply.code(403).send();
+}
+
+/**
+ * On the webhook listener, a request the server could not read (malformed body,
+ * unsupported content type, too large) gets the same bare 403 as a failed
+ * verification, never a 4xx that shows the route exists.
+ */
+function webhookErrorHandler(error: FastifyError, request: FastifyRequest, reply: FastifyReply): void {
+  const status = error.statusCode;
+  if (status !== undefined && status >= 400 && status < 500) {
+    void rejectWebhook(request, reply, "unreadable request");
+    return;
+  }
+  errorHandler(error, request, reply);
 }
 
 function notFound(_request: FastifyRequest, reply: FastifyReply): void {
@@ -129,23 +180,36 @@ export function buildWebhookServer({ log, routes = [] }: WebhookServerOptions): 
     bodyLimit: WEBHOOK_BODY_LIMIT,
     return503OnClosing: true,
   });
-  app.setErrorHandler(errorHandler);
+  app.setErrorHandler(webhookErrorHandler);
   app.setNotFoundHandler(notFound);
-
-  const reject = (request: FastifyRequest, reply: FastifyReply, reason: string) => {
-    // Method and path only: never the body, headers or query of an unverified request.
-    request.log.warn({ method: request.method, path: urlPath(request.url), reason }, "rejected webhook");
-    return reply.code(403).send({ error: "forbidden" });
-  };
+  app.addContentTypeParser(
+    "application/x-www-form-urlencoded",
+    { parseAs: "string" },
+    (_request, body, done) => {
+      try {
+        done(null, parseFormBody(body as string));
+      } catch {
+        // The webhook error handler turns any 4xx into the uniform 403.
+        done(Object.assign(new Error("malformed form body"), { statusCode: 400 }), undefined);
+      }
+    },
+  );
 
   void app.register(
     async (hooks) => {
-      // Before the body is read: a route that cannot verify its caller is refused outright.
+      // Before the body is read: a route that cannot verify its caller is refused
+      // outright, and a route's precheck (such as "the signature header is there")
+      // runs before any parsing.
       hooks.addHook("onRequest", async (request, reply) => {
-        if (request.routeOptions.config.verifyWebhook === undefined) {
-          return reject(request, reply, "no verifier");
+        const config = request.routeOptions.config;
+        if (config.verifyWebhook === undefined) return rejectWebhook(request, reply, "no verifier");
+        let passed = true;
+        try {
+          passed = config.precheckWebhook === undefined || config.precheckWebhook(request) === true;
+        } catch {
+          passed = false;
         }
-        return undefined;
+        return passed ? undefined : rejectWebhook(request, reply, "precheck failed");
       });
       // After parsing, so verifiers can check signatures over the parameters or body.
       hooks.addHook("preHandler", async (request, reply) => {
@@ -156,14 +220,14 @@ export function buildWebhookServer({ log, routes = [] }: WebhookServerOptions): 
         } catch {
           verified = false;
         }
-        return verified ? undefined : reject(request, reply, "verification failed");
+        return verified ? undefined : rejectWebhook(request, reply, "verification failed");
       });
 
       for (const route of routes) {
         hooks.route({
           method: route.method,
           url: route.url,
-          config: { verifyWebhook: route.verify },
+          config: { verifyWebhook: route.verify, precheckWebhook: route.precheck },
           handler: route.handler,
         });
       }

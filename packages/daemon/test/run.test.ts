@@ -4,6 +4,7 @@ import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { twilioSignature } from "@hotline/providers";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   type Daemon,
@@ -131,6 +132,75 @@ describe("runDaemon", () => {
     expect(text).toContain("hotline daemon stopped");
     expect(text).not.toContain(token);
     expect(text).not.toContain("5555550100");
+  });
+
+  it("leaves the SMS webhook off until Twilio is configured", async () => {
+    await writeConfig();
+    const { exit } = await launch();
+    signals.emit("SIGTERM");
+    expect(await exit).toBe(0);
+    const off = lines
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .find((e) => e.msg === "sms webhook off");
+    expect(off).toMatchObject({ reason: "sms.fromNumber is not set" });
+  });
+
+  it("serves the Twilio SMS webhook when the config and secrets are in place", async () => {
+    const publicUrl = "https://hotline.example.test";
+    const accountSid = `AC${"0123456789abcdef".repeat(2)}`;
+    const authToken = "fake-twilio-auth-token-for-run-tests";
+    await writeConfig({ ...CONFIG, sms: { fromNumber: "+15555550101" }, tunnel: { publicUrl } });
+    const secrets = new FileSecretStore(paths().secrets);
+    await secrets.set("twilio.accountSid", accountSid);
+    await secrets.set("twilio.authToken", authToken);
+    const { daemon, exit } = await launch();
+
+    const sms = (from: string, messageSid: string) => {
+      const params: [string, string][] = [
+        ["MessageSid", messageSid],
+        ["AccountSid", accountSid],
+        ["From", from],
+        ["To", "+15555550101"],
+        ["Body", "Yes"],
+      ];
+      return send({
+        port: daemon.hooksPort,
+        method: "POST",
+        path: "/hooks/twilio/sms",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          "x-twilio-signature": twilioSignature(authToken, `${publicUrl}/hooks/twilio/sms`, params),
+        },
+        body: new URLSearchParams(params).toString(),
+      });
+    };
+    const ownerSid = `SM${"1".repeat(32)}`;
+    const otherSid = `SM${"2".repeat(32)}`;
+    expect((await sms(OWNER, ownerSid)).status).toBe(200);
+    const other = await sms("+15555550199", otherSid);
+    expect(other.status).toBe(200);
+    expect(other.body).toContain("<Message>");
+    const unsigned = await send({
+      port: daemon.hooksPort,
+      method: "POST",
+      path: "/hooks/twilio/sms",
+      body: "a=b",
+    });
+    expect([unsigned.status, unsigned.body]).toEqual([403, ""]);
+
+    signals.emit("SIGTERM");
+    expect(await exit).toBe(0);
+    const db = new DatabaseSync(paths().database, { readOnly: true });
+    const audit = db.prepare("SELECT event, detail FROM audit WHERE event LIKE 'sms.%' ORDER BY seq").all();
+    db.close();
+    // The owner's words are not stored until orchestration (HL-09) records an answer.
+    expect(audit).toEqual([
+      { event: "sms.received", detail: JSON.stringify({ messageSid: ownerSid, reply: "yes" }) },
+      { event: "sms.other-sender", detail: JSON.stringify({ messageSid: otherSid }) },
+    ]);
+    const text = lines.join("");
+    expect(text).not.toContain(authToken);
+    expect(text).not.toContain("5555550199");
   });
 
   it("reuses the stored token across restarts", async () => {
