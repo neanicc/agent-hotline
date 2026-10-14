@@ -117,7 +117,9 @@ async function licenseText(dir) {
   for (const file of ["LICENSE", "LICENSE.md", "LICENSE.txt", "license", "license.md", "LICENCE"]) {
     try {
       return await readFile(join(dir, file), "utf8");
-    } catch {}
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
   }
   return `No license file shipped in ${relative(root, dirname(join(dir, "package.json")))}; see its package.json.`;
 }
