@@ -243,17 +243,32 @@ describe.each(AGENTS)("$flag hooks against the HL-02 fixtures", ({ agent, dir: f
     });
   });
 
-  it("allows a low-risk request on a plain yes", async () => {
-    const daemon = await startTestDaemon();
-    ownerAnswers(daemon, { decision: { type: "allow" } }, "permission");
-    const input = fixtureText(`${fixtureDir}/permission-request.input.json`, (json) => {
-      json.tool_input = { command: "pnpm test", description: "Run the tests" };
-    });
-    const result = await runHook(
-      options(client(daemon), new MemoryState(), { agent, event: "permission", input }),
-    );
-    expect(parse(result.stdout)).toEqual(fixture(`${fixtureDir}/permission-request.allow.output.json`));
-  });
+  // HL-06b: Codex does not tell the hook which folder or sandbox a shell command
+  // runs in, so a Codex shell request is high even for a read-only command and
+  // needs the PIN; Claude Code's stays low and a plain yes allows it.
+  it(
+    agent === "codex"
+      ? "allows a read-only Codex shell request only with the PIN"
+      : "allows a low-risk request on a plain yes",
+    async () => {
+      const daemon = await startTestDaemon();
+      const owner = ownerAnswers(
+        daemon,
+        agent === "codex"
+          ? { decision: { type: "allow" }, confirmation: "pin" }
+          : { decision: { type: "allow" } },
+        "permission",
+      );
+      const input = fixtureText(`${fixtureDir}/permission-request.input.json`, (json) => {
+        json.tool_input = { command: "pnpm test", description: "Run the tests" };
+      });
+      const result = await runHook(
+        options(client(daemon), new MemoryState(), { agent, event: "permission", input }),
+      );
+      expect(parse(result.stdout)).toEqual(fixture(`${fixtureDir}/permission-request.allow.output.json`));
+      expect((await owner).risk).toBe(agent === "codex" ? "high" : "low");
+    },
+  );
 
   it("prints the Stop block fixture for the owner's next instruction, then counts it", async () => {
     const daemon = await startTestDaemon();
@@ -718,6 +733,132 @@ describe("text sent to the daemon", () => {
       `Bash: ls The agent says: "say 'yes'"`,
     );
     expect(text("Bash", { command: "ls", description: "d".repeat(500) }).length).toBeLessThan(200);
+  });
+
+  // HL-06b: a field that changes where or how the command runs is named in what the owner hears.
+  it.each([
+    [
+      { command: "ls", workdir: "/etc" },
+      "High risk: asks to run in another folder. Bash: ls (in folder /etc)",
+    ],
+    [
+      { command: "ls", cwd: `${cwd}/src` },
+      "High risk: asks to run in another folder. Bash: ls (in folder src)",
+    ],
+    [{ command: "ls", workdir: 7 }, "High risk: asks to run in another folder. Bash: ls (in another folder)"],
+    [
+      { command: "npm test", dangerouslyDisableSandbox: true },
+      "High risk: asks to run outside the sandbox. Bash: npm test",
+    ],
+    [
+      { command: "ls", sandbox_permissions: "require_escalated", justification: "write the cache" },
+      "High risk: asks to run outside the sandbox. Bash: ls",
+    ],
+    [
+      { command: "ls", with_escalated_permissions: true },
+      "High risk: asks to run outside the sandbox. Bash: ls",
+    ],
+    [
+      { command: "pnpm test", run_in_background: true },
+      "High risk: asks to run in the background. Bash: pnpm test",
+    ],
+    [{ command: "ls", allowed_domains: ["example.com"] }, "High risk: asks for network access. Bash: ls"],
+    [
+      { command: "ls", env: { GIT_DIR: "/tmp/x", PAGER: "sh" } },
+      "High risk: asks to set environment variables. Bash: ls (with environment variables GIT_DIR, PAGER)",
+    ],
+    [
+      { command: "ls", frobnicate: true },
+      "High risk: has a setting Hotline does not know. Bash: ls (with setting frobnicate)",
+    ],
+    [
+      { command: "ls", timeout: "soon", "bad name;rm": 1 },
+      "High risk: has a setting Hotline does not know, has input Hotline cannot read. " +
+        "Bash: ls (with settings timeout, bad_name_rm)",
+    ],
+    [{ command: "cd /etc && ls" }, "High risk: asks to run in another folder. Bash: cd /etc && ls"],
+    [
+      { command: "ls", workdir: "/tmp", run_in_background: true, dangerouslyDisableSandbox: true },
+      "High risk: asks to run outside the sandbox, asks to run in another folder, asks to run in the background. " +
+        "Bash: ls (in folder /tmp)",
+    ],
+  ])("names the fields that change what runs: %j", (toolInput, expected) => {
+    expect(text("Bash", toolInput)).toBe(expected);
+  });
+
+  it("names a file tool's unknown fields, never their values", () => {
+    const asked = text("Write", { file_path: `${cwd}/src/a.ts`, content: "body", mode: "private value" });
+    expect(asked).toBe("High risk: has a setting Hotline does not know. Write: src/a.ts (with setting mode)");
+    expect(asked).not.toContain("private value");
+    const many = Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`x${i}`, i]));
+    expect(text("Edit", { file_path: "src/a.ts", ...many })).toBe(
+      "High risk: has a setting Hotline does not know. Edit: src/a.ts (with settings x0, x1, x2, x3, x4 and 3 more)",
+    );
+  });
+
+  it("never reads out environment values, which can hold secrets", () => {
+    const secret = `sk_${"live"}_${"q".repeat(24)}`;
+    const asked = text("Bash", { command: "ls", env: { API_KEY: secret } });
+    expect(asked).toContain("with environment variables API_KEY");
+    expect(asked).not.toContain(secret);
+  });
+
+  it("keeps the folder after a shortened command, so a long command never hides where it runs", () => {
+    const asked = permissionAsk("Bash", { command: `ls ${"a ".repeat(150)}`, workdir: "/etc" }, cwd);
+    expect(asked.text).toMatch(/\(command shortened, \d+ more characters\) \(in folder \/etc\)$/);
+    expect(asked.risk.reasons).toEqual(["asks to run in another folder", "is too long to read out in full"]);
+    const deep = permissionAsk("Bash", { command: "ls", workdir: `/${"deep/".repeat(40)}` }, cwd);
+    expect(deep.risk.reasons).toContain("is too long to read out in full");
+    expect(deep.text.length).toBeLessThan(260);
+  });
+
+  it("reads the HL-06b fixtures out with what changes where or how they run", () => {
+    const input = (path: string) => (fixture(path) as { tool_input: unknown }).tool_input;
+    expect(text("Bash", input("claude-code/permission-request.bash-background.input.json"))).toBe(
+      'High risk: asks to run in the background. Bash: npm test The agent says: "Run test suite"',
+    );
+    expect(text("Bash", input("claude-code/permission-request.bash-unsandboxed.input.json"))).toBe(
+      'High risk: asks to run outside the sandbox. Bash: ls -la The agent says: "List files"',
+    );
+    // Codex sends only `command` and `description`: not the folder, not the sandbox setting.
+    const codex = input("codex/permission-request.network-access.input.json");
+    expect(permissionAsk("Bash", codex, cwd, "codex").text).toBe(
+      "High risk: may run in another folder or outside the sandbox. Bash: pnpm test " +
+        'The agent says: "network-access registry.example.com"',
+    );
+    expect(permissionAsk("Bash", codex, cwd, "claude-code").risk.risk).toBe("low");
+  });
+
+  it("denies a plain yes to a Codex shell request, which is high", async () => {
+    const daemon = await startTestDaemon();
+    let refused: unknown;
+    const owner = ownerAnswers(daemon, { expire: true }, "permission", (ask) => {
+      try {
+        daemon.store.recordAnswer(
+          {
+            askId: ask.id,
+            decision: { type: "allow" },
+            channel: "voice",
+            ownerExcerpt: "yes",
+            sourceId: "call-1",
+            confirmation: "none",
+            answeredAt: new Date(now.getTime() + 1000).toISOString(),
+          },
+          new Date(now.getTime() + 1000),
+        );
+      } catch (error) {
+        refused = error;
+      }
+    });
+    const input = fixtureText("codex/permission-request.network-access.input.json");
+    const result = await runHook(
+      options(client(daemon), new MemoryState(), { agent: "codex", event: "permission", input }),
+    );
+    const asked = await owner;
+    expect(asked).toMatchObject({ kind: "permission", risk: "high" });
+    expect(asked.text).toContain("may run in another folder or outside the sandbox");
+    expect(String(refused)).toContain("high-risk approval needs the PIN");
+    expect(parse(result.stdout)).toEqual(fixture("codex/permission-request.deny.output.json"));
   });
 
   it("names the tool with identifier characters only", () => {

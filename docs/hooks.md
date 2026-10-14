@@ -42,6 +42,13 @@ In away mode:
      (`command shortened, 312 more characters`), and the request becomes high
      risk ("is too long to read out in full"): the part the owner cannot hear
      could hold anything.
+   - Fields that change where or how it runs come after the preview, so a
+     long command never cuts them off: the folder (`Bash: ls (in folder
+     /etc)`), the names of environment variables it sets (never their values),
+     and the names of settings Hotline does not know (`with setting mode`).
+     Sandbox, network and background fields are named by their risk reason
+     (`High risk: asks to run outside the sandbox.`). These notes are cut at
+     120 characters, which also makes the request "too long to read out".
    - The description never stands in for the command: an empty command reads
      `(no details)`. A description with no letters or digits is dropped; one
      longer than 120 characters is cut.
@@ -155,6 +162,68 @@ decides whether an approval is needed. Every permission request needs the
 owner's own approval, and every failure denies. Bypass classes not covered here
 are tracked for HL-13's fuzz tests.
 
+**What is judged is what runs (HL-06b).** The classifier judges the command
+text, and paths in it, against the session's `cwd` (the payload's `cwd`
+field). Relative paths are resolved against that folder and nothing else, so
+any input that could make the command run somewhere else, or differently, is
+high risk:
+
+- **Shell tools** (`Bash`, `shell`, `exec_command`, `local_shell`) may carry
+  only `command`, a string or null `description`, and a non-negative numeric
+  `timeout`. A `run_in_background`, `dangerouslyDisableSandbox` or
+  `with_escalated_permissions` set to `false` (the default, and what the Claude
+  Code docs example sends) changes nothing. Every other field is high:
+
+  | Field | Where it comes from | The owner hears |
+  | --- | --- | --- |
+  | `workdir`, `working_directory`, `cwd` | Codex `exec_command`, `local_shell` and the older `shell` tool | asks to run in another folder, and `(in folder ...)` |
+  | `env` | Codex `local_shell` | asks to set environment variables, and their names |
+  | `dangerouslyDisableSandbox`, `with_escalated_permissions`, `sandbox_permissions`, `additional_permissions`, `justification` | Claude Code Bash; Codex `exec_command` and the older `shell` tool | asks to run outside the sandbox |
+  | `allowed_domains` | Claude Code 2.1.299 Bash (opens the sandbox's network to those hosts) | asks for network access |
+  | `run_in_background` | Claude Code Bash | asks to run in the background |
+  | anything else (`_simulatedSedEdit`, `environment_id`, `user`, `shell`, `login`, `tty`, `timeout_ms`, `prefix_rule`, ...) | newer, internal or unknown fields | has a setting Hotline does not know, and its name |
+  | a `timeout` that is not a number, a `description` that is not a string | | has input Hotline cannot read |
+
+- **`cd`, `pushd` and `popd`** anywhere in a command are high ("asks to run in
+  another folder"), even next to read-only commands and even as an argument
+  (`ls cd`): Claude Code's Bash tool keeps its working directory between calls,
+  so after a `cd` this command and every later one runs somewhere other than
+  the session cwd their relative paths are judged against. A file name that
+  only starts with `cd` (`docs/cd.md`) is not affected.
+- **An argv array** (`"command": ["cat", "a b.txt"]`, Codex's `shell` tool) is
+  written as the shell line that runs exactly that argv: plain words as they
+  are, anything else in single quotes, a `'` as `'"'"'`. The owner hears that
+  line and the classifier judges it like any other command. An array with a
+  non-string element, or an empty one, is "has input Hotline cannot read".
+- **File tools** may carry only their path and content fields, from the Claude
+  Code hooks reference and input schemas: `Write` (`file_path`, `content`),
+  `Edit` (`file_path`, `old_string`, `new_string`, `replace_all`), `MultiEdit`
+  (`file_path`, `edits`), `NotebookEdit` (`notebook_path`, `cell_id`,
+  `new_source`, `cell_type`, `edit_mode`), `apply_patch` (`command`,
+  `description`), `Read` (`file_path`, `offset`, `limit`, `pages`),
+  `NotebookRead` (`notebook_path`, `cell_id`), `Glob` (`pattern`, `path`),
+  `Grep` (`pattern`, `path`, `glob`, `output_mode`, `-A`, `-B`, `-C`,
+  `context`, `-i`, `-n`, `type`, `head_limit`, `offset`, `multiline`) and `LS`
+  (`path`, `ignore`). Any other field is "has a setting Hotline does not know".
+- **Codex shell requests are always high** ("may run in another folder or
+  outside the sandbox"). Codex builds the hook's `tool_input` for a shell
+  approval from the command string and its justification only
+  (`PermissionRequestPayload::bash` in `codex-rs/core/src/tools/sandboxing.rs`
+  and `approvals.rs`), and the payload's `cwd` is the turn's folder, not the
+  command's `workdir`. Its docs say `PermissionRequest` runs "when Codex is
+  about to ask for approval, such as a shell escalation or managed-network
+  approval". Hotline cannot see where the command runs or whether it leaves
+  the sandbox, so the owner approves it with the PIN or a confirming text.
+  Codex patches name their files and are judged as before.
+
+Sources, checked 2026-10-14: the Claude Code hooks reference
+(<https://code.claude.com/docs/en/hooks>, "PreToolUse input" and
+"PermissionRequest input"), the input schemas in the installed Claude Code
+2.1.299 bundle, the Codex hooks docs (<https://developers.openai.com/codex/hooks>),
+and openai/codex at `7eed30ad1beaebc20b7d848ce9ee887525a379b0`
+(`codex-rs/core/src/tools/approvals.rs`, `sandboxing.rs`,
+`handlers/unified_exec/exec_command.rs`, `hook_runtime.rs`).
+
 **Unknown project.** When the session's `cwd` is empty, relative, `/`, a
 top-level directory such as `/tmp`, or a home directory (`/Users/<name>`,
 `/home/<name>`), there is no known project: every path counts as outside it, so
@@ -168,15 +237,23 @@ any write and any path argument is high risk.
 | writes outside the project | a write (redirect, `cp`, `mv`, `tee`, `mkdir`, `sed -i`, ...) with a path outside the session's `cwd`, `~` or `$HOME`; a file tool or patch whose path is outside it |
 | touches credentials or agent settings | `.env*`, `.ssh`, `.aws`, `.netrc`, `.npmrc`, key and certificate files, `credentials`, `secrets`, `.hotline`, `.claude`, `.codex`, the Keychain, `printenv`, words like `token` or `password` in a command |
 | runs with elevated privileges | `sudo`, `doas`, `su` |
+| asks to run outside the sandbox | `dangerouslyDisableSandbox: true`, `with_escalated_permissions`, `sandbox_permissions`, `additional_permissions`, `justification` |
+| asks for network access | `allowed_domains` |
+| asks to run in another folder | `workdir`, `cwd`, and `cd`, `pushd` or `popd` anywhere in a command |
+| may run in another folder or outside the sandbox | every Codex shell request (Codex does not send either) |
+| asks to run in the background | `run_in_background: true` |
+| asks to set environment variables | `env` |
 | runs nested code Hotline cannot read | `$(...)`, backticks, `eval`, `exec`, `source`, `env`, `command`, `xargs`, `sh -c`, `| sh`, `python -c`, `node -e`, `osascript` |
 | runs a command Hotline does not recognise as read-only | any shell command outside the allowlist that matches none of the reasons above |
 | sends data off the machine | `WebFetch` (its URL can carry data) |
 | uses a tool Hotline does not know | every MCP tool (`mcp__*`) and any other unknown tool |
-| has input Hotline cannot read | a shell tool without a command string, a patch without file headers, a file tool without a path |
+| has a setting Hotline does not know | a shell or file tool field outside its known set (above) |
+| has input Hotline cannot read | a shell tool without a command string, a patch without file headers, a file tool without a path, a non-numeric `timeout`, a non-string `description` |
 | is too long to read out in full | a preview cut at 200 characters (set by the hook, see above) |
 
-Everything else is **low**: allowlisted shell commands, file edits and patches
-inside a known project, and read tools (`Read`, `Grep`, `Glob`, `LS`,
+Everything else is **low**: allowlisted shell commands from Claude Code with no
+field beyond the benign ones, file edits and patches inside a known project
+with only their known fields, and read tools (`Read`, `Grep`, `Glob`, `LS`,
 `WebSearch`) unless they point at credentials. Inside the project only the path
 below the project root counts, so a project that itself lives under `.claude/`
 (a worktree) is not flagged for that.

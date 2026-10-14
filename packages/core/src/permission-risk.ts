@@ -25,8 +25,18 @@
 // denies. Sensitive names are matched case-insensitively after NFC
 // normalisation, because macOS file systems ignore both by default. Bypass
 // classes not covered here are tracked for HL-13's fuzzing.
+//
+// What is judged must be what runs (HL-06b). The command text and paths are
+// judged against the session's cwd, so any other tool input field that could
+// change what runs, or where, makes the request high: a working directory, an
+// environment, a sandbox or escalation setting, a background flag, or any field
+// Hotline does not know. So does `cd`, `pushd` or `popd` anywhere in a command,
+// because Claude Code's Bash tool keeps its working directory between calls and
+// later commands would no longer run where Hotline judged them. Codex sends
+// neither the folder a command runs in nor its sandbox setting to the hook, so
+// a Codex shell request is always high (see `actionFields` and docs/hooks.md).
 // Pure: no I/O, no Node modules. Paths are resolved as POSIX strings.
-import type { Risk } from "./contracts.js";
+import type { AgentKind, Risk } from "./contracts.js";
 
 export type RiskReason =
   | "deletes files"
@@ -36,9 +46,16 @@ export type RiskReason =
   | "writes outside the project"
   | "touches credentials or agent settings"
   | "runs with elevated privileges"
+  | "asks to run outside the sandbox"
+  | "asks for network access"
+  | "asks to run in another folder"
+  | "may run in another folder or outside the sandbox"
+  | "asks to run in the background"
+  | "asks to set environment variables"
   | "runs nested code Hotline cannot read"
   | "runs a command Hotline does not recognise as read-only"
   | "uses a tool Hotline does not know"
+  | "has a setting Hotline does not know"
   | "has input Hotline cannot read"
   | "is too long to read out in full";
 
@@ -52,8 +69,14 @@ export interface PermissionRequestFacts {
   toolName: string;
   /** The agent's tool input, untouched. Untrusted. */
   toolInput: unknown;
-  /** The session's working directory: the project. */
+  /** The session's working directory: the project. Relative paths and commands are judged against it. */
   cwd: string;
+  /**
+   * The agent that asked, when known. Codex's hook payload leaves out the folder
+   * a shell command runs in and its sandbox setting, so a Codex shell request is
+   * high; without `agent` only the payload itself is judged.
+   */
+  agent?: AgentKind;
 }
 
 /** Tools that change files: the path fields to check. */
@@ -87,6 +110,129 @@ export function isShellTool(toolName: string): boolean {
 }
 
 const PATCH_TOOLS: ReadonlySet<string> = new Set(["apply_patch"]);
+
+// ---------------------------------------------------------------------------
+// Fields that change what runs (HL-06b)
+
+/**
+ * Shell tool input fields that change how or where a command runs, and what the
+ * owner hears for each. Names from the Claude Code hooks reference ("PreToolUse
+ * input", Bash), the Claude Code 2.1.299 Bash input schema (`run_in_background`,
+ * `dangerouslyDisableSandbox`, `allowed_domains`), and Codex's tool arguments:
+ * `exec_command` (`workdir`, `sandbox_permissions`, `additional_permissions`,
+ * `justification`), `local_shell` (`working_directory`, `env`) and the older
+ * `shell` tool (`workdir`, `with_escalated_permissions`). Any field not listed
+ * here and not benign is "has a setting Hotline does not know".
+ */
+const SHELL_FIELD_REASONS: ReadonlyMap<string, RiskReason> = new Map<string, RiskReason>([
+  ["workdir", "asks to run in another folder"],
+  ["working_directory", "asks to run in another folder"],
+  ["cwd", "asks to run in another folder"],
+  ["env", "asks to set environment variables"],
+  ["run_in_background", "asks to run in the background"],
+  ["dangerouslyDisableSandbox", "asks to run outside the sandbox"],
+  ["with_escalated_permissions", "asks to run outside the sandbox"],
+  ["sandbox_permissions", "asks to run outside the sandbox"],
+  ["additional_permissions", "asks to run outside the sandbox"],
+  ["justification", "asks to run outside the sandbox"],
+  ["allowed_domains", "asks for network access"],
+]);
+
+/** Flags that change nothing when they are `false`, their documented default. */
+const OFF_WHEN_FALSE: ReadonlySet<string> = new Set([
+  "run_in_background",
+  "dangerouslyDisableSandbox",
+  "with_escalated_permissions",
+]);
+
+/**
+ * The fields each file tool may carry: its path fields and content or option
+ * fields. Names from the Claude Code hooks reference ("PreToolUse input": Write,
+ * Edit, Read, Glob, Grep) and the Claude Code 2.1.299 input schemas
+ * (MultiEdit, NotebookEdit, LS, NotebookRead, Read `pages`, Grep options), and
+ * Codex's `apply_patch` hook input (`command`, `description`).
+ */
+const FILE_TOOL_FIELDS: Readonly<Record<string, ReadonlySet<string>>> = {
+  Write: new Set(["file_path", "content"]),
+  Edit: new Set(["file_path", "old_string", "new_string", "replace_all"]),
+  MultiEdit: new Set(["file_path", "edits"]),
+  NotebookEdit: new Set(["notebook_path", "cell_id", "new_source", "cell_type", "edit_mode"]),
+  apply_patch: new Set(["command", "description"]),
+  Read: new Set(["file_path", "offset", "limit", "pages"]),
+  NotebookRead: new Set(["notebook_path", "cell_id"]),
+  Glob: new Set(["pattern", "path"]),
+  Grep: new Set([
+    "pattern",
+    "path",
+    "glob",
+    "output_mode",
+    "-A",
+    "-B",
+    "-C",
+    "context",
+    "-i",
+    "-n",
+    "type",
+    "head_limit",
+    "offset",
+    "multiline",
+  ]),
+  LS: new Set(["path", "ignore"]),
+};
+
+/** A tool input field Hotline does not judge, and why it makes the request high. */
+export interface ActionField {
+  /** The field's name as the agent sent it. Untrusted. */
+  name: string;
+  /** The field's value, untouched. Untrusted. */
+  value: unknown;
+  reason: RiskReason;
+}
+
+/**
+ * The fields of a tool input that could change what runs, or where, beyond what
+ * the classifier judges. Shell tools may carry only `command`, a string or null
+ * `description` and a numeric `timeout` (and the flags in `OFF_WHEN_FALSE` set
+ * to `false`); file tools only their known path and content fields. Every other
+ * field is listed here, and each one makes the request high.
+ */
+export function actionFields(toolName: string, toolInput: unknown): ActionField[] {
+  if (typeof toolInput !== "object" || toolInput === null || Array.isArray(toolInput)) return [];
+  const input = toolInput as Record<string, unknown>;
+  const fields: ActionField[] = [];
+  if (SHELL_TOOLS.has(toolName)) {
+    for (const [name, value] of Object.entries(input)) {
+      if (name === "command") continue;
+      if (name === "description") {
+        if (typeof value !== "string" && value !== null)
+          fields.push({ name, value, reason: "has input Hotline cannot read" });
+        continue;
+      }
+      if (name === "timeout") {
+        if (typeof value !== "number" || !Number.isFinite(value) || value < 0)
+          fields.push({ name, value, reason: "has input Hotline cannot read" });
+        continue;
+      }
+      if (OFF_WHEN_FALSE.has(name) && value === false) continue;
+      fields.push({
+        name,
+        value,
+        reason: SHELL_FIELD_REASONS.get(name) ?? "has a setting Hotline does not know",
+      });
+    }
+    return fields;
+  }
+  const known = Object.hasOwn(FILE_TOOL_FIELDS, toolName) ? FILE_TOOL_FIELDS[toolName] : undefined;
+  if (known === undefined) return [];
+  for (const [name, value] of Object.entries(input)) {
+    if (name === "description" && toolName === "apply_patch" && typeof value !== "string" && value !== null) {
+      fields.push({ name, value, reason: "has input Hotline cannot read" });
+    } else if (!known.has(name)) {
+      fields.push({ name, value, reason: "has a setting Hotline does not know" });
+    }
+  }
+  return fields;
+}
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -201,6 +347,13 @@ const NETWORK = [
   /\bdocker\s+(?:pull|run|push|login)\b/,
 ];
 const ELEVATED = [word("sudo|doas|su")];
+/**
+ * Changing directory, anywhere in the command (even as an argument: fail
+ * closed). Claude Code's Bash tool keeps its working directory between calls,
+ * so after a `cd` this and later commands run somewhere other than the session
+ * cwd that their relative paths are judged against.
+ */
+const CHANGES_FOLDER = [word("cd|pushd|popd")];
 const NESTED = [
   /`|\$\(|\$\{|<\(|>\(/,
   word("eval|exec|source|osascript|xargs|env|command|builtin|nohup|time|watch|parallel"),
@@ -242,6 +395,7 @@ function labelReasons(command: string, cwd: string): RiskReason[] {
   if (matchesAny(command, GIT_HISTORY)) reasons.add("pushes or rewrites git history");
   if (matchesAny(command, NETWORK)) reasons.add("installs or downloads from the network");
   if (matchesAny(command, ELEVATED)) reasons.add("runs with elevated privileges");
+  if (matchesAny(command, CHANGES_FOLDER)) reasons.add("asks to run in another folder");
   if (matchesAny(command, NESTED)) reasons.add("runs nested code Hotline cannot read");
   // The project's own path may contain `.claude` or `secrets` (a worktree, say): judge what is below it.
   const root = projectRoot(cwd);
@@ -533,7 +687,21 @@ function readOnlyCommand({ words, redirects }: SimpleCommand, cwd: string): bool
   return false;
 }
 
-/** The command text of a shell tool call: a string, or an argv array joined with spaces. */
+/**
+ * One argv element quoted so that bash and zsh read it back as exactly that
+ * element: plain characters as they are, anything else in single quotes, with
+ * each `'` written as `'"'"'` (close, a double-quoted quote, reopen).
+ */
+function quoteArgument(part: string): string {
+  if (/^[A-Za-z0-9_./:@%+,-]+$/.test(part)) return part;
+  return `'${part.split("'").join(`'"'"'`)}'`;
+}
+
+/**
+ * The command text of a shell tool call: a string, or an argv array (Codex's
+ * `shell` tool) written as the shell line that runs exactly that argv, so the
+ * owner hears and the classifier judges what runs. Undefined for anything else.
+ */
 export function shellCommand(input: unknown): string | undefined {
   const value =
     typeof input === "string"
@@ -543,16 +711,15 @@ export function shellCommand(input: unknown): string | undefined {
         : undefined;
   if (typeof value === "string") return value;
   if (Array.isArray(value) && value.length > 0 && value.every((part) => typeof part === "string")) {
-    // An argv array is one command; quote each part so the split keeps it whole.
-    return value
-      .map((part) => (/^[\w./:@%+,-]+$/.test(part) ? part : `'${part.replace(/'/g, "")}'`))
-      .join(" ");
+    return value.map(quoteArgument).join(" ");
   }
   return undefined;
 }
 
 function shellReasons(command: string, cwd: string): RiskReason[] {
   const reasons = labelReasons(command, cwd);
+  // A change of folder is high even around read-only commands: what follows runs elsewhere.
+  if (reasons.includes("asks to run in another folder")) return reasons;
   const commands = splitShell(command);
   const readOnly =
     commands !== undefined && commands.length > 0 && commands.every((simple) => readOnlyCommand(simple, cwd));
@@ -600,9 +767,16 @@ const ORDER: readonly RiskReason[] = [
   "writes outside the project",
   "touches credentials or agent settings",
   "runs with elevated privileges",
+  "asks to run outside the sandbox",
+  "asks for network access",
+  "asks to run in another folder",
+  "may run in another folder or outside the sandbox",
+  "asks to run in the background",
+  "asks to set environment variables",
   "runs nested code Hotline cannot read",
   "runs a command Hotline does not recognise as read-only",
   "uses a tool Hotline does not know",
+  "has a setting Hotline does not know",
   "has input Hotline cannot read",
   "is too long to read out in full",
 ];
@@ -619,38 +793,43 @@ export function withRiskReason(risk: PermissionRisk, reason: RiskReason): Permis
 
 /**
  * The risk class of a permission request. High needs the PIN or a confirming
- * text to approve. Anything Hotline cannot read or does not know is high.
+ * text to approve. Anything Hotline cannot read or does not know is high,
+ * including any input field that could change what runs (`actionFields`).
  */
-export function classifyPermission({ toolName, toolInput, cwd }: PermissionRequestFacts): PermissionRisk {
+export function classifyPermission(facts: PermissionRequestFacts): PermissionRisk {
+  const fieldReasons = actionFields(facts.toolName, facts.toolInput).map((field) => field.reason);
+  if (facts.agent === "codex" && SHELL_TOOLS.has(facts.toolName))
+    fieldReasons.push("may run in another folder or outside the sandbox");
+  return verdict([...toolReasons(facts), ...fieldReasons]);
+}
+
+function toolReasons({ toolName, toolInput, cwd }: PermissionRequestFacts): RiskReason[] {
   if (SHELL_TOOLS.has(toolName)) {
     const command = shellCommand(toolInput);
-    if (command === undefined || command.trim() === "") return verdict(["has input Hotline cannot read"]);
-    return verdict(shellReasons(command, cwd));
+    if (command === undefined || command.trim() === "") return ["has input Hotline cannot read"];
+    return shellReasons(command, cwd);
   }
   if (PATCH_TOOLS.has(toolName)) {
     const patch = shellCommand(toolInput);
     const files = patch === undefined ? undefined : patchFiles(patch);
-    if (files === undefined) return verdict(["has input Hotline cannot read"]);
-    return verdict([
-      ...(files.deletes ? (["deletes files"] as const) : []),
-      ...pathReasons(files.paths, cwd),
-    ]);
+    if (files === undefined) return ["has input Hotline cannot read"];
+    return [...(files.deletes ? (["deletes files"] as const) : []), ...pathReasons(files.paths, cwd)];
   }
   const writeFields = Object.hasOwn(FILE_WRITE_TOOLS, toolName) ? FILE_WRITE_TOOLS[toolName] : undefined;
   if (writeFields !== undefined) {
     const paths = writeFields.map((field) => stringField(toolInput, field));
-    if (paths.some((path) => path === undefined)) return verdict(["has input Hotline cannot read"]);
-    return verdict(pathReasons(paths as string[], cwd));
+    if (paths.some((path) => path === undefined)) return ["has input Hotline cannot read"];
+    return pathReasons(paths as string[], cwd);
   }
-  if (SENDING_TOOLS.has(toolName)) return verdict(["sends data off the machine"]);
+  if (SENDING_TOOLS.has(toolName)) return ["sends data off the machine"];
   if (READ_TOOLS.has(toolName)) {
     const paths = ["file_path", "path", "notebook_path"].map((field) => stringField(toolInput, field));
     const patterns = ["pattern", "glob", "query"].map((field) => stringField(toolInput, field));
     const credentials =
       paths.some((path) => path !== undefined && credentialPath(cwd, path)) ||
       patterns.some((pattern) => pattern !== undefined && CREDENTIAL_PATH.test(pattern));
-    return verdict(credentials ? ["touches credentials or agent settings"] : []);
+    return credentials ? ["touches credentials or agent settings"] : [];
   }
   // MCP tools (`mcp__server__tool`) and anything else: Hotline cannot tell what they do.
-  return verdict(["uses a tool Hotline does not know"]);
+  return ["uses a tool Hotline does not know"];
 }

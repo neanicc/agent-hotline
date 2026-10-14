@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  actionFields,
   classifyPermission,
   insideProject,
   patchFiles,
   projectRoot,
   resolvePosix,
+  shellCommand,
   splitShell,
 } from "../src/index.js";
 
@@ -490,5 +492,270 @@ describe("path helpers", () => {
       deletes: false,
     });
     expect(patchFiles("nothing")).toBeUndefined();
+  });
+});
+
+// HL-06b: what is judged must be what runs. Field names come from the Claude Code
+// hooks reference (https://code.claude.com/docs/en/hooks, "PreToolUse input"),
+// the Claude Code 2.1.299 tool input schemas, and Codex's tool arguments and
+// hook payload (openai/codex codex-rs/core/src/tools/approvals.rs and
+// sandboxing.rs at 7eed30ad1beaebc20b7d848ce9ee887525a379b0).
+describe("fields that change what runs (HL-06b)", () => {
+  const shell = (toolInput: Record<string, unknown>, toolName = "Bash") =>
+    classifyPermission({ toolName, toolInput: { command: "ls", ...toolInput }, cwd });
+  const tool = (toolName: string, toolInput: unknown) => classifyPermission({ toolName, toolInput, cwd });
+  const LOW = { risk: "low", reasons: [] };
+
+  it.each([
+    [{}],
+    [{ description: "List files" }],
+    [{ description: null }],
+    [{ timeout: 120000 }],
+    [{ timeout: 0 }],
+    // The Claude Code docs example sends `run_in_background: false`; `false` is the default and changes nothing.
+    [{ description: "Run test suite", timeout: 120000, run_in_background: false }],
+    [{ dangerouslyDisableSandbox: false }],
+    [{ with_escalated_permissions: false }],
+  ])("keeps a read-only shell command low with only benign fields: %j", (fields) => {
+    expect(shell(fields)).toEqual(LOW);
+  });
+
+  it.each([
+    // Folder: Codex `exec_command` and the older `shell` take `workdir`, `local_shell`
+    // `working_directory`; `cwd` is the common alternative.
+    [{ workdir: "/etc" }, "asks to run in another folder"],
+    [{ workdir: "." }, "asks to run in another folder"],
+    [{ workdir: "src" }, "asks to run in another folder"],
+    [{ working_directory: "/etc" }, "asks to run in another folder"],
+    [{ cwd: "/Users/example/.ssh" }, "asks to run in another folder"],
+    // Environment: Codex local_shell `env`.
+    [{ env: { GIT_DIR: "/tmp/other" } }, "asks to set environment variables"],
+    [{ env: {} }, "asks to set environment variables"],
+    // Sandbox and escalation: Claude Code `dangerouslyDisableSandbox`; Codex
+    // `with_escalated_permissions`, `sandbox_permissions`, `additional_permissions`, `justification`.
+    [{ dangerouslyDisableSandbox: true }, "asks to run outside the sandbox"],
+    [{ dangerouslyDisableSandbox: "false" }, "asks to run outside the sandbox"],
+    [{ with_escalated_permissions: true }, "asks to run outside the sandbox"],
+    [{ sandbox_permissions: "require_escalated" }, "asks to run outside the sandbox"],
+    [{ sandbox_permissions: "use_default" }, "asks to run outside the sandbox"],
+    [{ additional_permissions: { network: true } }, "asks to run outside the sandbox"],
+    [{ justification: "needs to write the global cache" }, "asks to run outside the sandbox"],
+    // Claude Code 2.1.299 Bash `allowed_domains`: lets the sandboxed command reach these hosts.
+    [{ allowed_domains: ["example.com"] }, "asks for network access"],
+    // Background: Claude Code Bash `run_in_background`.
+    [{ run_in_background: true }, "asks to run in the background"],
+    [{ run_in_background: "no" }, "asks to run in the background"],
+    // Anything else: internal or newer fields, Codex exec_command options, prototype names.
+    [
+      { _simulatedSedEdit: { filePath: "/etc/hosts", newContent: "x" } },
+      "has a setting Hotline does not know",
+    ],
+    [{ _host: "other-mac" }, "has a setting Hotline does not know"],
+    [{ environment_id: "remote-1" }, "has a setting Hotline does not know"],
+    [{ user: "root" }, "has a setting Hotline does not know"],
+    [{ max_output_tokens: 100 }, "has a setting Hotline does not know"],
+    [{ shell: "/bin/zsh" }, "has a setting Hotline does not know"],
+    [{ login: true }, "has a setting Hotline does not know"],
+    [{ tty: true }, "has a setting Hotline does not know"],
+    [{ timeout_ms: 1000 }, "has a setting Hotline does not know"],
+    [{ yield_time_ms: 1000 }, "has a setting Hotline does not know"],
+    [{ prefix_rule: ["ls"] }, "has a setting Hotline does not know"],
+    [{ constructor: 1 }, "has a setting Hotline does not know"],
+    [JSON.parse('{"__proto__": {"x": 1}}') as Record<string, unknown>, "has a setting Hotline does not know"],
+    // Benign names with values Hotline cannot read.
+    [{ timeout: "60000" }, "has input Hotline cannot read"],
+    [{ timeout: -1 }, "has input Hotline cannot read"],
+    [{ timeout: Number.POSITIVE_INFINITY }, "has input Hotline cannot read"],
+    [{ description: 5 }, "has input Hotline cannot read"],
+    [{ description: { text: "x" } }, "has input Hotline cannot read"],
+  ])("makes a read-only shell command high for %j: %s", (fields, reason) => {
+    expect(shell(fields)).toEqual({ risk: "high", reasons: [reason] });
+  });
+
+  it("applies to every shell tool name", () => {
+    for (const toolName of ["Bash", "shell", "exec_command", "local_shell"]) {
+      expect(shell({}, toolName), toolName).toEqual(LOW);
+      expect(shell({ workdir: "/etc" }, toolName).reasons, toolName).toEqual([
+        "asks to run in another folder",
+      ]);
+    }
+  });
+
+  it("lists field reasons with the command's own, once each, in a stable order", () => {
+    expect(
+      classifyPermission({
+        toolName: "Bash",
+        toolInput: {
+          command: "rm -rf build",
+          run_in_background: true,
+          workdir: "/tmp",
+          dangerouslyDisableSandbox: true,
+          env: { A: "1" },
+          extra: 1,
+          more: 2,
+        },
+        cwd,
+      }).reasons,
+    ).toEqual([
+      "deletes files",
+      "asks to run outside the sandbox",
+      "asks to run in another folder",
+      "asks to run in the background",
+      "asks to set environment variables",
+      "has a setting Hotline does not know",
+    ]);
+  });
+
+  it("names each field it does not judge, with its value untouched", () => {
+    expect(
+      actionFields("Bash", { command: "ls", description: "x", timeout: 5, workdir: "/etc", foo: [1] }),
+    ).toEqual([
+      { name: "workdir", value: "/etc", reason: "asks to run in another folder" },
+      { name: "foo", value: [1], reason: "has a setting Hotline does not know" },
+    ]);
+    expect(actionFields("Bash", "ls")).toEqual([]);
+    expect(actionFields("mcp__x__y", { workdir: "/etc" })).toEqual([]);
+  });
+
+  it("makes cd, pushd and popd high anywhere in a command: the shell keeps its folder between calls", () => {
+    for (const command of [
+      "cd src && ls",
+      "cd",
+      "cd ..",
+      "ls; cd /etc",
+      "pushd src",
+      "popd",
+      "git status && cd ../other && git status",
+      "builtin cd /",
+      "ls cd",
+      "CD src",
+    ]) {
+      const result = bash(command);
+      expect(result.risk, command).toBe("high");
+      expect(result.reasons, command).toContain("asks to run in another folder");
+    }
+    // The reason comes from `cd` alone; the rest of the line was read-only.
+    expect(bash("cd src && git status")).toEqual({
+      risk: "high",
+      reasons: ["asks to run in another folder"],
+    });
+    // A file whose name merely starts with `cd` is not the command.
+    expect(bash("cat docs/cd.md")).toEqual(LOW);
+    expect(bash("ls abcd")).toEqual(LOW);
+  });
+
+  it("writes an argv array as the shell line that runs exactly that argv", () => {
+    expect(shellCommand({ command: ["ls", "-la"] })).toBe("ls -la");
+    expect(shellCommand({ command: ["cat", "a b.txt"] })).toBe("cat 'a b.txt'");
+    expect(shellCommand({ command: ["cat", "it's.txt"] })).toBe(`cat 'it'"'"'s.txt'`);
+    expect(shellCommand({ command: ["echo", ""] })).toBe("echo ''");
+    // Earlier versions dropped the quote, so the owner heard `rm 'ab'` for the file `a'b`.
+    expect(shellCommand({ command: ["rm", "a'b"] })).toBe(`rm 'a'"'"'b'`);
+    const parts = [
+      "",
+      " ",
+      "a'b",
+      "''",
+      '"',
+      "!",
+      `a"b'c`,
+      "*",
+      "~",
+      "#x",
+      "=x",
+      "a\tb",
+      "a\nb",
+      "é",
+      "a;b",
+      "|",
+    ];
+    for (const part of parts) {
+      const argv = ["echo", part];
+      expect(splitShell(shellCommand({ command: argv }) ?? ""), JSON.stringify(part)).toEqual([
+        { words: argv, redirects: [] },
+      ]);
+    }
+    expect(bash(["cat", "it's.txt"])).toEqual(LOW);
+    expect(bash(["echo", "a; rm -rf /"])).toEqual(LOW);
+    expect(bash(["bash", "-lc", "cd /etc && cat passwd"]).reasons).toContain("asks to run in another folder");
+    // What the shell would expand is refused, as for a string command.
+    expect(bash(["echo", "$HOME"]).risk).toBe("high");
+    expect(bash(["ls", 1]).reasons).toEqual(["has input Hotline cannot read"]);
+    expect(bash([]).reasons).toEqual(["has input Hotline cannot read"]);
+  });
+
+  it.each([
+    ["Write", { file_path: "src/a.ts", content: "x" }],
+    ["Edit", { file_path: "src/a.ts", old_string: "a", new_string: "b", replace_all: true }],
+    ["MultiEdit", { file_path: "src/a.ts", edits: [{ old_string: "a", new_string: "b" }] }],
+    [
+      "NotebookEdit",
+      { notebook_path: "nb.ipynb", cell_id: "c1", new_source: "x", cell_type: "code", edit_mode: "insert" },
+    ],
+    [
+      "apply_patch",
+      { command: "*** Begin Patch\n*** Update File: a.ts\n*** End Patch\n", description: null },
+    ],
+    ["Read", { file_path: "src/a.ts", offset: 1, limit: 10, pages: "1-2" }],
+    ["NotebookRead", { notebook_path: "nb.ipynb", cell_id: "c1" }],
+    ["Glob", { pattern: "**/*.ts", path: "src" }],
+    [
+      "Grep",
+      {
+        pattern: "TODO",
+        path: "src",
+        glob: "*.ts",
+        output_mode: "content",
+        "-A": 1,
+        "-B": 1,
+        "-C": 1,
+        context: 2,
+        "-i": true,
+        "-n": true,
+        type: "ts",
+        head_limit: 5,
+        offset: 0,
+        multiline: false,
+      },
+    ],
+    ["LS", { path: "src", ignore: ["dist"] }],
+  ])("keeps %s low with only its known fields, and makes any other field high", (toolName, input) => {
+    expect(tool(toolName, input)).toEqual(LOW);
+    for (const extra of ["mode", "workdir", "_host", "encoding", "constructor"]) {
+      expect(tool(toolName, { ...input, [extra]: "x" }), `${toolName} ${extra}`).toEqual({
+        risk: "high",
+        reasons: ["has a setting Hotline does not know"],
+      });
+    }
+  });
+
+  it("reads a non-string apply_patch description as input it cannot read", () => {
+    const command = "*** Begin Patch\n*** Update File: a.ts\n*** End Patch\n";
+    expect(tool("apply_patch", { command, description: 3 }).reasons).toEqual([
+      "has input Hotline cannot read",
+    ]);
+  });
+
+  it("makes every Codex shell request high: Codex does not send its folder or sandbox setting", () => {
+    const codex = (toolName: string, toolInput: unknown) =>
+      classifyPermission({ toolName, toolInput, cwd, agent: "codex" });
+    expect(codex("Bash", { command: "ls" })).toEqual({
+      risk: "high",
+      reasons: ["may run in another folder or outside the sandbox"],
+    });
+    expect(codex("Bash", { command: "git push", description: "network-access github.com" }).reasons).toEqual([
+      "pushes or rewrites git history",
+      "may run in another folder or outside the sandbox",
+    ]);
+    // Patches name their files and are judged as before; Claude Code's shell requests are unchanged.
+    const patch = "*** Begin Patch\n*** Update File: README.md\n*** End Patch\n";
+    expect(codex("apply_patch", { command: patch })).toEqual(LOW);
+    const claude = classifyPermission({
+      toolName: "Bash",
+      toolInput: { command: "ls" },
+      cwd,
+      agent: "claude-code",
+    });
+    expect(claude).toEqual(LOW);
   });
 });
