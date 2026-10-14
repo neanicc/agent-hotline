@@ -110,9 +110,20 @@ describe("hotline voice apply", () => {
     });
     const agent = fetch.requests[5]?.body as {
       tags: string[];
-      conversation_config: { agent: { prompt: { tool_ids: string[] } } };
+      conversation_config: {
+        agent: {
+          prompt: { tool_ids: string[]; llm: string; thinking_budget: number; backup_llm_config: unknown };
+        };
+      };
     };
     expect(agent.tags).toContain(`definition-v${AGENT_DEFINITION_VERSION}`);
+    // HL-14d: the LLM is always sent, thinking off, ElevenLabs' default backups kept.
+    expect(agent.conversation_config.agent.prompt.llm).toBe("claude-haiku-4-5");
+    expect(agent.conversation_config.agent.prompt.thinking_budget).toBe(0);
+    expect(agent.conversation_config.agent.prompt.backup_llm_config).toEqual({ preference: "default" });
+    expect(first.stdout).toContain(
+      `created the agent (definition v${AGENT_DEFINITION_VERSION}, LLM claude-haiku-4-5)`,
+    );
     expect(agent.conversation_config.agent.prompt.tool_ids).toEqual([
       "tool_fake_1",
       "tool_fake_2",
@@ -137,6 +148,41 @@ describe("hotline voice apply", () => {
       ...[1, 2, 3, 4].map((n) => `PATCH /v1/convai/tools/tool_fake_${n}`),
       "PATCH /v1/convai/agents/agent_fake_1",
     ]);
+  });
+
+  it("sends voice.llm when the config overrides the model (HL-14d)", async () => {
+    await writeSetup({
+      llm: "claude-sonnet-5-5",
+      agentId: "agent_fake_1",
+      toolSecretId: "sec_fake_1",
+      toolIds: {
+        submit_answer: "tool_fake_1",
+        verify_pin: "tool_fake_2",
+        get_status: "tool_fake_3",
+        send_instruction: "tool_fake_4",
+      },
+    });
+    const fetch = fakeElevenLabs();
+    const result = await cli(["voice", "apply"], testContext(setup, { fetch }));
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain(
+      `updated the agent to definition v${AGENT_DEFINITION_VERSION}, LLM claude-sonnet-5-5`,
+    );
+    const patch = fetch.requests.find((r) => r.url.endsWith("/v1/convai/agents/agent_fake_1"));
+    const body = patch?.body as
+      | { conversation_config: { agent: { prompt: { llm: string; backup_llm_config: unknown } } } }
+      | undefined;
+    expect(body?.conversation_config.agent.prompt.llm).toBe("claude-sonnet-5-5");
+    expect(body?.conversation_config.agent.prompt.backup_llm_config).toEqual({ preference: "default" });
+  });
+
+  it("refuses an undocumented voice.llm before anything is sent", async () => {
+    await writeSetup({ llm: "claude-haiku-5-5" });
+    const fetch = fakeElevenLabs();
+    const result = await cli(["voice", "apply"], testContext(setup, { fetch }));
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("voice.llm");
+    expect(fetch.requests).toEqual([]);
   });
 
   it("sends the current local tool secret on every apply, so a changed store keeps answers working", async () => {

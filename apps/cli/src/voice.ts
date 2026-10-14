@@ -69,6 +69,7 @@ async function apply(context: CliContext, out: Output, configPath: string, confi
     publicUrl,
     toolSecret,
     ...(config.voice.voiceId === undefined ? {} : { voiceId: config.voice.voiceId }),
+    ...(config.voice.llm === undefined ? {} : { llm: config.voice.llm }),
     ...(config.voice.agentId === undefined ? {} : { agentId: config.voice.agentId }),
     ...(config.voice.toolSecretId === undefined ? {} : { toolSecretId: config.voice.toolSecretId }),
     ...(config.voice.toolIds === undefined ? {} : { toolIds: config.voice.toolIds }),

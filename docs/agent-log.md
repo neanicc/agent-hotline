@@ -2723,3 +2723,81 @@ Template:
   - P3 (Enter is yes on a first run): kept, per the owner's "least
     friction". The explanation of what is sent prints before the question,
     and an earlier `off` now defaults to no.
+
+## 2026-10-14 — HL-14d Voice agent on Claude Haiku 4.5, set explicitly (#57)
+
+- Owner direction (comments on #57): bill the user as little as possible,
+  since the voice agent only converses and calls tools and the daemon checks
+  every decision (fail closed), so a cheaper model costs friction, never
+  safety. Use `claude-haiku-4-5`, not `claude-haiku-5-5` (in the API enum but
+  not on the documented list). Keep `voice.llm` configurable against an
+  allowlist, thinking off, ElevenLabs' default backups on. Added from HL-09c
+  (#54): the persona's read-back example must name the tool and the whole
+  command, and a test must show the daemon recognises it.
+- Decision / change: `AGENT_DEFINITION_VERSION` is 6. `hotlineAgentConfig`
+  sends `prompt.llm` (`voice.llm`, default `DEFAULT_VOICE_LLM` =
+  `claude-haiku-4-5`), `thinking_budget: 0` and `backup_llm_config:
+  {preference: "default"}`. Core's config takes an optional `voice.llm` from
+  `VOICE_LLMS` (`claude-haiku-4-5`, `claude-sonnet-4-6`, `claude-sonnet-5-5`,
+  each on both ElevenLabs' LLM page and its create-agent API reference, read
+  2026-10-14); anything else fails config loading, and `hotlineAgentConfig`
+  refuses it too. `hotline voice apply` sends it and logs the model;
+  `hotline doctor` reads `conversation_config.agent.prompt.llm` from the
+  deployed agent, prints "the agent runs on <llm>", and warns (never fails)
+  when it differs from the config. The read-back sentence in outbound step 2
+  now says "names the tool and the whole command as the ask gives them, keeps
+  the ask's key words and the session name", with the example "Allow Bash:
+  pnpm test, for Claude in demo-app? Yes?". No `SAFETY_RULES` sentence
+  changed; the snapshot diff is that sentence, the three body fields and the
+  `definition-v6` tag.
+- Decisions (no human available):
+  - The field names were clear in the API reference (`llm`, `thinking_budget`,
+    `reasoning_effort`, `backup_llm_config` with `preference` `default`,
+    `disabled` or `override`), so all three settings are sent, not only
+    `llm`. `reasoning_effort` is not sent: the reference says it is "only
+    available for some models", and Claude thinking is set by the budget.
+    Whether ElevenLabs accepts `thinking_budget: 0` for each allowed model is
+    a live-check item.
+  - The example names the full session ("for Claude in demo-app"), not just
+    the folder as the issue's example did ("in demo-app"): with another
+    session's ask on the call, the daemon's reading match needs the words no
+    other ask has ("claude"), and a test covers that two-ask case.
+  - A model mismatch warns rather than fails: it changes cost and latency,
+    not what the daemon accepts.
+  - `costs.llmPerMinute` stays $0.03: Haiku 4.5 at $1 / $5 per million tokens,
+    with a prompt of about 1,800 tokens resent each turn, comes to roughly 20k
+    to 30k input tokens a minute, about $0.02 to $0.03 plus the 10% Vertex
+    uplift ElevenLabs mentions for some Claude models. An estimate, not a
+    measurement; the README row now names Haiku and its token prices, and
+    docs/voice.md gives the Sonnet figures (about 2x and 3x).
+  - The fake voice provider's read-back ("Allow Bash to git push origin main
+    for Claude in demo-app? Yes?") already names the tool and command and is
+    left alone, so the existing daemon tests keep their meaning.
+- Evidence (automated, worktree, Node 24 locally): `scripts/ci/run.sh build`
+  passes (typecheck and Biome); `CI=true scripts/ci/run.sh test` passes, 1723
+  tests in 58 files; `scripts/ci/run.sh package` passes. New tests: the
+  prompt's read-back sentence and the absence of the v5 example, the body's
+  `llm`, `thinking_budget` and `backup_llm_config`, every allowed override and
+  refused ids (`elevenlabs-agent.test.ts`); `voice.llm` accepted and refused
+  (`config.test.ts`); the prompt's own example, extracted from `AGENT_PROMPT`,
+  recognised by `readings()` as the permission ask's read-back and confirming
+  the allow alone and with a second session's ask, while the v5 example fails
+  closed with "the request was not read back for a yes"
+  (`persona-readings.test.ts`); doctor's pass line and warnings for an agent
+  on ElevenLabs' default, an unapplied `voice.llm`, and an unprintable value
+  (`doctor.test.ts`); `voice apply` sending the default and an override, and
+  refusing `claude-haiku-5-5` before any request (`voice.test.ts`).
+  `scripts/ci/run.sh eval`: "NOT RUN (scenario suite not implemented yet;
+  HL-12)". No ElevenLabs request was made and no call was placed.
+- Open issues or follow-ups: turn latency, tool calls and the `system__*`
+  variables on Haiku 4.5 are live-check items (added to docs/live-check.md);
+  if Haiku follows the read-back protocol poorly, switch with `voice.llm`.
+  `claude-haiku-5-5` could be added to `VOICE_LLMS` once ElevenLabs documents
+  it. Doctor's cost estimate does not yet derive `llmPerMinute` from
+  `voice.llm`.
+- Bot staff review on #70 (approve with nits, no P0 or P1). P2 answered in
+  docs/voice.md: ElevenLabs' default backup models may come from another LLM
+  vendor, so while one answers the same redacted prompt, asks and transcript
+  go to that vendor. Backups stay on by the owner's direction on #57. P3
+  (doctor's `llmPerMinute` does not follow `voice.llm`) is the follow-up
+  already listed above.

@@ -2,6 +2,7 @@
 // daemon's health check and ElevenLabs. Secrets are never printed.
 import { mkdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { DEFAULT_VOICE_LLM } from "@hotline/core";
 import { FileSecretStore, type JudgeHost, openStore, writePrivateFile } from "@hotline/daemon";
 import { AGENT_DEFINITION_VERSION } from "@hotline/providers";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -65,7 +66,12 @@ async function installAll() {
 
 const TOOL_NAME_BY_ID = Object.fromEntries(Object.entries(TOOL_IDS).map(([name, id]) => [id, name]));
 
-function healthy(version = AGENT_DEFINITION_VERSION, toolOrigin = "https://hotline-fake.example.com") {
+function healthy(
+  version = AGENT_DEFINITION_VERSION,
+  toolOrigin = "https://hotline-fake.example.com",
+  /** `null` leaves `llm` out, as on an agent from before definition v6. */
+  llm: unknown = DEFAULT_VOICE_LLM,
+) {
   return fakeFetch(
     route("GET", "/v1/health", 200, { ok: true, version: "0.0.0" }),
     route("GET", /^\/v1\/convai\/tools\/t\d$/, 200, (request: Recorded) => {
@@ -85,7 +91,9 @@ function healthy(version = AGENT_DEFINITION_VERSION, toolOrigin = "https://hotli
       agent_id: "agent_fake_1",
       tags: ["agent-hotline", `definition-v${version}`],
       conversation_config: {
-        agent: { prompt: { tool_ids: Object.values(TOOL_IDS) } },
+        agent: {
+          prompt: { tool_ids: Object.values(TOOL_IDS), ...(llm === null ? {} : { llm }) },
+        },
         tts: { voice_id: "Voice0000000000000001" },
       },
     }),
@@ -183,6 +191,46 @@ describe("hotline doctor", () => {
     expect(lines(result.stdout, "FAIL").join("\n")).toContain(
       `definition v${AGENT_DEFINITION_VERSION - 1}, this hotline has v${AGENT_DEFINITION_VERSION}; run hotline voice apply`,
     );
+  });
+
+  it("reports the deployed LLM and warns when it is not the one this config wants (HL-14d)", async () => {
+    await writeSetup();
+    await installAll();
+    const ok = await cli(["doctor", "--home", setup.home], context());
+    expect(ok.stdout).toContain("the agent runs on claude-haiku-4-5");
+    const warnings = async (llm: unknown, voice: Record<string, unknown> = {}) => {
+      await writeSetup({
+        voice: {
+          agentId: "agent_fake_1",
+          agentPhoneNumberId: "phnum_fake_1",
+          voiceId: "Voice0000000000000001",
+          toolIds: TOOL_IDS,
+          toolSecretId: "sec_fake_1",
+          ...voice,
+        },
+      });
+      const result = await cli(
+        ["doctor", "--home", setup.home],
+        context(healthy(AGENT_DEFINITION_VERSION, undefined, llm)),
+      );
+      // A different model costs friction, never safety, so it warns and does not fail.
+      expect(lines(result.stdout, "FAIL")).toEqual([]);
+      expect(result.code).toBe(0);
+      return lines(result.stdout, "WARN").join("\n");
+    };
+    // An agent left on ElevenLabs' default, from before definition v6.
+    expect(await warnings(null)).toContain(
+      "the agent runs on ElevenLabs' default LLM, this config wants claude-haiku-4-5; run hotline voice apply",
+    );
+    // voice.llm changed but not applied yet.
+    expect(await warnings("claude-haiku-4-5", { llm: "claude-sonnet-5-5" })).toContain(
+      "the agent runs on claude-haiku-4-5, this config wants claude-sonnet-5-5; run hotline voice apply",
+    );
+    expect(await warnings("claude-sonnet-5-5", { llm: "claude-sonnet-5-5" })).toBe("");
+    // Whatever ElevenLabs returns is never printed unless it looks like an LLM id.
+    const odd = await warnings("claude\u0007\nrun this");
+    expect(odd).toContain("the agent runs on ElevenLabs' default LLM");
+    expect(odd).not.toContain("run this");
   });
 
   it("finds hooks installed with a wrapper --command when given the same --command", async () => {
