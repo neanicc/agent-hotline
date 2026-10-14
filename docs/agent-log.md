@@ -821,3 +821,20 @@ Template:
   Documented that a repeated identical `verify_pin` in one call gets its first
   answer. Future listener changes such as `bodyLimit`, `maxInFlight` and
   `bodyTimeoutMs` should land in their own PRs.
+- Eighth bot staff review on #33 (score 90, one P2, three P3s):
+  - P2, fixed in the route rather than left to HL-09: `elevenLabsRoutes` takes
+    a required `placedCall(conversationId)`, and a call counts as outbound
+    only when Hotline placed it. Any other conversation is inbound and needs
+    the PIN, whatever its numbers say. `parsePostCallEvent`'s owner context
+    takes the same predicate, so turns on an outbound-looking call Hotline did
+    not place are a caller's. `runDaemon` passes `() => false` until HL-09
+    provides the real lookup.
+  - P3, fixed: the post-call replay memory no longer evicts live events; when
+    1000 are held it answers `503` so ElevenLabs retries.
+  - P3, documented in `docs/daemon.md`: forged fresh headers can still crowd
+    the post-call slots; anyone who answers the owner's phone on an outbound
+    call counts as the owner; and the inbound PIN boundary has no clock-skew
+    margin.
+  - Mutation checks, each reverted: outbound without `placedCall` in the route
+    (1 test fails), owner turns on an unplaced outbound call (2), evicting
+    live post-call events (1).

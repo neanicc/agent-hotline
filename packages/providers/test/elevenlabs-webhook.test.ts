@@ -96,6 +96,7 @@ const transcription = {
 // T + 2 s, before it; `conv_late_pin` only at T + 10 s, after it.
 const OWNER_CONTEXT = {
   ownerNumber: "+15555550100",
+  placedCall: (id: string) => id !== "conv_unplaced",
   pinVerifiedAt: (id: string) =>
     id === "conv_pin"
       ? new Date((T + 2) * 1000)
@@ -140,6 +141,7 @@ describe("parsePostCallEvent", () => {
   it.each([
     ["an outbound call to the owner", call("outbound", "+15555550100"), "owner"],
     ["an outbound call to another number", call("outbound", "+15555550199"), "caller"],
+    ["an outbound call Hotline did not place", call("outbound", "+15555550100", "conv_unplaced"), "caller"],
     [
       "an inbound call from the owner's number after the PIN",
       call("inbound", "+15555550100", "conv_pin"),

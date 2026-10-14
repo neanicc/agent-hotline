@@ -180,6 +180,9 @@ async function voiceWebhook(
     webhookSecret,
     agentId,
     ownerNumber: config.owner.phoneNumber,
+    // No calls are placed until call orchestration (HL-09), so every call is
+    // treated as inbound and needs the PIN.
+    placedCall: () => false,
     pins,
     clock,
     redact: (text) => redactor.text(text),

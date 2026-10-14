@@ -127,6 +127,8 @@ export interface OwnerContext {
   ownerNumber: string;
   /** When this conversation passed `verify_pin` (the daemon's PinGate), if it did. */
   pinVerifiedAt: (conversationId: string) => Date | undefined;
+  /** Whether Hotline placed this conversation; only then is an outbound call the owner's. */
+  placedCall: (conversationId: string) => boolean;
 }
 
 /**
@@ -143,7 +145,9 @@ function ownerFrom(
   externalNumber: string | null | undefined,
 ): number | undefined {
   if (owner === undefined || externalNumber !== owner.ownerNumber) return undefined;
-  if (direction === "outbound") return Number.NEGATIVE_INFINITY;
+  if (direction === "outbound") {
+    return owner.placedCall(conversationId) ? Number.NEGATIVE_INFINITY : undefined;
+  }
   if (direction !== "inbound") return undefined;
   const verifiedAt = owner.pinVerifiedAt(conversationId);
   return verifiedAt === undefined ? undefined : verifiedAt.getTime() / 1000;

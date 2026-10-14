@@ -120,6 +120,12 @@ export interface ElevenLabsRoutesOptions {
   agentId: string;
   /** `config.owner.phoneNumber`: a tool call is served only when the owner is on one end of the call. */
   ownerNumber: string;
+  /**
+   * Whether Hotline placed this conversation and is still waiting on it (call
+   * orchestration, HL-09, knows). Only such a call counts as outbound; any
+   * other conversation is treated as inbound and needs the PIN first.
+   */
+  placedCall: (conversationId: string) => boolean;
   pins: PinGate;
   clock: () => Date;
   /** Applied to everything the routes send back to ElevenLabs, such as the daemon's redactor. */
@@ -266,10 +272,13 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
 
   const ownerOnCall = (body: GetStatusBody) =>
     body.caller_id === options.ownerNumber || body.called_number === options.ownerNumber;
-  // Only a call to the owner's number from somewhere else is one Hotline placed;
-  // anything else that passed `ownerOnCall` came in from (what claims to be) the owner.
+  // Outbound only for a conversation Hotline placed, to the owner's number from
+  // elsewhere; anything else that passed `ownerOnCall` is treated as inbound
+  // from (what claims to be) the owner, so it needs the PIN first.
   const callDirection = (body: GetStatusBody): ToolCall["direction"] =>
-    body.called_number === options.ownerNumber && body.caller_id !== options.ownerNumber
+    options.placedCall(body.conversation_id) &&
+    body.called_number === options.ownerNumber &&
+    body.caller_id !== options.ownerNumber
       ? "outbound"
       : "inbound";
 
@@ -344,6 +353,7 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
       const event = parsePostCallEvent(parseJson(rawBody(request)), {
         ownerNumber: options.ownerNumber,
         pinVerifiedAt: (conversationId) => pins.verifiedAt(conversationId),
+        placedCall: options.placedCall,
       });
       if (event === undefined || event.type === "other" || event.agentId !== options.agentId) {
         request.log.info({ kind: event?.type ?? "malformed" }, "post-call webhook ignored");
@@ -352,8 +362,9 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
       // One delivery per event and conversation, whatever the signature header
       // looks like, so a replay (or a retry after success) is not handled twice.
       const key = `${event.type}:${event.conversationId}`;
+      // Only expired events are forgotten; a live one is never evicted.
       for (const [seen, expires] of handled) {
-        if (expires > receivedAt.getTime() && handled.size <= SEEN_EVENTS) break;
+        if (expires > receivedAt.getTime()) break;
         handled.delete(seen);
       }
       let pending = inFlight.get(key);
@@ -364,6 +375,11 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
       if (handled.has(key)) {
         request.log.info({ kind: event.type }, "duplicate post-call webhook ignored");
         return reply.code(200).send({});
+      }
+      if (handled.size >= SEEN_EVENTS) {
+        // Full of live events: ask ElevenLabs to retry later rather than forget one.
+        request.log.warn("post-call webhook deferred: replay memory full");
+        return reply.code(503).send();
       }
       // No await between the check above and this claim, so one attempt runs at a time.
       const attempt = Promise.resolve().then(() => handlers.postCall(event, receivedAt));

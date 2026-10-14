@@ -63,6 +63,8 @@ let status: string;
 let failPostCall: number;
 let pins: PinGate;
 let redactor: ReturnType<typeof createRedactor>;
+/** Conversations Hotline did not place; every other id counts as placed. */
+let unplaced: Set<string>;
 
 function server(overrides: Partial<ElevenLabsRoutesOptions> = {}): FastifyInstance {
   const log: LogOptions = { level: "info", destination: { write: (line) => lines.push(line) }, redactor };
@@ -94,6 +96,7 @@ function server(overrides: Partial<ElevenLabsRoutesOptions> = {}): FastifyInstan
       webhookSecret: WEBHOOK_SECRET,
       agentId: AGENT_ID,
       ownerNumber: OWNER,
+      placedCall: (conversationId) => !unplaced.has(conversationId),
       pins,
       clock: () => now,
       redact: (text) => redactor.text(text),
@@ -114,6 +117,7 @@ beforeEach(() => {
   status = "1. Claude in demo-app: working on the tests.";
   failPostCall = 0;
   redactor = createRedactor([TOOL_SECRET, WEBHOOK_SECRET]);
+  unplaced = new Set();
   pins = new PinGate({
     check: async (pin) => pin === PIN,
     clock: () => now,
@@ -278,6 +282,15 @@ describe("submit_answer", () => {
     expect(answers.map((a) => [a.direction, a.decision, a.confirmation])).toEqual([
       ["inbound", { type: "deny" }, "pin"],
     ]);
+  });
+
+  it("treats a conversation Hotline did not place as inbound, whatever its numbers say", async () => {
+    unplaced.add("conv_stray");
+    expect((await answer({}, "conv_stray")).json()).toMatchObject({ result: "pin-required" });
+    expect(answers).toEqual([]);
+    await tool("verify_pin", { ...binding("conv_stray"), pin: PIN });
+    await answer({}, "conv_stray");
+    expect(answers.map((a) => [a.direction, a.confirmation])).toEqual([["inbound", "pin"]]);
   });
 
   it("accepts a low-risk answer on an outbound call without the PIN", async () => {
@@ -602,6 +615,23 @@ describe("post-call webhook", () => {
     });
     await postCall(inboundTranscript(OWNER, "conv_in_early", 30));
     expect(roles()).toEqual(["agent", "caller"]);
+  });
+
+  it("never counts the person on an outbound-looking call Hotline did not place as the owner", async () => {
+    unplaced.add("conv_stray");
+    await postCall(transcription("conv_stray"));
+    expect(roles()).toEqual(["agent", "caller"]);
+  });
+
+  it("asks ElevenLabs to retry rather than forget a live event when its memory is full", async () => {
+    for (let i = 0; i < 1000; i += 1) {
+      expect((await postCall(transcription(`conv_many_${i}`))).statusCode).toBe(200);
+    }
+    const full = await postCall(transcription("conv_one_more"));
+    expect([full.statusCode, full.body]).toEqual([503, ""]);
+    // The oldest event is still remembered, so its replay is not handled again.
+    expect((await postCall(transcription("conv_many_0"))).statusCode).toBe(200);
+    expect(postCalls).toHaveLength(1000);
   });
 
   it("ignores another agent's events and other webhook types", async () => {

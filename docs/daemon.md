@@ -196,7 +196,7 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
 | Tool | What the route does |
 | --- | --- |
 | `verify_pin` | Checks the PIN with the `PinGate`: 2 wrong PINs per call, then `end_call: true` and no further checks on that call; 6 wrong PINs across all calls of one direction in a rolling hour, or 10 in a rolling day, lock every check on that direction, the right PIN included, until enough time has passed. A caller spoofing the owner's number therefore gets at most 10 guesses a day (0.1% of a 4-digit PIN space). Each lockout calls the PinGate's `onLockout` so the owner can be told (HL-10 texts them). Inbound and outbound calls have separate budgets, so someone guessing on inbound calls (caller ID can be spoofed) cannot block PIN approvals on calls Hotline placed to the owner. The trade-off: such guessing still locks the owner's own inbound line for up to an hour, which fails closed. Answers `{verified, attempts_left, end_call}`. A verified PIN is registered with the redactor (`addShortSecret`). The PIN is checked against `owner.pinHash` with scrypt and never logged or stored |
-| `submit_answer` | On an inbound call (anything but a call to the owner's number from another number), `pin-required` until this call passed `verify_pin`, because caller ID can be spoofed. Otherwise passes the ask number, decision (`option`, `allow`, `deny`, `text`, `done` or `unclear`), the owner's words, the direction and the call ids to the `submitAnswer` handler. `confirmation` is `pin` only when this call passed `verify_pin`; nothing in the request can set it |
+| `submit_answer` | On an inbound call, `pin-required` until this call passed `verify_pin`, because caller ID can be spoofed. A call is outbound only when the injected `placedCall(conversationId)` says Hotline placed it (call orchestration knows) and it went to the owner's number from another number; everything else counts as inbound. Until HL-09, `runDaemon` passes `() => false`, so every call needs the PIN. Otherwise passes the ask number, decision (`option`, `allow`, `deny`, `text`, `done` or `unclear`), the owner's words, the direction and the call ids to the `submitAnswer` handler. `confirmation` is `pin` only when this call passed `verify_pin`; nothing in the request can set it |
 | `get_status` | `{"result": "pin-required"}` until this call passed `verify_pin`. Then the `getStatus` handler's text, redacted and cut to 1500 characters |
 | `send_instruction` | `pin-required` until this call passed `verify_pin`. Then the `sendInstruction` handler gets the session number, instruction and the owner's words |
 
@@ -223,9 +223,16 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
   leaves the event unhandled, so ElevenLabs' retry gets through. The memory
   does not survive a restart, so a signed body replayed within its 30 minute
   window after a restart is handled again: handlers must be idempotent per
-  conversation (HL-09). Durable replay protection is HL-13.
+  conversation (HL-09). Live events are never evicted: with 1000 held, a new
+  one gets `503` so ElevenLabs retries it later. Durable replay protection is
+  HL-13.
+- **Known limits:** on an outbound call, whoever picks up the owner's phone
+  counts as the owner (high-risk approvals still need the PIN). The inbound
+  PIN boundary compares the daemon's clock with ElevenLabs' call start time
+  with no skew margin; a turn at the same second as the verification is a
+  caller's.
 - **Who spoke:** the person's transcript turns are labelled `owner` only on an
-  outbound call whose other end is `owner.phoneNumber`, or, on an inbound call
+  outbound call Hotline placed whose other end is `owner.phoneNumber`, or, on an inbound call
   from that number, turns spoken after `verify_pin` succeeded (call start plus
   the turn's time in the call, against the PinGate's verification time; a turn
   without a time does not count). Everything else is a `caller` turn, which

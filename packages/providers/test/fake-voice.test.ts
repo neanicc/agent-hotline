@@ -117,6 +117,7 @@ describe("FakeVoiceProvider", () => {
     const event = parsePostCallEvent(recorded.postCalls[0], {
       ownerNumber: OWNER,
       pinVerifiedAt: () => undefined,
+      placedCall: () => true,
     });
     expect(event).toMatchObject({ type: "transcription", direction: "outbound", externalNumber: OWNER });
     expect(event?.type === "transcription" && event.transcript).toContainEqual({
