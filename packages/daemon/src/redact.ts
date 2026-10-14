@@ -24,12 +24,13 @@ const SECRET_KEY = new RegExp(SECRET_NAME, "i");
  * `name=value`, `name: value` and `"name": "value"` where the name looks secret.
  * The match starts at a name boundary and every repetition is bounded. Quoted
  * values honour backslash escapes, and anything after the closing quote up to the
- * next separator goes too. An opening quote with no closing quote within the
- * bound fails closed: everything to the end of the line is removed.
+ * next separator goes too. An unquoted value runs to the next separator, quotes
+ * inside it included (`token=a'b`, HL-13). An opening quote with no closing quote
+ * within the bound fails closed: everything to the end of the line is removed.
  */
 const SECRET_ASSIGNMENT = new RegExp(
   String.raw`(?<![A-Za-z0-9_.-])(["']?[A-Za-z0-9_.-]{0,64}(?:${SECRET_NAME})[A-Za-z0-9_.-]{0,64}["']?\s{0,8}[:=]\s{0,8})` +
-    String.raw`(\[REDACTED\]|"(?:[^"\\\r\n]|\\.){0,4096}"[^\s,;&}\]]*|'(?:[^'\\\r\n]|\\.){0,4096}'[^\s,;&}\]]*|["'][^\r\n]*|[^\s,;&"'}\]]+)`,
+    String.raw`(\[REDACTED\]|"(?:[^"\\\r\n]|\\.){0,4096}"[^\s,;&}\]]*|'(?:[^'\\\r\n]|\\.){0,4096}'[^\s,;&}\]]*|["'][^\r\n]*|[^\s,;&"'}\]][^\s,;&}\]]*)`,
   "gi",
 );
 
@@ -87,8 +88,38 @@ const KNOWN_TOKENS: readonly RegExp[] = [
   /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, // AWS access key ids
   /\bxox[abprs]-[A-Za-z0-9-]{10,}/g, // Slack tokens
   /\b(?:AC|SK)[0-9a-f]{32}\b/g, // Twilio account and API key SIDs
-  /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/g, // JWTs
 ];
+
+/** A run of the characters JWTs (and dotted tokens around them) are made of. */
+const TOKEN_RUN = /[A-Za-z0-9_.-]+/g;
+
+/**
+ * Whether a run holds a JWT: `eyJ` and at least 5 more characters, then two
+ * dot-separated parts of at least 5 characters. This replaces a regex whose
+ * scan from every `eyJ` in `eyJ-eyJ-...` was quadratic (HL-13 fuzzing): the run
+ * is split once, and each part is searched once. Like `\beyJ`, it finds a JWT
+ * after `-` or any other character, and fails closed by removing the whole run.
+ */
+function holdsJwt(run: string): boolean {
+  if (!run.includes("eyJ")) return false;
+  const parts = run.split(".");
+  for (let i = 0; i + 2 < parts.length; i++) {
+    const part = parts[i] ?? "";
+    const at = part.indexOf("eyJ");
+    if (
+      at !== -1 &&
+      part.length - at >= 8 &&
+      (parts[i + 1] ?? "").length >= 5 &&
+      (parts[i + 2] ?? "").length >= 5
+    )
+      return true;
+  }
+  return false;
+}
+
+function removeJwts(text: string): string {
+  return text.replace(TOKEN_RUN, (run) => (holdsJwt(run) ? REDACTED : run));
+}
 
 /**
  * Long runs of letters and digits look like keys or tokens (a Twilio auth token is
@@ -158,6 +189,25 @@ export interface Redactor {
   addShortSecret(digits: string): void;
 }
 
+/** `text` without its backslash escapes, so an escaped quote is not taken for a closing one. */
+function withoutEscapes(text: string): string {
+  return text.replace(/\\[\s\S]/g, "");
+}
+
+/**
+ * The quote a segment leaves open, if any, read left to right: a quote opens
+ * only outside quotes and closes only the quote it opened, so the `'` in
+ * `"ab'cd"` opens nothing.
+ */
+function unclosedQuote(segment: string): string | undefined {
+  let open: string | undefined;
+  for (const char of withoutEscapes(segment)) {
+    if (open === undefined && (char === '"' || char === "'")) open = char;
+    else if (char === open) open = undefined;
+  }
+  return open;
+}
+
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -215,6 +265,7 @@ export function createRedactor(knownSecrets: Iterable<string> = []): Redactor {
     SECRET_ASSIGNMENT_TEST.test(segment) ||
     AUTH_SCHEME_TEST.test(segment) ||
     KNOWN_TOKENS.some((pattern) => new RegExp(pattern.source).test(segment)) ||
+    removeJwts(segment) !== segment ||
     (exact !== undefined && new RegExp(exact.source).test(segment)) ||
     removeShortSecrets(segment) !== segment;
 
@@ -228,12 +279,22 @@ export function createRedactor(knownSecrets: Iterable<string> = []): Redactor {
    */
   const removeEncodedSecrets = (input: string): string => {
     if (!/%[0-9A-Fa-f]{2}|\+/.test(input)) return input;
+    // A removed segment can end inside a quoted value that goes on past the
+    // delimiter (`"token":"+,rest"`): then every segment up to the closing
+    // quote goes too, since the later passes no longer see the name (HL-13).
+    let openQuote: string | undefined;
     return input
       .split(SEGMENT_DELIMITER)
       .map((segment, index) => {
         // Odd indexes are the delimiters the split captured.
-        if (index % 2 === 1 || !/%[0-9A-Fa-f]{2}|\+/.test(segment)) return segment;
-        return looksSecret(formDecode(segment)) ? REDACTED : segment;
+        if (index % 2 === 1) return segment;
+        if (openQuote !== undefined) {
+          if (withoutEscapes(segment).includes(openQuote)) openQuote = undefined;
+          return REDACTED;
+        }
+        if (!/%[0-9A-Fa-f]{2}|\+/.test(segment) || !looksSecret(formDecode(segment))) return segment;
+        openQuote = unclosedQuote(segment);
+        return REDACTED;
       })
       .join("");
   };
@@ -252,6 +313,7 @@ export function createRedactor(knownSecrets: Iterable<string> = []): Redactor {
       return closed ? `${name}${quote}${REDACTED}${quote}` : `${name}${REDACTED}`;
     });
     for (const pattern of KNOWN_TOKENS) out = out.replace(pattern, REDACTED);
+    out = removeJwts(out);
     out = out.replace(OPAQUE_RUN, (run) =>
       run !== REDACTED && hasLetterAndDigit(run) && !NOT_SECRET_IDS.test(run) ? REDACTED : run,
     );

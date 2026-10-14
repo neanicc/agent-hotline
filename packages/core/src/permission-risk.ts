@@ -273,7 +273,7 @@ export function insideProject(cwd: string, path: string): boolean {
 
 /** Paths that hold secrets, or settings an agent could use to approve itself or run code. */
 const CREDENTIAL_PATH =
-  /(?:^|[/\\\s'"=])(?:\.env(?:\.[\w.-]+)?|\.envrc|\.ssh|\.aws|\.gnupg|\.netrc|\.npmrc|\.pypirc|\.docker|\.kube|\.hotline|\.claude|\.codex|\.config\/gh|\.git\/(?:config|hooks)|\.gitattributes|id_rsa|id_ed25519|id_ecdsa|id_dsa|credentials?(?:\.\w+)?|secrets?(?:\.\w+)?|[\w.-]+\.(?:pem|key|p12|pfx|keystore|jks))(?=$|[/\\\s'"])|keychain/i;
+  /(?:^|[/\\\s'"=:])(?:\.env(?:\.[\w.-]+)?|\.envrc|\.ssh|\.aws|\.gnupg|\.netrc|\.npmrc|\.pypirc|\.docker|\.kube|\.hotline|\.claude|\.codex|\.config\/gh|\.git\/(?:config|hooks)|\.gitattributes|id_rsa|id_ed25519|id_ecdsa|id_dsa|credentials?(?:\.\w+)?|secrets?(?:\.\w+)?|[\w.-]+\.(?:pem|key|p12|pfx|keystore|jks))(?=$|[/\\\s'"])|keychain/i;
 
 /**
  * Files that make a later "read-only" command run code: git config, hooks and
@@ -299,7 +299,7 @@ function judgedPart(cwd: string, path: string): string {
 export function hasGitComponent(path: string): boolean {
   return path
     .normalize("NFC")
-    .split("/")
+    .split(/[/:]/)
     .some((part) => part.toLowerCase() === ".git");
 }
 
@@ -503,6 +503,9 @@ export function splitShell(command: string): SimpleCommand[] | undefined {
       quoted = true;
       i = close;
     } else if (c === ";" || c === "\n") {
+      // bash refuses a `;` with no command before it (`; ls`, `ls ;;`, `ls\n;`).
+      if (c === ";" && !inWord && current.words.length === 0 && current.redirects.length === 0)
+        return undefined;
       if (!endCommand(false)) return undefined;
     } else if (c === "|") {
       if (next === "&") return undefined;
@@ -516,7 +519,8 @@ export function splitShell(command: string): SimpleCommand[] | undefined {
         endWord();
         if (pending !== undefined) return undefined;
         i++;
-        if (command[i + 1] === ">") i++;
+        // `&>>` is a syntax error in bash 3.2, the macOS /bin/bash: refused.
+        if (command[i + 1] === ">") return undefined;
         pending = "&>";
       } else {
         return undefined;
@@ -644,6 +648,47 @@ function safePath(path: string, cwd: string): boolean {
   return insideProject(cwd, path.normalize("NFC"));
 }
 
+/**
+ * ripgrep options that only change what is searched or printed (HL-13). rg
+ * keeps adding options that run programs (`--pre`, `--hostname-bin`), so rg is
+ * judged by this positive list: any other option, in any case, is high.
+ * Audited against `rg --help` of ripgrep 14.1.1: every letter and name below is
+ * a search, filter or output option there (`-h` is `--help`). A test checks the
+ * list against the installed rg's help when rg is available. Options that widen
+ * what is read past rg's defaults are left out, so they are high: `--hidden`,
+ * `--no-ignore` and `-u`/`--unrestricted` reach `.env` and `.git` with no path
+ * argument naming them, and `-L`/`--follow` reads through symlinks out of the
+ * project. So are `-g`/`--glob`/`--iglob` and `-t`/`--type`: a file a glob
+ * override or a type selects is searched even when hidden (an override also
+ * beats the ignore files), so `rg -g '.*' KEY` reads `.env`, and the `sh` type
+ * names `.bashrc` and `.zshrc`. `--type-not` only excludes and stays.
+ */
+export const RIPGREP_LONG_OPTIONS: ReadonlySet<string> = new Set(
+  (
+    "--line-number --no-line-number --ignore-case --case-sensitive --smart-case --files-with-matches " +
+    "--files-without-match --count --count-matches --word-regexp --line-regexp --fixed-strings " +
+    "--invert-match --only-matching --with-filename --no-filename --type-not " +
+    "--context --after-context --before-context --max-count --max-depth --files " +
+    "--json --color --no-heading --heading --column --stats --regexp --sort --sortr --trim --multiline " +
+    "--max-columns --vimgrep --null --quiet --text --byte-offset"
+  ).split(" "),
+);
+/** Single-letter rg flags that take no value (`-z`, which runs decompressors, is not one). */
+export const RIPGREP_FLAGS = "nNiIsSlcwxFvoHhUqab";
+/** Single-letter rg options whose value is the next word or attached digits. */
+export const RIPGREP_VALUE_OPTIONS = "ABCmTe";
+
+function knownRgOption(arg: string): boolean {
+  if (arg === "--" || !arg.startsWith("-")) return true;
+  if (arg.startsWith("--"))
+    return RIPGREP_LONG_OPTIONS.has(arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg);
+  const body = arg.slice(1);
+  if (body.length === 1) return RIPGREP_FLAGS.includes(body) || RIPGREP_VALUE_OPTIONS.includes(body);
+  // `-A3`, `-m10`: a value option with attached digits; `-nw`: a cluster of plain flags.
+  if (/^[ABCm]\d+$/.test(body)) return true;
+  return [...body].every((flag) => RIPGREP_FLAGS.includes(flag));
+}
+
 /** Whether any argument is one of `options`, also as `--opt=value`, `-xVALUE` or in a cluster such as `-iz`. */
 function forbidden(args: readonly string[], options: readonly string[]): boolean {
   return args.some((arg) =>
@@ -666,6 +711,7 @@ function readOnlyCommand({ words, redirects }: SimpleCommand, cwd: string): bool
   if (name === undefined || name.includes("/") || name.includes("=")) return false;
   if (Object.hasOwn(READ_ONLY, name)) {
     if (forbidden(args, READ_ONLY[name] ?? [])) return false;
+    if (name === "rg" && !args.every(knownRgOption)) return false;
     return args.every((arg) => safeArgument(arg, cwd));
   }
   if (name === "git") {
