@@ -2,5 +2,10 @@ packages:
   - packages/*
   - apps/*
 
+# esbuild's install script only re-checks its platform binary, which pnpm already
+# installs as an optional dependency, so it never runs.
+allowBuilds:
+  esbuild: false
+
 # Exact pins only: `pnpm add` writes "1.2.3", never "^1.2.3".
 saveExact: true

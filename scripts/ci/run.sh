@@ -5,15 +5,17 @@
 #   scripts/ci/run.sh build            lint (Biome), build and typecheck every package and its
 #                                      tests, then smoke-run the built hotline CLI
 #   scripts/ci/run.sh test             unit and integration tests
-#   scripts/ci/run.sh package          build the distributable CLI into dist/ (CI uploads it)
+#   scripts/ci/run.sh package          bundle the hotline CLI into dist/hotline (CI uploads it),
+#                                      then run it from a temporary folder outside the workspace
+#                                      (scripts/ci/check-package.mjs, fake providers only)
 #   scripts/ci/run.sh eval [--local]   setup + build, then run the scenario suite and score it
 #                                      against eval/thresholds.toml
 #
-# A stage whose inputs do not exist yet reports that and succeeds: `package`
-# until HL-15 adds the package script, `eval` (CI mode) until HL-12 adds the
-# scenario suite. Once a stage's inputs exist, it must do its real work. Never
-# make a stage succeed without exercising what it claims to check. CI has no
-# real phone, Twilio or ElevenLabs credentials: everything runs against fakes.
+# A stage whose inputs do not exist yet reports that and succeeds: `eval` (CI
+# mode) until HL-12 adds the scenario suite. Once a stage's inputs exist, it
+# must do its real work. Never make a stage succeed without exercising what it
+# claims to check. CI has no real phone, Twilio or ElevenLabs credentials:
+# everything runs against fakes.
 set -euo pipefail
 
 stage="${1:-}"
@@ -65,11 +67,13 @@ case "$stage" in
     ;;
 
   package)
-    if ! has_workspace || ! has_script package; then
-      echo "::notice::package: no package script yet (HL-15)."
+    if ! has_workspace; then
+      echo "::notice::package: no package.json yet (HL-01 not landed)."
       exit 0
     fi
     pnpm run package
+    # A bundle that still needs the workspace's node_modules fails here.
+    node scripts/ci/check-package.mjs
     ;;
 
   eval)
