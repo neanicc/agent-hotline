@@ -206,6 +206,27 @@ describe("conversational approval by voice (HL-14c)", () => {
     expect(TEXT_INSTEAD).toContain("text you");
   });
 
+  it("one reply to one reading, then a hang-up, is logged as dropped, not owner-unclear", async () => {
+    const h = await start();
+    const session = await h.registerSession();
+    const request = permission(h, session, "low", "pnpm test");
+    await h.advance(BATCH_MS);
+    // The model submits allow on the owner's first words, with no read-back, and the owner hangs up.
+    h.voice.script(
+      scriptedHuman.says(
+        { kind: "answer", ask: 1, decision: "allow", words: "hang on, who is this" },
+        { kind: "hang-up" },
+      ),
+    );
+    await h.voice.playPending();
+    await h.settle();
+    expect(h.daemon.store.getAnswer(request.id)).toBeUndefined();
+    expect(h.daemon.store.listAudit().find((e) => e.event === "call.ended")?.detail).toMatchObject({
+      result: "dropped",
+    });
+    expect(h.daemon.store.listAudit().map((e) => e.event)).not.toContain("voice.ask-unclear");
+  });
+
   it("a call the owner hung up on before an ask was read is still logged as dropped", async () => {
     const h = await start();
     const session = await h.registerSession();

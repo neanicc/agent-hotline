@@ -2143,3 +2143,12 @@ Template:
   - P3 on "mm-hmm" for high-risk asks: high-risk allows still need the PIN.
   - Mutation checks: no full-command rule (3 tests fail), a fast no not
     flagged (2), a decline not ending the request (1).
+- Bot staff review of 7b68833 (approve with nits, 88; P2 1, P3 1), both taken:
+  - P2: `owner-unclear` now needs the owner to have replied after at least
+    two readings of an ask (a read-back, the yes-or-no question, or a
+    re-reading), so one reply to one reading followed by a hang-up stays
+    `dropped`. New end-to-end test; the mutation back to one reply fails 2
+    tests.
+  - P3: `ReplyJudge` documents that `agreed` is final and not re-screened
+    for doubt markers, so a judge owns that call and must agree only to a
+    clear yes.

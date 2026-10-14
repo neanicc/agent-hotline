@@ -486,10 +486,13 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
   `no-pickup`, anything else `failed`. A transcription in which the owner never
   spoke is `no-pickup` (voicemail, silence); one where every ask was settled is
   `answered`; otherwise `dropped`. The call log (`call.ended` audit `result`)
-  says `owner-unclear` instead of `dropped` when every ask left open was read
-  and the owner replied to it, but no decision for it was confirmed (the owner
-  stayed unclear and the voice agent moved on to a text, or the answer was not
-  confirmed); each such ask gets a `voice.ask-unclear` audit entry. The queue
+  says `owner-unclear` instead of `dropped` when every ask left open was read,
+  asked again (a read-back, "is that a yes or a no?", or a re-reading), and
+  the owner replied after at least two of those readings, but no decision for
+  it was confirmed (the owner stayed unclear and the voice agent moved on to a
+  text, or the answer was not confirmed); each such ask gets a
+  `voice.ask-unclear` audit entry. One reply to one reading, then a hang-up,
+  stays `dropped`. The queue
   still gets `dropped`, so those asks are texted at once, and an unanswered
   text still expires with reason `dropped`: the core contract has no reason for
   an owner who stayed unclear yet. Its `CallRecord.outcome` is `answered`

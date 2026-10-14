@@ -510,6 +510,11 @@ export type ReplyVerdict = "agreed" | "declined" | "unclear";
  * cannot. It is given only the owner's own reply turns, verbatim: never the
  * ask, the read-back or any other agent-written text. Anything but `agreed`,
  * an error or a timeout means not confirmed.
+ *
+ * `agreed` is final: `judgeVoiceDecision` does not screen it again for doubt
+ * or negation markers, since those replies are why the judge is asked. A
+ * judge therefore owns that judgement and must answer `agreed` only for a
+ * clear yes ("yes, if the tests pass" is not one).
  */
 export interface ReplyJudge {
   judge(reply: readonly string[]): Promise<ReplyVerdict>;

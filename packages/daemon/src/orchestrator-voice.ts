@@ -306,12 +306,15 @@ export class VoiceCalls {
       const ownerSpoke = event.transcript.some((turn) => turn.role === "owner");
       const open = call.askIds.flatMap((askId, index) => (settledIds.has(askId) ? [] : [{ askId, index }]));
       result = !ownerSpoke ? "no-pickup" : open.length === 0 ? "answered" : "dropped";
-      // An open ask the owner replied to after it was read stayed unclear: it
-      // was heard, not cut off. It is texted all the same.
-      const unclear = open.filter(({ index }) =>
-        (answerWindows(event.transcript, asks, index) ?? []).some((window) =>
-          window.some((turn) => turn.role === "owner"),
-        ),
+      // An open ask the owner replied to after it was read and again after it
+      // was asked again (a read-back, "is that a yes or a no?", or a
+      // re-reading) stayed unclear: it was heard, not cut off. It is texted
+      // all the same. One reply to one reading is not enough to say so.
+      const unclear = open.filter(
+        ({ index }) =>
+          (answerWindows(event.transcript, asks, index) ?? []).filter((window) =>
+            window.some((turn) => turn.role === "owner"),
+          ).length >= 2,
       );
       if (result === "dropped") {
         for (const { askId } of unclear) {
