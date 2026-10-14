@@ -2751,9 +2751,17 @@ Template:
   on the Keychain would overwrite the real items.
 - Codex shell requests are always high risk, so the Codex approval for
   acceptance item 5 (L10) needs the PIN on the call.
-- Steps for the open PRs #64, #65, #69 and #70 are written in and marked N/A
-  until each is merged. Each of those PRs also edits `docs/live-check.md`; when
-  one lands after this, keep this version (it already covers their items).
+- Reply judge (HL-09d, #65, merged while this was written): P7 has the owner
+  choose it at `init` (it is off until chosen), P14 runs `doctor
+  --check-judge` once per backend so the real `claude -p` and `codex exec`
+  flags are exercised, with the bare commands to find a refused flag, and
+  checks the judge bills the plan login rather than an API key (#72); L8
+  tries natural yeses, a conditional yes and two French replies, a plain one
+  and a conditional one.
+- Steps for the open PRs #64, #69 and #70 (and the fix for #72) are written in
+  and marked N/A until each is merged. Each of those PRs also edits
+  `docs/live-check.md`; when one lands after this, keep this version (it
+  already covers their items).
 - `rate-limit-holds-calls` and `replayed-webhook-rejected` stay fakes only: a
   live run would cost calls for no new evidence, or need a captured signed
   request.

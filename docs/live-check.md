@@ -8,7 +8,7 @@ it. Never fabricate an entry: "not tested" is a valid result.
 
 The run has three parts, done in order:
 
-1. [Prerequisites](#1-prerequisites) (P1 to P13): accounts, tunnel, setup
+1. [Prerequisites](#1-prerequisites) (P1 to P14): accounts, tunnel, setup
    commands and `hotline doctor`, with the output to expect.
 2. [Real agents on fake providers](#2-real-agents-on-fake-providers) (R1 to
    R6): real Claude Code and Codex sessions against a daemon that cannot ring
@@ -81,18 +81,20 @@ Record: the plan names (not account ids) in the results header.
 
 1. In your checkout: `git switch main && git pull`, then
    `git rev-parse --short HEAD`. Record the commit.
-2. These open pull requests add features some steps check. For each, run
+2. The reply judge (HL-09d, #65) is on `main`. These pull requests, open
+   when this was written, add features some steps check. For each, run
    `gh pr view <n> --json state -q .state`:
 
    | PR | Adds | Steps that need it |
    | --- | --- | --- |
    | #64 (HL-22) | the `keychain` self-test line in `hotline doctor` | P13 |
-   | #65 (HL-09d) | the reply judge: `init --judge`, `doctor --check-judge` | P7, P13, L8 |
    | #69 (HL-13a) | verifying every approval by pulling from Twilio and ElevenLabs | L26 |
    | #70 (HL-14d) | the voice model setting (`voice.llm`, definition v6) | P13, L25 |
+   | the fix for #72 (HL-09e) | `doctor` naming which credential the judge uses | P14 step 4 |
 
-   A PR that is not `MERGED` makes its steps N/A for this run. Write "N/A (#n
-   not merged)" in the results; everything else still runs.
+   A feature that is not merged makes its steps (or that part of a step) N/A
+   for this run. Write "N/A (#n not merged)" in the results; everything else
+   still runs.
 3. Build and link the command:
 
    ```sh
@@ -169,10 +171,14 @@ hotline init --public-url https://<your-static-domain> \
 
 It asks for your number, your PIN twice (6 digits or more), the ElevenLabs API
 key and post-call webhook secret, and the Twilio SID and auth token, all
-without echo. With #65 merged it also explains the reply judge and asks once:
-answer `y` (that is `judge.backend: "auto"`; it sends only your short spoken
-reply to your own Claude Code or Codex login) or `n` to keep everything on
-the Mac. Record which you chose.
+without echo. It also explains the reply judge
+([install.md](install.md#the-reply-judge)) and asks once whether to use it.
+The judge is off until you choose it, and L8 needs it on: answer `y` (or
+Enter on a first run). That records `judge.backend: "auto"`, which uses
+`claude` if it is on the `PATH`, else `codex`; it sends only your short spoken
+reply, redacted, to your own login. Answering `n` keeps everything on the Mac
+and makes P14 and the judge column of L8 N/A. The last line says what was
+recorded (`reply judge: ...`); record it.
 
 Expected output (your values differ):
 
@@ -268,8 +274,10 @@ hotline daemon 2>&1 | tee -a "$EV/daemon.log"
 
 Expected in the log: the agent API on `127.0.0.1:7341`, the webhooks on
 `127.0.0.1:7342`, and **none** of `voice webhooks off`, `sms webhook off`,
-`outbound calls off` or `outbound texts off`. With #65 merged, a `reply judge`
-line names the backend. Every later step that says "restart the daemon" means:
+`outbound calls off` or `outbound texts off`. A `reply judge` line names the
+backend (`claude-code` with `auto` and Claude Code installed). If it says none
+was found, the daemon's `PATH` lacks `claude`: start the daemon from a shell
+where `which claude` works. Every later step that says "restart the daemon" means:
 Ctrl-C here, then the same command.
 
 ### P13. `hotline doctor`
@@ -292,6 +300,7 @@ Expected, with no `FAIL` line (exit code 0):
 | `PASS claude code` | `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT 2400000 ms is above the ask timeout` |
 | `PASS elevenlabs` | phone number id set; `agent definition v<N> is deployed`; all 4 Hotline tools |
 | `PASS webhooks` | `public URL https://<your-static-domain>/hooks/*` |
+| `PASS judge` | `claude-code: ...; only your short spoken reply is sent to it` (the backend P7 recorded); `WARN judge not chosen` means P7 answered nothing |
 | `INFO cost` | a monthly estimate |
 
 `<N>` is `AGENT_DEFINITION_VERSION` in
@@ -306,14 +315,63 @@ With the open PRs merged, also:
   `agent-hotline-doctor-check`), never your credentials
   ([install.md](install.md#hotline-doctor)). Record PASS, or the FAIL line's
   step and exit codes. A timeout usually means the login Keychain was locked.
-- **#65:** a `judge` line naming the backend you chose in P7 (or `off`). Then
-  run `hotline doctor --check-judge`: one tiny model call on your login. Expected:
-  `PASS judge a test question ("yes, go ahead") came back agreed`.
 - **#70:** `PASS elevenlabs the agent runs on claude-haiku-4-5`.
 
-Save the output: `hotline doctor > "$EV/doctor.txt"; hotline doctor --check-judge >> "$EV/doctor.txt"`.
-Record the doctor summary line (`doctor: <n> pass, <n> warn, <n> fail`) and
-every `WARN` line's name.
+Save the output: `hotline doctor > "$EV/doctor.txt"`. Record the doctor
+summary line (`doctor: <n> pass, <n> warn, <n> fail`) and every `WARN` line's
+name.
+
+### P14. Reply judge on the real CLIs
+
+The carry-over from HL-09d (#65): the judge's exact `claude -p` and `codex
+exec` command lines have only been checked against `--help` and fakes. Each
+`--check-judge` below is one tiny model call on your own login, with the fixed
+reply "yes, go ahead"; it runs the judge through the same code and flags the
+daemon uses, so a PASS proves the real CLI accepts every flag and answers in
+the expected shape.
+
+1. **Claude Code.** In `~/.hotline/config.json` set `"judge": {"backend":
+   "claude-code"}`, then `hotline doctor --check-judge`. Expected: `PASS judge
+   a test question ("yes, go ahead") came back agreed`. The run is `claude -p
+   --output-format json --model haiku --no-session-persistence --settings
+   {"disableAllHooks":true} --strict-mcp-config --mcp-config
+   {"mcpServers":{}} --tools "" --system-prompt ...` (no tools at all) in an
+   empty temporary folder.
+2. **Codex** (if you use it). Set `"backend": "codex"` and run `hotline doctor
+   --check-judge` again. Expected: the same PASS. The run is `codex exec
+   --ephemeral --ignore-user-config --ignore-rules --sandbox read-only
+   --skip-git-repo-check --output-schema <file> --output-last-message <file>
+   --color never -c model_reasoning_effort="low" -`.
+3. **If either FAILs**, find which flag the CLI refuses by running the same
+   line yourself in an empty folder (no Hotline involved; still one model
+   call):
+
+   ```sh
+   cd "$(mktemp -d)"
+   echo 'Answer with the word ok.' | claude -p --output-format json --model haiku \
+     --no-session-persistence --settings '{"disableAllHooks":true}' \
+     --strict-mcp-config --mcp-config '{"mcpServers":{}}' --tools ""
+   printf '%s' '{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}' > schema.json
+   echo 'Answer with ok set to true.' | codex exec --ephemeral --ignore-user-config \
+     --ignore-rules --sandbox read-only --skip-git-repo-check \
+     --output-schema schema.json -
+   ```
+
+   Expected: a JSON envelope with `"is_error":false` from `claude`, and a
+   JSON answer from `codex`. Record the refused flag or error (not the
+   output) and file it against `packages/daemon/src/reply-judge.ts`.
+4. **Plan login, not an API key.** The judge should bill your Claude or
+   ChatGPT plan, not an API account (#72). Until the fix for #72 lands,
+   `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `OPENAI_API_KEY` in the
+   daemon's environment reach the CLI and switch it to API billing. Check, in
+   the terminal you start the daemon from (names only, never values):
+   `env | cut -d= -f1 | grep -E '^(ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_BASE_URL|OPENAI_API_KEY)$'`
+   prints nothing. In Claude Code, `/status` shows your subscription login;
+   `codex login status` says you are logged in with ChatGPT. Once #72's fix
+   is merged, `hotline doctor` names the credential the judge uses: it must
+   be the login, not a key. Record which.
+5. Put `"backend"` back to `"auto"` (or the backend you prefer) and restart the
+   daemon so it picks the judge again. Append the outputs to `$EV/doctor.txt`.
 
 ## 2. Real agents on fake providers
 
@@ -405,7 +463,7 @@ When done: Ctrl-C the fake daemon, close these terminals, and do not export
 
 ## 3. Live calls
 
-Before L1: P1 to P13 are done, the tunnel and the real daemon are running, and
+Before L1: P1 to P14 are done, the tunnel and the real daemon are running, and
 `hotline doctor` shows no `FAIL`. Start the agents from `~/demo-app` in new
 terminals without `HOTLINE_HOME`: Claude Code as `claude --permission-mode
 manual`, Codex as `codex -a untrusted`. Keep the phone's speaker on and a
@@ -503,19 +561,24 @@ Mirrors `unclear-answer-denies`.
 
 ### L8. Replies beyond a plain yes
 
-HL-09c and, with #65 merged, HL-09d. Three requests, one after another (type
+HL-09c and the reply judge of HL-09d. Six requests, one after another (type
 "Run npm test again." for each). Answer each first question with "yeah" so it
 reads back, then answer the read-back with:
 
-| Reply to the read-back | Without a judge (`off`, or #65 not merged) | With the judge (`auto`) |
+| Reply to the read-back | Judge on (P7 `y`) | Judge `off` |
 | --- | --- | --- |
-| "of course" | approved (fast path) | approved (fast path) |
-| "yeah let's ship that one" | texted, not approved (`voice.answer-unconfirmed`, "the judge found the owner's reply unclear") | approved |
-| "yes if the tests pass" | texted, not approved | texted, not approved (a condition is never an approval) |
+| "of course" | approved (fast path, no judge call) | approved |
+| "yeah let's ship that one" | approved | texted (`voice.answer-unconfirmed`, "the judge found the owner's reply unclear") |
+| "sure, no problem" | approved | texted |
+| "yes if the tests pass" | **texted, never approved** (a condition) | texted |
+| "oui, vas-y" (French: yes, go ahead) | approved or texted; record which | texted |
+| "oui, mais pas sur main" (French: yes, but not on main) | **texted, never approved** (only the model's own condition flag catches a condition in another language) | texted |
 
 Reply `NO` to each text that arrives, so Claude Code moves on. Record each
-row's result. A row that approved when the table says texted is a security
-failure: stop and file it first.
+row's result and, for the judged rows, the `voice.answer-unconfirmed` reason
+if any. The judge runs after you hang up, so the agent may take up to about
+20 seconds longer to get a judged answer; note it if it is longer. A bold row
+that approved is a security failure: stop and file it first.
 
 ### L9. High risk needs the PIN
 
@@ -840,7 +903,8 @@ Any FAIL here goes on a new issue that names `packages/daemon/src/provider-pull.
 | `hotline voice apply` first; doctor flags an old definition (HL-14c) | P8, P13 |
 | Read-back before an allow, a natural yes after it, a clear no at once, "yes or no?" when unsure, the text promise after two unclear replies (HL-14c) | L4 to L7 |
 | Answer approvals with a short, plain "yes"; strict word lists, English only (HL-09) | L4 to L10, L27 |
-| Reply judge: `--check-judge`, natural yeses, conditional yeses never approve (HL-09d, #65) | P7, P13, L8 |
+| Reply judge: choose it at `init`, `--check-judge` on the real `claude -p` and `codex exec` flags, natural yeses, a conditional yes never approves, a non-English reply (HL-09d, #65) | P7, P13, P14, L8 |
+| The judge bills the plan login, not an API key (HL-09e, #72) | P14 |
 | The false "no answer" rate and a local transcript corpus (HL-09) | L27 |
 | `system__caller_id` and `system__called_number` in E.164 both ways, the `end_call` shape, answering-machine detection (HL-08) | L11, L21, L22, L25 |
 | Verify by pull: ElevenLabs GET `in-progress`, transcript equality, Twilio fetch by MessageSid within 15 minutes (HL-13a, #69) | L26 |
@@ -864,10 +928,10 @@ issue (#17), and close that issue once acceptance items 4 to 6 pass.
 Date:
 Hotline commit (P2):              hotline --version:
 Claude Code:          Codex:          Node:          macOS:          ngrok:
-PRs merged (P2): #64 yes/no  #65 yes/no  #69 yes/no  #70 yes/no
+Features merged (P2): #64 yes/no  #69 yes/no  #70 yes/no  #72 fix yes/no
 Plans: Twilio (upgraded) yes/no; ElevenLabs plan:
 Voice: library / clone / default      Voice model (doctor):
-Agent definition (doctor):            Reply judge (P7): auto / off / n/a
+Agent definition (doctor):            Reply judge (P7, P12): backend or off; judge credential (P14): login / API key
 Session settings (P10): callsPerHour= askTimeoutMinutes= maxConsecutiveContinuations=
 Doctor summary (P13):                 WARN lines:
 Latency (L25), typical seconds:       Sonnet 5.5 comparison:
@@ -893,6 +957,7 @@ transcripts.
 | P11 | | |
 | P12 | | |
 | P13 | | |
+| P14 | | |
 | R1 | | |
 | R2 | | |
 | R3 | | |
