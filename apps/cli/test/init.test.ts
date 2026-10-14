@@ -180,6 +180,20 @@ describe("hotline init", () => {
       expect(await recorded()).toBe("auto");
     });
 
+    it("keeps the earlier choice without --judge when it cannot ask", async () => {
+      for (const choice of ["off", "codex"] as const) {
+        const chosen = await cli(
+          ["init", ...FLAGS, "--force", "--judge", choice],
+          testContext(setup, { env: env(SECRETS) }),
+        );
+        expect(chosen.code).toBe(0);
+        const rerun = await cli(["init", ...FLAGS, "--force"], testContext(setup, { env: env(SECRETS) }));
+        expect(rerun.code).toBe(0);
+        expect(await recorded()).toBe(choice);
+        expect(rerun.stdout).toContain(`reply judge: ${choice}`);
+      }
+    });
+
     it("keeps a backend chosen earlier on Enter, and gives up on an answer that is neither", async () => {
       expect(
         (await cli(["init", ...FLAGS, "--judge", "codex"], testContext(setup, { env: env(SECRETS) }))).code,

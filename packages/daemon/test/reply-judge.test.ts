@@ -148,6 +148,13 @@ describe("parseJudgeOutput and the post-check", () => {
     expect(checkedVerdict(agreed, [said])).toBe("agreed");
   });
 
+  it("never lets an agreeing idiom span two reply turns", () => {
+    const said = ["no", "problem is it's prod"];
+    expect(vetoesAgreement(said)).toBe(true);
+    expect(checkedVerdict(agreed, said)).toBe("unclear");
+    expect(vetoesAgreement(["sure", "no worries"])).toBe(false);
+  });
+
   it("never turns anything into an agreement", () => {
     expect(checkedVerdict(declined, ["yes"])).toBe("declined");
     expect(checkedVerdict(unclear, ["yes"])).toBe("unclear");

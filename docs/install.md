@@ -54,7 +54,7 @@ users can open is made private.
 | Twilio number texts come from | `--sms-from +1...` | no | |
 | The Twilio number's id in ElevenLabs (**Phone Numbers**) | `--agent-phone-number-id` | no | |
 | Providers, secret store | `--voice-provider`, `--sms-provider`, `--secret-store` | no | |
-| Whether to use the reply judge (below) | `--judge auto` (or `claude-code`, `codex`, `anthropic-api`, `off`) | yes, once, `[Y/n]` | |
+| Whether to use the reply judge (below) | `--judge auto` (or `claude-code`, `codex`, `anthropic-api`, `off`) | yes, once, `[Y/n]` (`[y/N]` once turned off) | |
 | PIN, 4 to 8 digits (6 or more recommended) | never | yes, twice, no echo | `HOTLINE_PIN` |
 | ElevenLabs API key | never | yes, no echo | `HOTLINE_ELEVENLABS_API_KEY` |
 | ElevenLabs post-call webhook secret | never | yes, no echo | `HOTLINE_ELEVENLABS_WEBHOOK_SECRET` |
@@ -82,11 +82,13 @@ users can open is made private.
   ElevenLabs ids, and dropping them would orphan the deployed agent.
 - Output shows the owner number as its last four digits and never a secret.
 - `init` explains the reply judge (below) and asks once whether to use it:
-  Enter or `y` turns it on (`judge.backend: "auto"`, or the backend chosen
-  before), `n` turns it off. `--judge <auto|claude-code|codex|anthropic-api|off>`
-  answers without asking. With `--non-interactive` and no `--judge`, nothing is
-  recorded and the judge stays off; `init` ends with a `reply judge:` line
-  saying what was recorded.
+  `y` turns it on (`judge.backend: "auto"`, or the backend chosen before), `n`
+  turns it off. Enter is yes, except after you turned the judge off: then the
+  question reads `[y/N]` and Enter keeps it off.
+  `--judge <auto|claude-code|codex|anthropic-api|off>` answers without asking.
+  With `--non-interactive` and no `--judge`, the earlier choice stays; on a
+  first run nothing is recorded and the judge stays off. `init` ends with a
+  `reply judge:` line saying what was recorded.
 
 ### The reply judge
 
