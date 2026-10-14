@@ -2355,3 +2355,10 @@ Template:
     PATH searched, in the daemon's `reply judge` log line and in `doctor`.
   - P3 (Codex answer from stdout): only the `--output-last-message` file
     counts; no file is `unclear`, whatever stdout holds.
+- Greptile at 13f2765 (2 P2), fixed in the same PR:
+  - A CLI that ignores SIGTERM could outlive its deadline and hold the run
+    (and `doctor --check-judge`) open. `runJudgeProcess` now sends SIGTERM at
+    the deadline, SIGKILL `JUDGE_KILL_GRACE_MS` (2 s) later, destroys the
+    pipes and rejects then, whether or not the process ever closes.
+  - `JudgeOutput` was a non-strict zod object, so an answer with an extra
+    field still approved. It is strict now, like `JUDGE_OUTPUT_SCHEMA`.

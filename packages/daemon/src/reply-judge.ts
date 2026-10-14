@@ -162,13 +162,19 @@ export function judgeChildEnv(
 export type JudgeSpawn = (
   file: string,
   args: readonly string[],
-  options: { cwd: string; env: Record<string, string>; stdio: ["pipe", "pipe", "pipe"]; timeout: number },
+  options: { cwd: string; env: Record<string, string>; stdio: ["pipe", "pipe", "pipe"] },
 ) => ChildProcessWithoutNullStreams;
+
+/** How long a CLI past its deadline gets after SIGTERM before SIGKILL, when the run settles regardless. */
+export const JUDGE_KILL_GRACE_MS = 2_000;
 
 /**
  * Runs one agent CLI (no shell) in `options.cwd` with `judgeChildEnv`, writes
- * the prompt to its stdin and collects its output. Killed after
- * `options.timeoutMs`; a kill rejects.
+ * the prompt to its stdin and collects its output. At `options.timeoutMs` it
+ * is sent SIGTERM; one that ignores it (or leaves its output open) gets
+ * SIGKILL `graceMs` later, and the run rejects then whatever the process
+ * does, so a stuck CLI never holds the caller or its temporary directories.
+ * A run that was killed always rejects.
  */
 export function runJudgeProcess(
   spawnProcess: JudgeSpawn,
@@ -176,14 +182,34 @@ export function runJudgeProcess(
   file: string,
   args: readonly string[],
   options: JudgeRunOptions,
+  graceMs = JUDGE_KILL_GRACE_MS,
 ): Promise<ExecResult> {
   return new Promise((resolve, reject) => {
     const child = spawnProcess(file, args, {
       cwd: options.cwd,
       env: judgeChildEnv(daemonEnv, options),
       stdio: ["pipe", "pipe", "pipe"],
-      timeout: options.timeoutMs,
     });
+    let settled = false;
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    const settle = (finish: () => void) => {
+      if (settled) return;
+      settled = true;
+      for (const timer of timers) clearTimeout(timer);
+      finish();
+    };
+    timers.push(
+      setTimeout(() => {
+        child.kill("SIGTERM");
+        timers.push(
+          setTimeout(() => {
+            child.kill("SIGKILL");
+            for (const stream of [child.stdin, child.stdout, child.stderr]) stream.destroy();
+            settle(() => reject(new Error(`${file} did not stop after its deadline and was killed`)));
+          }, graceMs),
+        );
+      }, options.timeoutMs),
+    );
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
@@ -192,11 +218,13 @@ export function runJudgeProcess(
     child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
       stderr += chunk;
     });
-    child.on("error", reject);
-    child.on("close", (code, signal) => {
-      if (signal !== null) reject(new Error(`${file} was killed by ${signal}`));
-      else resolve({ exitCode: code ?? 1, stdout, stderr });
-    });
+    child.on("error", (error) => settle(() => reject(error)));
+    child.on("close", (code, signal) =>
+      settle(() => {
+        if (signal !== null) reject(new Error(`${file} was killed by ${signal}`));
+        else resolve({ exitCode: code ?? 1, stdout, stderr });
+      }),
+    );
     child.stdin.on("error", () => {
       // The process may exit before reading stdin; its exit code reports that.
     });
@@ -249,7 +277,8 @@ export const JUDGE_OUTPUT_SCHEMA = {
   additionalProperties: false,
 } as const;
 
-const JudgeOutput = z.object({
+// Strict, like `JUDGE_OUTPUT_SCHEMA`: an answer with any other field is another shape, so unclear.
+const JudgeOutput = z.strictObject({
   verdict: z.enum(["agreed", "declined", "unclear"]),
   conditional: z.boolean(),
   retracted: z.boolean(),

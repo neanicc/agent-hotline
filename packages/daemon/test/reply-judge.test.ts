@@ -1,6 +1,8 @@
 // HL-09d: the model-backed reply judge. Every backend runs against a fake
 // agent CLI (`FakeJudgeHost`) or a fake fetch: no real claude or codex, no network.
+import { EventEmitter } from "node:events";
 import { stat } from "node:fs/promises";
+import { PassThrough } from "node:stream";
 import type { HttpFetch, TranscriptTurn } from "@hotline/providers";
 import { describe, expect, it } from "vitest";
 import {
@@ -96,6 +98,9 @@ describe("parseJudgeOutput and the post-check", () => {
     '{"verdict":"yes","conditional":false,"retracted":false}',
     '{"verdict":"agreed"}',
     '{"verdict":"agreed","conditional":"no","retracted":false}',
+    // Any field the schema does not allow is another shape.
+    '{"verdict":"agreed","conditional":false,"retracted":false,"extra":1}',
+    { verdict: "agreed", conditional: false, retracted: false, reason: "they said yes" },
     "{not json}",
     undefined,
     42,
@@ -186,6 +191,10 @@ describe("ClaudeCodeJudge", () => {
     ["output that is not JSON", { raw: { exitCode: 0, stdout: "Error: rate limited", stderr: "" } }],
     ["an error result", { raw: claudeResult(JSON.stringify(agreed), true) }],
     ["an answer that is not the JSON asked for", { raw: claudeResult("Yes, they agreed.") }],
+    [
+      "an answer with an extra field",
+      { raw: claudeResult(JSON.stringify({ ...agreed, note: "clear yes" })) },
+    ],
     ["a missing CLI", Object.assign(new Error("spawn claude ENOENT"), { code: "ENOENT" })],
     ["a killed process", new Error("claude was killed by SIGTERM")],
   ])("finds the reply unclear on %s", async (_, answer) => {
@@ -293,6 +302,11 @@ describe("AnthropicApiJudge", () => {
     ["a cut-off answer", 200, answer(agreed, "max_tokens")],
     ["a refusal", 200, answer(agreed, "refusal")],
     ["no text block", 200, { stop_reason: "end_turn", content: [] }],
+    [
+      "an answer with an extra field",
+      200,
+      { stop_reason: "end_turn", content: [{ type: "text", text: JSON.stringify({ ...agreed, extra: 1 }) }] },
+    ],
   ])("finds the reply unclear on %s", async (_, status, body) => {
     const api = fakeApi(status, body);
     expect(
@@ -440,17 +454,11 @@ describe("the agent CLI's environment", () => {
   });
 
   it("is what the spawned CLI gets: no shell, the run's cwd, stdin carries the prompt", async () => {
-    const { EventEmitter } = await import("node:events");
-    const { PassThrough } = await import("node:stream");
     const spawned: { file: string; args: readonly string[]; options: Parameters<JudgeSpawn>[2] }[] = [];
     let stdin = "";
     const fakeSpawn: JudgeSpawn = (file, args, options) => {
       spawned.push({ file, args, options });
-      const child = Object.assign(new EventEmitter(), {
-        stdin: new PassThrough(),
-        stdout: new PassThrough(),
-        stderr: new PassThrough(),
-      });
+      const child = fakeChild();
       child.stdin.setEncoding("utf8").on("data", (chunk: string) => {
         stdin += chunk;
       });
@@ -476,34 +484,90 @@ describe("the agent CLI's environment", () => {
       cwd: "/tmp/hotline-judge-fake",
       env: judgeChildEnv(daemonEnv, { env: { HOTLINE_JUDGE: "1" }, inherit: CLAUDE_CODE_LOGIN_ENV }),
       stdio: ["pipe", "pipe", "pipe"],
-      timeout: 1_234,
     });
     expect(JSON.stringify(run?.options.env)).not.toMatch(/sk-ant-fake-hotline|fake_twilio|482913|ghp_|aws/);
   });
 
-  it("rejects when the CLI is killed, so the judge finds the reply unclear", async () => {
-    const { EventEmitter } = await import("node:events");
-    const { PassThrough } = await import("node:stream");
-    const fakeSpawn: JudgeSpawn = () => {
-      const child = Object.assign(new EventEmitter(), {
-        stdin: new PassThrough(),
-        stdout: new PassThrough(),
-        stderr: new PassThrough(),
-      });
-      setImmediate(() => child.emit("close", null, "SIGTERM"));
-      return child as unknown as ReturnType<JudgeSpawn>;
-    };
+  const quickRun = { cwd: "/tmp/hotline-judge-fake", env: {}, inherit: [], input: "", timeoutMs: 10 };
+
+  it("sends SIGTERM at the deadline and rejects when the CLI stops on it", async () => {
+    const child = fakeChild((signal, self) => {
+      if (signal === "SIGTERM") setImmediate(() => self.emit("close", null, "SIGTERM"));
+    });
     await expect(
-      runJudgeProcess(fakeSpawn, daemonEnv, CLAUDE, [], {
-        cwd: "/tmp/hotline-judge-fake",
-        env: {},
-        inherit: [],
-        input: "",
-        timeoutMs: 10,
-      }),
+      runJudgeProcess(
+        () => child as unknown as ReturnType<JudgeSpawn>,
+        daemonEnv,
+        CLAUDE,
+        [],
+        quickRun,
+        1_000,
+      ),
     ).rejects.toThrow(/killed by SIGTERM/);
+    expect(child.signals).toEqual(["SIGTERM"]);
+  });
+
+  it("kills a CLI that ignores SIGTERM and settles after the grace, whatever the process does", async () => {
+    // Never closes, not even on SIGKILL (a grandchild could hold its output open).
+    const child = fakeChild();
+    const started = Date.now();
+    await expect(
+      runJudgeProcess(() => child as unknown as ReturnType<JudgeSpawn>, daemonEnv, CLAUDE, [], quickRun, 20),
+    ).rejects.toThrow(/did not stop after its deadline and was killed/);
+    expect(child.signals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(child.stdout.destroyed && child.stderr.destroyed && child.stdin.destroyed).toBe(true);
+  });
+
+  it("is unclear through the judge, and no kill is sent once the CLI has answered", async () => {
+    const stuck = fakeChild();
+    const host = {
+      find: async () => CLAUDE,
+      run: (file: string, args: readonly string[], options: Parameters<typeof runJudgeProcess>[4]) =>
+        runJudgeProcess(() => stuck as unknown as ReturnType<JudgeSpawn>, daemonEnv, file, args, options, 20),
+    };
+    expect(await new ClaudeCodeJudge({ host, command: CLAUDE, timeoutMs: 10 }).judge(["sounds great"])).toBe(
+      "unclear",
+    );
+    expect(stuck.signals).toEqual(["SIGTERM", "SIGKILL"]);
+
+    const quick = fakeChild();
+    quick.stdin.on("finish", () => {
+      quick.stdout.end();
+      quick.stderr.end();
+      setImmediate(() => quick.emit("close", 0, null));
+    });
+    await runJudgeProcess(() => quick as unknown as ReturnType<JudgeSpawn>, daemonEnv, CLAUDE, [], {
+      ...quickRun,
+      timeoutMs: 30,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(quick.signals).toEqual([]);
   });
 });
+
+/** A stand-in for a spawned agent CLI that records the signals sent to it. */
+function fakeChild(onKill: (signal: string, self: FakeChild) => void = () => {}): FakeChild {
+  const child: FakeChild = Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    signals: [] as string[],
+    kill(signal: string) {
+      child.signals.push(signal);
+      onKill(signal, child);
+      return true;
+    },
+  });
+  return child;
+}
+type FakeChild = EventEmitter & {
+  stdin: PassThrough;
+  stdout: PassThrough;
+  stderr: PassThrough;
+  signals: string[];
+  kill(signal: string): boolean;
+};
 
 describe("the default host under test mode", () => {
   it("finds nothing and runs nothing", async () => {

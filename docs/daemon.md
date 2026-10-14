@@ -473,7 +473,12 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
     variables, plus the CLI's own login variables, `CLAUDE_CODE_LOGIN_ENV` or
     `CODEX_LOGIN_ENV`; never a `HOTLINE_*` variable) and `HOTLINE_JUDGE=1`, the
     prompt on stdin (the owner's words never appear in a process's
-    arguments) and a kill after `JUDGE_TIMEOUT_MS`. Codex's answer is read
+    arguments) and SIGTERM after `JUDGE_TIMEOUT_MS`; a CLI that ignores it
+    gets SIGKILL `JUDGE_KILL_GRACE_MS` (2 s) later, and the run settles then
+    as a failure whatever the process does, so a stuck CLI never holds the
+    post-call webhook, `doctor --check-judge` or the temporary directories.
+    The answer must have exactly the three fields asked for (a strict
+    schema); any other field makes it `unclear`. Codex's answer is read
     only from its `--output-last-message` file; no file is `unclear`. A CLI
     not found names the `PATH` searched in the selection's detail. `HOTLINE_JUDGE=1` makes
     `hotline hook` and `hotline mcp` do nothing (exit 0, no output, no daemon
