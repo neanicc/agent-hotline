@@ -223,3 +223,83 @@ Outputs are strict and narrower than what the agents accept:
 Hotline never sends `updatedInput` or `updatedPermissions`, and never applies a
 `permission_suggestions` entry: it only answers the prompt the agent would show
 in the terminal.
+
+## Ask queue and call policy (`queue.ts`, `policy.ts`)
+
+The queue decides who to call or text, when, and what each agent gets back. It is
+a pure state machine: the daemon owns a `QueueState` (plain JSON), passes every
+event to `step(state, event, now, settings)` with its own clock reading, carries
+out the returned actions in order, and sends a `tick` at
+`nextWakeAt(state, now, settings)`, which is never earlier than `now` and is `now`
+itself when work is overdue (say, after restoring saved state). Core never reads the clock, sets a timer or
+does I/O; `packages/core/test/purity.test.ts` scans the sources to keep it so.
+`policySettings(config)` builds the settings from a parsed config.
+
+| Event | Meaning |
+| --- | --- |
+| `ask` | A new ask. It must parse and be `pending`; an id already queued is ignored |
+| `tick` | Time moved on |
+| `answer` | An owner answer from `submit_answer` or a text reply |
+| `unclear` | The owner was asked (the ask is on the call in progress or texted) but the answer stayed unclear |
+| `call-ended` | The call in progress ended: `answered`, `no-pickup`, `dropped` or `failed` |
+| `text-sent` | The text for an ask went out; ends a notification as `delivered` |
+| `text-failed` | The text for an ask could not be sent |
+| `cancel` | The agent stopped waiting |
+
+| Action | What the daemon does |
+| --- | --- |
+| `place-call {callId, askIds}` | One call covering these asks, read in this order |
+| `end-call {callId}` | Hang up this call if it is still live: it was never reported as ended and has been given up on |
+| `send-text {askId, reason}` | Text the owner this ask; `reason` is `notify`, `quiet-hours`, `call-limit` or `after-call` |
+| `resolve {askId, outcome, status}` | Final: return the `AskOutcome` to the agent, store the ask with `status` (`answered`, `cancelled`, or `expired` for every other no-answer). If the ask is on the live call (it expired or was cancelled mid-call), tell the voice side to drop it; a later answer for it is ignored |
+| `delivered {askId}` | Final for a `notify` ask, after `text-sent` |
+| `ignored {event, reason}` | The event changed nothing; log it, never treat it as an answer |
+
+Rules:
+
+- **Answers.** An `answered` outcome comes only from an `answer` event that parses
+  as an `Answer`, is for an open ask, arrives on a channel the ask actually went
+  out on (voice only while the ask is on the call in progress, so the daemon must
+  deliver `submit_answer` before that call's `call-ended`; SMS only after it was
+  texted), and
+  passes `answerProblem` at the moment it arrived. Anything else is ignored and the
+  ask stays open. A high-risk approval without the PIN or a confirming text is
+  ignored, so the owner can still confirm before the ask expires.
+- **Silence is not consent.** No pickup, a dropped or failed call, an unclear
+  answer, a failed text, cancellation and expiry all end in `no-answer`. An ask
+  that expires reports the last failure (`no-pickup`, `dropped`, `failed`) or
+  `timeout`. `permissionVerdict(ask, outcome)` turns an outcome into `allow` only
+  for an owner approval of that permission ask, with confirmation when it is high
+  risk; every other input, malformed ones included, is `deny`.
+- **Priority.** Urgent asks first, then `permission`, `question`, `stop`,
+  `notify`, then oldest, then id.
+- **Batching.** A new ask waits `policy.batchWindowSeconds`. When any callable ask
+  is due and no call is in progress, one call covers every callable waiting ask,
+  highest priority first, at most `DEFAULT_MAX_ASKS_PER_CALL` (4). New asks still
+  in their batch window join; an ask waiting out a retry delay does not. There is
+  one call at a time. A call never reported as ended is given up on after
+  `DEFAULT_CALL_STUCK_MINUTES` (15): the queue emits `end-call` and treats it as
+  dropped.
+- **Dedupe** applies to `question` and `notify` asks only. One with the same
+  session, kind, text, options, tool and risk as an open ask joins it: it is never
+  contacted itself, shares the owner's answer (re-checked with `answerProblem`
+  against the duplicate) or an unclear result, and takes over if the first ask is
+  cancelled, expires or fails. A shared answer always has `confirmation: "none"`:
+  a PIN or confirming text is never copied from one ask to another. `permission`
+  and `stop` asks are never deduped, because `text` is a redacted, length-capped
+  summary and two different commands can share it. Each gets its own decision,
+  though one call can read several of them out.
+- **Quiet hours** (start inclusive, end exclusive, local time in
+  `quietHours.timeZone`, equal start and end meaning none): asks are texted. Only
+  urgent asks are called, and only when `allowUrgentCalls` is set.
+- **Rate limits** count over a rolling hour and a rolling 24 hours; a send stamped
+  after `now` (the clock moved back) still counts. With no call
+  left, a due ask is texted; with no text left either, it waits for a slot or its
+  expiry.
+- **No pickup.** A call that is not picked up or fails is retried once after
+  `DEFAULT_RETRY_DELAY_SECONDS` (120); then the ask is texted. After a dropped
+  call, or a call that ended with the ask still open, it is texted at once. An
+  unclear answer ends the ask; it is not retried by text.
+- **Notifications** (`notify`) only ever go by text and need no answer. They end
+  with `delivered` once the daemon reports `text-sent`, or as `no-answer`
+  (`failed` or `timeout`) when the text fails or never goes out.
