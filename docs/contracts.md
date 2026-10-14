@@ -194,6 +194,61 @@ ElevenLabs keys could still place calls or texts on the owner's account, or forg
 a provider webhook to the daemon. The daemon token likewise lets an agent talk to
 the local API, which it is meant to do.
 
+## Text replies (`sms-reply.ts`)
+
+`parseSmsReply(body)` classifies one text from the owner. Matching is on the
+whole message, case-insensitive, with spaces collapsed and trailing `.`, `!` or
+`?` dropped:
+
+| Reply | Result |
+| --- | --- |
+| `call me`, `call` | command `call-me` |
+| `status` | command `status` |
+| `stop` and Twilio's other opt-out keywords (`stopall`, `unsubscribe`, `end`, `quit`, `cancel`, `revoke`, `optout`) | command `stop`: stop texting me. Twilio blocks texts to the number after these until `START`, so they all mean the same |
+| `start`, `unstop`, `help`, `info` | `carrier-keyword`: Twilio answers these itself; never an answer |
+| `1` to `9`, optionally `#2` | `option` |
+| `yes`, `y`, `yeah`, `yep`, `yup`, `approve`, `approved`, `allow` | `yes` |
+| one of those, a space and 4 to 10 digits (`yes 482913`) | `yes` with a confirmation `code` |
+| `no`, `n`, `nope`, `deny`, `denied`, `reject` | `no` |
+| `done`, `all done`, `that's it`, `thats it`, `nothing` | `done` |
+| anything else (`ok`, `yes please`, `yes but not on main`) | `text`, verbatim |
+
+`smsAnswer({ask, body, messageSid, receivedAt, confirmationCode})` turns a text
+into an `Answer` (channel `sms`, the body verbatim as `ownerExcerpt`, the message
+SID as `sourceId`), or `{outcome: "no-answer", reason}`:
+
+| Ask kind | Answered by |
+| --- | --- |
+| `question` | an offered option number, or any other non-command text verbatim (a number is text when no options were offered) |
+| `permission` | `no` denies. `yes` allows a low-risk request. A high-risk one needs `yes <code>` with the one-time code the daemon put in the text it sent, which sets `confirmation: "text"`. A wrong code, or a code when none was sent, is no answer |
+| `stop` | `done` or `no` lets the agent stop; other text is the next instruction; `yes` is no answer |
+| `notify` | nothing |
+
+Commands, carrier keywords, empty or over-long texts and anything
+`answerProblem` rejects are no answer. Free text never approves: only an exact
+yes word does. Call `smsAnswer` only for a text from the owner's number on a
+verified webhook, since `confirmation: "text"` rests on that check. The owner's
+PIN is never accepted by text, so it never passes through Twilio.
+
+## SMS providers (`@hotline/providers`)
+
+`SmsProvider.sendToOwner(text)` is the only way to send a text. A provider is
+created with the owner's number and has no recipient parameter, so it cannot text
+anyone else. Every text goes through the injected `redact` function first and
+must be 1 to 1600 characters after it. Failures reject with `SmsSendError`
+carrying the HTTP status and Twilio's numeric error code, never Twilio's message
+text (it can quote numbers).
+
+- `TwilioSmsProvider`: one form-encoded `POST` to
+  `https://api.twilio.com/2010-04-01/Accounts/{AccountSid}/Messages.json` with
+  HTTP Basic auth (account SID and auth token), a 10 second timeout, and a
+  required, injected `fetch` so tests never reach the network.
+- `FakeSmsProvider`: records what it sent, with Twilio-shaped SIDs, and can be
+  told to fail the next send (default: Twilio 21610, recipient opted out).
+- `twilioSignature`, `twilioSignaturePayload` and `validTwilioSignature`
+  implement Twilio's `X-Twilio-Signature` algorithm; the tests reproduce
+  Twilio's documented example.
+
 ## Hook payloads (`hooks.ts`)
 
 Schemas for what Claude Code and Codex send to `PermissionRequest` and `Stop`

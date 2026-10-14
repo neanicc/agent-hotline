@@ -44,17 +44,57 @@ Routes today: `GET /v1/health` returns `{"ok": true, "version": "..."}`.
 ### Webhooks
 
 Every route under `/hooks` must declare a verifier (`WebhookRoute.verify`). It
-fails closed in two places:
+fails closed in three places:
 
 1. Before the body is read, a request for a route without a verifier gets `403`.
    Every path that no ticket has implemented yet lands on a catch-all route
-   without one.
-2. After parsing, the verifier runs. Anything other than a literal `true`
+   without one. A route's optional `precheck` (such as "the signature header is
+   there") also runs here, before any parsing.
+2. Parsing. A body the server cannot read (malformed form encoding, invalid
+   UTF-8, an unsupported content type, over 256 KiB) gets `403`, not a 4xx that
+   would show the route exists. Form bodies are parsed strictly by
+   `parseFormBody`, which keeps repeated names so a verifier can refuse them.
+3. After parsing, the verifier runs. Anything other than a literal `true`
    (`false`, a truthy value, a throw or a rejected promise) gets `403`.
 
-A rejected request is logged with its method, path and reason only, never its
-body, headers or query string. Paths outside `/hooks` get `404`. HL-07 and HL-08
-add the Twilio and ElevenLabs routes through `startDaemon({ webhookRoutes })`.
+Every rejection is the same bare `403` with an empty body, so a scanner cannot
+tell a missing route from a bad signature or a malformed body. A rejected request
+is logged with its method, path and reason (`no verifier`, `precheck failed`,
+`unreadable request`, `verification failed`) only, never its body, headers or
+query string. Paths outside `/hooks` get `404`. Routes are added through
+`startDaemon({ webhookRoutes })`; HL-08 adds the ElevenLabs ones.
+
+### Twilio SMS (`POST /hooks/twilio/sms`)
+
+Point the Twilio number's "A message comes in" webhook (HTTP POST) at
+`<tunnel.publicUrl>/hooks/twilio/sms`. `runDaemon` registers the route only when
+`sms.provider` is `twilio`, `sms.fromNumber` and `tunnel.publicUrl` are set, and
+the `twilio.accountSid` and `twilio.authToken` secrets exist. Otherwise it logs
+`sms webhook off` with the reason and the path stays a `403`.
+
+- **Precheck:** an `X-Twilio-Signature` header and a form content type, or `403`
+  before the body is read.
+- **Verify:** the signature is recomputed with Twilio's documented algorithm
+  (`validTwilioSignature` in `@hotline/providers`) over the exact public URL
+  (`publicUrl` origin plus the raw path and query) and the form parameters, and
+  compared in constant time. A repeated parameter name, or an `AccountSid` other
+  than ours, fails.
+- **Owner only:** only a text from `owner.phoneNumber` to `sms.fromNumber`
+  reaches the handler. Any other sender gets one generic reply ("Sorry, this
+  number does not accept messages."), at most 5 per hour in total, and is
+  recorded in the audit log by message SID only.
+- **Once per message:** the last 1000 message SIDs are remembered, so a Twilio
+  retry or a replayed request is answered with empty TwiML and not handled twice.
+  A handler failure forgets the SID so Twilio's retry can get through. Durable
+  replay protection is HL-13.
+- **Opt-out keywords:** when Twilio sends `OptOutType` (`STOP`, `START`, `HELP`)
+  it has already replied, so Hotline adds no reply of its own.
+- **Logs:** the message SID and `sender: owner|other` only, never the text,
+  numbers or signature.
+
+Until call orchestration (HL-09) answers asks by text, an owner's text is
+recorded in the audit log as `sms.received` with its SID and reply type
+(`yes`, `option`, `status`, ...), not its words, and gets no reply.
 
 ## Store
 
