@@ -4,6 +4,11 @@
 import { z } from "zod";
 
 export const SecretName = z.enum([
+  /**
+   * Optional Anthropic API key for the reply judge (HL-09d), used only when
+   * neither the Claude Code nor the Codex CLI is installed.
+   */
+  "anthropic.apiKey",
   /** Per-install token agents present to the local API on 127.0.0.1. */
   "daemon.apiToken",
   "elevenlabs.apiKey",

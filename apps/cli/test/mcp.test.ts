@@ -132,6 +132,23 @@ describe("hotline mcp", () => {
     expect(err.join("\n")).toContain("Usage: hotline mcp");
   });
 
+  it("serves nothing and writes nothing to stdout inside the reply judge's own run (HOTLINE_JUDGE=1)", async () => {
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const raw: string[] = [];
+    stdout.on("data", (chunk: Buffer) => raw.push(chunk.toString("utf8")));
+    const err: string[] = [];
+    // A configured daemon is not even looked for: the command returns before reading stdin.
+    const code = await run(
+      ["mcp", "--agent", "claude"],
+      { stdout: (t) => raw.push(t), stderr: (t) => err.push(t) },
+      context({ env: { HOTLINE_HOME: home(), HOTLINE_JUDGE: "1" }, stdin, stdout }),
+    );
+    expect(code).toBe(0);
+    expect(raw).toEqual([]);
+    expect(err.join("\n")).toContain("inside the reply judge");
+  });
+
   it.each([[["--agent"]], [["--agent", "cursor"]], [["--port", "0"]], [["--port", "x"]], [["--verbose"]]])(
     "rejects %j with exit 2",
     async (argv) => {

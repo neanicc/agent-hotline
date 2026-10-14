@@ -22,6 +22,7 @@ import {
   FileSecretStore,
   hashPin,
   hotlinePaths,
+  type JudgeHost,
   runDaemon,
   writePrivateFile,
 } from "../src/index.js";
@@ -64,6 +65,8 @@ export interface HotlineOptions {
   start?: Date;
   /** Reuse a hotline home (restart tests). */
   dir?: string;
+  /** A fake agent CLI host for the reply judge (HL-09d); without one the daemon has no judge. */
+  judgeHost?: JudgeHost;
 }
 
 export interface Hotline {
@@ -169,6 +172,7 @@ export async function startHotline(options: HotlineOptions = {}): Promise<Hotlin
     clock: () => clock.now,
     fetch: noNetwork,
     providers: { voice, sms },
+    ...(options.judgeHost === undefined ? {} : { judgeHost: options.judgeHost }),
     autoTick: options.autoTick ?? false,
     onReady: (daemon, orchestrator) => ready({ daemon, orchestrator }),
   });
