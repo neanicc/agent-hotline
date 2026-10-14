@@ -136,6 +136,24 @@ the `twilio.accountSid` and `twilio.authToken` secrets exist. Otherwise it logs
   reaches the handler. Any other sender gets one generic reply ("Sorry, this
   number does not accept messages."), at most 5 per hour in total, and is
   recorded in the audit log by message SID only.
+- **Verified by pull (HL-13a):** a valid signature only shows the request was
+  signed with the auth token, which any process running as the owner can read.
+  So before an owner's text reaches the handler, the route fetches the message
+  from Twilio's REST API by `MessageSid` (`lookup`, the SMS provider's
+  `fetchMessage`: `GET /2010-04-01/Accounts/<sid>/Messages/<MessageSid>.json`)
+  and checks Twilio's record (`smsMismatch` in `provider-pull.ts`): the same
+  SID, `direction` `inbound`, status `received` or `receiving`, `from` the
+  owner's number and `to` the Hotline number (strict E.164), the same body
+  byte for byte, and `date_created` at most 15 minutes before the webhook (5
+  minutes of clock skew ahead). A lookup that fails (network, a 404, an answer
+  that is not that message) or a record that differs means the text is not
+  used at all: the handler never sees it, the reply is "Hotline: your text could
+  not be confirmed with Twilio, so it was not used. Please send it again.", and
+  the SID is not remembered as handled, so a genuine retry is pulled again. A
+  404 or a mismatch is audited as `security.possible-forgery` and texts the
+  owner (at most once an hour); an outage is audited as `security.unverified`
+  and texts nothing. A text from any other number is never looked up: it never
+  reaches the handler anyway.
 - **Once per message:** the last 1000 successfully handled message SIDs are
   remembered, so a Twilio retry or a replayed request is answered with empty
   TwiML and not handled twice. A SID counts as handled only after its handler
@@ -163,6 +181,18 @@ Known limit: the PinGate's attempt counters, its verified calls and both replay
 memories are in memory, so a daemon restart resets them. Per-call limits (2
 wrong PINs) still apply after a restart; the hourly budget starts again.
 Persisting them is HL-13 work.
+
+**Verified by pull (HL-13a).** The tool secret and the post-call HMAC secret
+can be read by any process running as the owner, so neither proves a request
+came from ElevenLabs. What does is ElevenLabs' own record of the conversation,
+fetched by id with the API key (`conversation`, the voice provider's
+`fetchConversation`: `GET /v1/convai/conversations/<id>`,
+https://elevenlabs.io/docs/api-reference/conversations/get). `runDaemon`
+passes the configured voice provider's; without one (no `elevenlabs.apiKey`),
+every pull fails, so no PIN is accepted and no call confirms anything. Checks
+live in `provider-pull.ts`; a mismatch goes to `onUnverified`, which audits
+`security.possible-forgery` and texts the owner at most once an hour (an outage
+is `security.unverified`, no text).
 
 `elevenLabsRoutes` (`elevenlabs-webhook.ts`) serves the voice agent's four
 server tools and the post-call webhook. `runDaemon` registers them only when
@@ -205,7 +235,7 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
 
 | Tool | What the route does |
 | --- | --- |
-| `verify_pin` | Checks the PIN with the `PinGate`: 2 wrong PINs per call, then `end_call: true` and no further checks on that call; 6 wrong PINs across all calls of one direction in a rolling hour, or 10 in a rolling day, lock every check on that direction, the right PIN included, until enough time has passed. A caller spoofing the owner's number therefore gets at most 10 guesses a day (0.1% of a 4-digit PIN space). Each lockout calls the PinGate's `onLockout`, and the inbound line texts the owner (at most once an hour per direction). Inbound and outbound calls have separate budgets, so someone guessing on inbound calls (caller ID can be spoofed) cannot block PIN approvals on calls Hotline placed to the owner. The trade-off: such guessing still locks the owner's own inbound line for up to an hour, which fails closed. Answers `{verified, attempts_left, end_call}`. A verified PIN is registered with the redactor (`addShortSecret`). The PIN is checked against `owner.pinHash` with scrypt and never logged or stored |
+| `verify_pin` | First pulls the conversation (HL-13a): it must exist at ElevenLabs, belong to `voice.agentId`, be going on (`initiated` or `in-progress`), be a phone call whose far end is `owner.phoneNumber`, on `voice.agentPhoneNumberId` when that is set, with the caller and called numbers and call SID the tool call carries. Otherwise `{"result": "refused", "end_call": true}` and no attempt is counted, so forged tool calls for a made-up conversation can neither guess the PIN nor lock it. Then checks the PIN with the `PinGate`: 2 wrong PINs per call, then `end_call: true` and no further checks on that call; 6 wrong PINs across all calls of one direction in a rolling hour, or 10 in a rolling day, lock every check on that direction, the right PIN included, until enough time has passed. A caller spoofing the owner's number therefore gets at most 10 guesses a day (0.1% of a 4-digit PIN space). Each lockout calls the PinGate's `onLockout`, and the inbound line texts the owner (at most once an hour per direction). Inbound and outbound calls have separate budgets, so someone guessing on inbound calls (caller ID can be spoofed) cannot block PIN approvals on calls Hotline placed to the owner. The trade-off: such guessing still locks the owner's own inbound line for up to an hour, which fails closed. Answers `{verified, attempts_left, end_call}`. A verified PIN is registered with the redactor (`addShortSecret`). The PIN is checked against `owner.pinHash` with scrypt and never logged or stored |
 | `submit_answer` | On an inbound call, `pin-required` until this call passed `verify_pin`, because caller ID can be spoofed. A call is outbound only when the injected `placedCall(conversationId)` says Hotline placed it (call orchestration knows) and it went to the owner's number from another number; everything else counts as inbound. `runDaemon` passes call orchestration's `placedCall`, true from the moment a call is placed until its post-call event, its failure or the stuck-call limit. Otherwise passes the ask number, decision (`option`, `allow`, `deny`, `text`, `done` or `unclear`), the owner's words, the direction and the call ids to the `submitAnswer` handler. `confirmation` is `pin` only when this call passed `verify_pin`; nothing in the request can set it |
 | `get_status` | `{"result": "pin-required"}` until this call passed `verify_pin`. Then the `getStatus` handler's text (the [inbound line](#inbound-line)'s numbered status), redacted and cut to 1500 characters |
 | `send_instruction` | `pin-required` until this call passed `verify_pin`. Then the `sendInstruction` handler gets the session number, instruction and the owner's words, and answers `queued` (held until the post-call transcript confirms it), `unknown-session` (not a number this call's status read out, or that session ended), `too-many` or `invalid` |
@@ -226,6 +256,20 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
 - **Verify:** `t=<seconds>,v0=<hex HMAC-SHA256(webhookSecret, "<t>.<raw body>")>`,
   the algorithm of ElevenLabs' SDK, compared in constant time over the raw body.
   A timestamp more than 30 minutes old or 5 minutes ahead fails.
+- **The body is only a trigger (HL-13a):** for a `post_call_transcription`, the
+  conversation is pulled from ElevenLabs, and the handlers get ElevenLabs'
+  transcript, metadata (direction, numbers, call SID, duration) and status,
+  never the body's; whose turns count as the owner's is decided from the pulled
+  metadata too. A body that differs from the record is audited as a possible
+  forgery (the record is still what counts). A pull that fails, or a record that
+  is another conversation or another agent's, becomes a failed call (an
+  initiation failure with reason `unknown`): nothing is confirmed, and every ask
+  on it ends as no answer under the queue's usual retry and text rules. A record
+  still `initiated`, `in-progress` or `processing` means the event came before
+  the call was over, which ElevenLabs never does: it is audited as a possible
+  forgery and left unhandled, so the genuine event still counts when it comes.
+  `call_initiation_failure` events are not pulled: they confirm nothing, and a
+  forged one can only make a call count as failed.
 - **Once per event:** a `post_call_transcription` or `call_initiation_failure`
   for a conversation is handled once. A replay, or a retry after success, gets
   `200` and is ignored, whatever its signature header looks like. Events are
@@ -302,7 +346,8 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
   and its record being saved leaves a call Hotline no longer knows about; its
   answers are not served, and the retry may ring the owner a second time while
   the first call is still ringing (bounded by the call limits). A text is sent
-  again (at least once), with the confirmation code it already had; recording an answer, closing an ask and ending a call are
+  again (at least once), with a fresh confirmation code that replaces the one
+  it had (only a hash of that is kept); recording an answer, closing an ask and ending a call are
   idempotent. A post-call event's call stays live until all of its answers
   have reached the queue, so ElevenLabs' retry after a failure applies them
   again and the queue ignores the ones already applied.
@@ -533,14 +578,23 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
   YES 123456 to allow, or NO to deny", with "HIGH RISK." first for a high-risk
   one), unique among waiting codes and one the redactor leaves intact. No text
   approves a request without its code (`smsAnswer`), so an old or replayed
-  "yes" can never approve a newer request. Codes are stored with the state, die
-  with the ask, and are spent on first use; a code that matches no waiting ask
+  "yes" can never approve a newer request. Only a salted scrypt hash of each
+  code is stored with the state (`code-hash.ts`, HL-13a: a fresh 16-byte salt
+  per code, N = 2^14), and a reply's code is compared with each waiting hash in
+  constant time, so the code cannot be read back from the database. Codes die
+  with the ask and are spent on first use; a code that matches no waiting ask
   burns every waiting code, so those requests can then only be approved on a
-  call. Without a usable code the text says the request can only be approved on
-  a call. Codes and held voice answers (with the model's
-  `owner_words`) live in `daemon_state`, inside the `0600` database the store
-  already requires; same-user processes can read it (see
-  [contracts](contracts.md#secrets-secretsts)).
+  call. A text sent again (after a crash part way through a send) carries a
+  fresh code that replaces the old one, since the old one cannot be read back;
+  a code from the interrupted text then no longer works. State saved before
+  HL-13a with plaintext codes is hashed on start. Without a usable code the
+  text says the request can only be approved on a call. Code hashes and held
+  voice answers (with the model's `owner_words`) live in `daemon_state`, inside
+  the `0600` database the store already requires, which zeroes overwritten rows
+  (`secure_delete`); same-user processes can read it (see
+  [contracts](contracts.md#secrets-secretsts)). A hash of a 6-digit code can
+  still be brute-forced offline in hours of CPU time; what stops a forged
+  `YES <code>` is the pull from Twilio above, which a forger cannot satisfy.
 - **Text replies** (`owner-texts.ts` plans, the orchestrator applies). Each
   owner text is handled once per message SID, also across restarts
   (`inbound_messages`). The SID is recorded before the text has any effect, so a
@@ -761,6 +815,8 @@ status changes.
 - Migrations are an append-only list (`MIGRATIONS`). `PRAGMA user_version` counts
   how many have run. Each runs in its own transaction, so a failure leaves the
   version unchanged. A database from a newer Hotline is refused.
+- `PRAGMA secure_delete` is on (HL-13a): overwritten and deleted rows are zeroed
+  on disk, so replaced state does not linger in free pages.
 - `recordAnswer(answer, receivedAt)` stores an answer and marks its ask
   `answered` in one transaction. It refuses anything `answerProblem` rejects
   (closed or expired ask, wrong decision kind, unconfirmed high-risk approval).

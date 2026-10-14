@@ -189,13 +189,34 @@ Keychain item that `/usr/bin/security` added lists that binary as trusted, so an
 same-user process can run `security find-generic-password -s agent-hotline -a <name> -w`
 and read it without a prompt. The `0600` file is just as readable to that user.
 The stores protect against other accounts and against secrets landing in the
-repository, config or process lists, not against the owner's own processes. This
-does not let an agent approve anything: decisions come only from the owner's own
-words on the owner's phone, high-risk approvals also need the PIN or a confirming
-text, and the PIN is stored only as a scrypt hash. An agent holding the Twilio or
-ElevenLabs keys could still place calls or texts on the owner's account, or forge
-a provider webhook to the daemon. The daemon token likewise lets an agent talk to
-the local API, which it is meant to do.
+repository, config or process lists, not against the owner's own processes.
+
+Before HL-13a this section said that same-user access "does not let an agent
+approve anything". That was wrong (found in the HL-15 review): with the Twilio
+auth token or the ElevenLabs webhook secret, a same-user process could sign a
+webhook itself, a `YES <code>` text or a whole post-call transcript in which the
+owner says yes, and post it to the local listener. Since HL-13a a signed webhook
+is only a trigger: before a text or a call decides anything, the daemon pulls
+the message from Twilio or the conversation from ElevenLabs by id and uses that
+record ([daemon](daemon.md#twilio-sms-post-hookstwiliosms)). Confirmation codes
+are stored only as salted hashes. A process that reads the secrets can still
+sign webhooks, but a forged one finds no matching record, confirms nothing, and
+is audited as a possible forgery; the owner gets a text about it.
+
+**Residual risk.** A same-user process that also reads the provider API keys
+(the Twilio auth token is one, the ElevenLabs API key another) can call the
+providers' APIs itself: place calls and send texts on the owner's account,
+read message and call history, or change the voice agent's configuration. It
+cannot fabricate the owner's inbound message (Twilio records the real sender
+of an inbound text) or the owner's speech in a real call's transcript, so it
+cannot make an approval verify. It can see a live call's conversation id in the
+store and send `verify_pin` guesses for that call, bounded by the PinGate's
+limits (2 per call, 6 an hour, 10 a day), and it can deny service, for example
+by forging a call initiation failure so a live call counts as failed, which
+fails closed (no answer).
+Use narrowly scoped keys where the providers allow it. The daemon token lets an
+agent talk to the local API, which it is meant to do; no agent-API route can
+answer an ask.
 
 ## Text replies (`sms-reply.ts`)
 
@@ -251,6 +272,25 @@ text (it can quote numbers).
   required, injected `fetch` so tests never reach the network.
 - `FakeSmsProvider`: records what it sent, with Twilio-shaped SIDs, and can be
   told to fail the next send (default: Twilio 21610, recipient opted out).
+  It also keeps Twilio's message log (HL-13a): `receive(body, {from?,
+  messageSid?})` plays someone (the owner by default) texting the Hotline
+  number (`hotlineNumber`, default `+15555550101`) and returns the SID and
+  fields its webhook carries; `fetchMessage` returns what it sent
+  (`outbound-api`) or received (`inbound`, `received`), stamped by its `clock`,
+  and rejects any other SID with `PullError` `not-found`, as for a forged
+  webhook. A known SID passed to `receive` again (a retry) keeps the first
+  record. `failNextFetch()` makes the next lookup fail (default `unreachable`).
+- **Pulling a message back (HL-13a).** `SmsProvider.fetchMessage?(messageSid)`
+  returns the provider's record as a `PulledMessage` (`sid`, `direction`,
+  `from`, `to`, `body`, `status`, `dateCreated`). `TwilioSmsProvider` sends one
+  `GET` to `.../Accounts/{AccountSid}/Messages/{MessageSid}.json`
+  (https://www.twilio.com/docs/messaging/api/message-resource#fetch-a-message-resource)
+  with the same auth and timeout, refuses a malformed SID before any request,
+  and accepts only that SID in our account. Failures reject with `PullError`
+  (`not-found` for a 404, `unreachable`, `refused`, `malformed`; never the
+  provider's text). The method is optional on the interface so other
+  implementations keep compiling; the daemon treats a provider without it as
+  one that can never confirm a text.
 - `twilioSignature`, `twilioSignaturePayload` and `validTwilioSignature`
   implement Twilio's `X-Twilio-Signature` algorithm; the tests reproduce
   Twilio's documented example.
@@ -283,7 +323,18 @@ decision it submits or what `owner_words` it sends.
   `https://api.elevenlabs.io/v1/convai/twilio/outbound-call` with `xi-api-key`,
   `agent_id`, `agent_phone_number_id`, `to_number` (the owner) and the
   variables as `conversation_initiation_client_data.dynamic_variables`, a 15
-  second timeout and a required injected `fetch`.
+  second timeout and a required injected `fetch`. `fetchConversation(id)`
+  (HL-13a) sends one `GET` to `/v1/convai/conversations/{id}` with `xi-api-key`
+  (https://elevenlabs.io/docs/api-reference/conversations/get) and returns a
+  `ConversationRecord`: `agent_id`, `conversation_id`, `status` (`initiated`,
+  `in-progress`, `processing`, `done`, `failed`), `transcript` and `metadata`
+  (`start_time_unix_secs`, `call_duration_secs`, `phone_call` with
+  `direction`, `external_number`, `agent_number`, `phone_number_id`,
+  `call_sid`); other fields are dropped. The post-call webhook's `data` has the
+  same shape (`parseConversation`, `conversationEvent`). A malformed id is
+  refused before any request; failures reject with `PullError` as for SMS.
+  `VoiceProvider.fetchConversation?` is optional on the interface; without it
+  no call confirms a decision or a PIN.
 - `FakeVoiceProvider`: records each placed call and its variables, and plays
   scripted humans (`scriptedHuman.noPickup()`, `busy()`, `silent()`, `drops()`,
   `allows()`, `denies()`, `confirms()`, `unsureTwice()`, `unclear()`, `wrongPin()`,
@@ -306,7 +357,16 @@ decision it submits or what `owner_words` it sends.
   voice model submits `words` the owner never said there, for tests of a
   confused or prompt-injected model. `httpVoiceToolClient` sends those tool
   calls to the daemon's real routes with the tool secret and signs the post-call
-  webhooks, so the scenario suite exercises authentication too.
+  webhooks, so the scenario suite exercises authentication too. It also keeps
+  ElevenLabs' record of every call it played (HL-13a): `fetchConversation(id)`
+  returns it `in-progress` while the call is being played (so `verify_pin` can
+  pull it), with the transcript played so far and the phone metadata
+  (`agent_number` from `agentNumber`, `phone_number_id` from `phoneNumberId`,
+  default `phnum_fake`), and `done` with the whole transcript before its
+  post-call webhook goes out; a call nobody picked up is `failed`. The webhook
+  body is a copy, so a test that tampers with it never changes the record. Any
+  other id rejects with `PullError` `not-found`, as for a forged webhook;
+  `failNextFetch()` makes the next fetch fail (default `unreachable`).
   `playPending()` plays placed calls in order (a call without a script is not
   picked up); `inboundCall(script, from)` plays a call in. A `status` step's
   agent turn reads the status out (fences dropped), and an `instruct` step's

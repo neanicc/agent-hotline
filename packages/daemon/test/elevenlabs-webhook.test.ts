@@ -1,8 +1,11 @@
 import { request } from "node:http";
 import {
+  type ConversationRecord,
   FakeVoiceProvider,
   type HttpFetch,
   httpVoiceToolClient,
+  PullError,
+  parseConversation,
   postCallSignatureHeader,
   scriptedHuman,
 } from "@hotline/providers";
@@ -65,6 +68,15 @@ let pins: PinGate;
 let redactor: ReturnType<typeof createRedactor>;
 /** Conversations Hotline did not place; every other id counts as placed. */
 let unplaced: Set<string>;
+/**
+ * ElevenLabs' conversations, as the routes pull them (HL-13a). `tool` and
+ * `postCall` add the call they claim to come from, as ElevenLabs would have it,
+ * unless told the conversation does not exist there.
+ */
+let conversations: Map<string, ConversationRecord>;
+let unverified: { what: string; forgery: boolean; reason: string }[];
+
+const notFound = () => new PullError("ElevenLabs has no such record (HTTP 404)", "not-found", 404);
 
 function server(overrides: Partial<ElevenLabsRoutesOptions> = {}): FastifyInstance {
   const log: LogOptions = { level: "info", destination: { write: (line) => lines.push(line) }, redactor };
@@ -101,6 +113,14 @@ function server(overrides: Partial<ElevenLabsRoutesOptions> = {}): FastifyInstan
       clock: () => now,
       redact: (text) => redactor.text(text),
       handlers,
+      conversation: async (id) => {
+        const record = conversations.get(id);
+        if (record === undefined) throw notFound();
+        return structuredClone(record);
+      },
+      onUnverified: (what, failure) => {
+        unverified.push({ what, ...failure });
+      },
       ...overrides,
     }),
   });
@@ -118,6 +138,8 @@ beforeEach(() => {
   failPostCall = 0;
   redactor = createRedactor([TOOL_SECRET, WEBHOOK_SECRET]);
   unplaced = new Set();
+  conversations = new Map();
+  unverified = [];
   pins = new PinGate({
     check: async (pin) => pin === PIN,
     clock: () => now,
@@ -141,13 +163,44 @@ interface ToolOptions {
   secret?: string | null;
   contentType?: string;
   raw?: string;
+  /** The conversation does not exist at ElevenLabs: a forged tool call. */
+  unknownAtElevenLabs?: boolean;
+}
+
+/**
+ * ElevenLabs' record of the live call a tool call's binding describes: outbound
+ * when it dialled the owner, inbound otherwise.
+ */
+function liveRecord(body: Record<string, unknown>): ConversationRecord {
+  const caller = body.caller_id as string | undefined;
+  const called = body.called_number as string | undefined;
+  const outbound = called === OWNER && caller !== OWNER;
+  return {
+    agent_id: AGENT_ID,
+    conversation_id: body.conversation_id as string,
+    status: "in-progress",
+    transcript: [],
+    metadata: {
+      start_time_unix_secs: Math.floor(now.getTime() / 1000) - 60,
+      phone_call: {
+        direction: outbound ? "outbound" : "inbound",
+        external_number: outbound ? called : caller,
+        agent_number: outbound ? caller : called,
+        ...(typeof body.call_sid === "string" ? { call_sid: body.call_sid } : {}),
+      },
+    },
+  };
 }
 
 function tool(
   name: string,
   body: Record<string, unknown>,
-  { secret = TOOL_SECRET, contentType, raw }: ToolOptions = {},
+  { secret = TOOL_SECRET, contentType, raw, unknownAtElevenLabs = false }: ToolOptions = {},
 ) {
+  const id = body.conversation_id;
+  if (!unknownAtElevenLabs && typeof id === "string" && !conversations.has(id)) {
+    conversations.set(id, liveRecord(body));
+  }
   const headers: Record<string, string> = { "content-type": contentType ?? "application/json" };
   if (secret !== null) headers["x-hotline-tool-secret"] = secret;
   return app.inject({
@@ -431,10 +484,23 @@ describe("get_status and send_instruction", () => {
   });
 });
 
+/** Makes `payload`'s conversation, finished, what ElevenLabs has: the webhook is genuine. */
+function recordAtElevenLabs(payload: unknown): void {
+  const data = (payload as { type?: unknown; data?: unknown } | null)?.data;
+  if ((payload as { type?: unknown } | null)?.type !== "post_call_transcription") return;
+  const record = parseConversation(structuredClone(data));
+  if (record !== undefined) conversations.set(record.conversation_id, record);
+}
+
 function postCall(
   payload: unknown,
-  { header, timestamp = now.getTime() / 1000 }: { header?: string | null; timestamp?: number } = {},
+  {
+    header,
+    timestamp = now.getTime() / 1000,
+    unknownAtElevenLabs = false,
+  }: { header?: string | null; timestamp?: number; unknownAtElevenLabs?: boolean } = {},
 ) {
+  if (!unknownAtElevenLabs) recordAtElevenLabs(payload);
   const raw = JSON.stringify(payload);
   const headers: Record<string, string> = { "content-type": "application/json" };
   const signature = header === undefined ? postCallSignatureHeader(WEBHOOK_SECRET, timestamp, raw) : header;
@@ -537,6 +603,7 @@ describe("post-call webhook", () => {
 
   it("handles a replay once, whatever the header looks like", async () => {
     const raw = JSON.stringify(transcription());
+    recordAtElevenLabs(JSON.parse(raw));
     const t = Math.floor(now.getTime() / 1000);
     const header = postCallSignatureHeader(WEBHOOK_SECRET, t, raw);
     const [time, hash] = header.split(",");
@@ -691,6 +758,7 @@ describe("post-call webhook under load", () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 100));
     const raw = JSON.stringify(transcription("conv_load"));
+    recordAtElevenLabs(JSON.parse(raw));
     const signed = {
       "content-type": "application/json",
       "elevenlabs-signature": postCallSignatureHeader(WEBHOOK_SECRET, now.getTime() / 1000, raw),
@@ -740,6 +808,7 @@ describe("post-call webhook under load", () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 600));
     const raw = JSON.stringify(transcription("conv_after_timeout"));
+    recordAtElevenLabs(JSON.parse(raw));
     const accepted = await send({
       port,
       method: "POST",
@@ -764,14 +833,16 @@ describe("fake voice provider against the real routes", () => {
   });
 
   it("plays scripted humans over HTTP, with the tool secret and signed post-call webhooks", async () => {
-    listening = server();
+    // The routes pull every conversation from the fake, which records what it played.
+    let voice: FakeVoiceProvider | undefined;
+    listening = server({ conversation: (id) => (voice as FakeVoiceProvider).fetchConversation(id) });
     await listening.listen({ host: "127.0.0.1", port: 0 });
     const address = listening.addresses()[0];
     const fetch: HttpFetch = async (url, init) => {
       const response = await globalThis.fetch(url, init);
       return { status: response.status, json: () => response.json() };
     };
-    const voice = new FakeVoiceProvider({
+    voice = new FakeVoiceProvider({
       ownerNumber: OWNER,
       agentNumber: AGENT_NUMBER,
       agentId: AGENT_ID,
@@ -825,5 +896,204 @@ describe("fake voice provider against the real routes", () => {
     expect(played.tools.map((t) => t.tool)).toEqual(["verify_pin", "verify_pin"]);
     expect(statusCalls).toEqual([]);
     expect(loggedText(lines)).not.toContain(PIN);
+  });
+});
+
+describe("verify by pull (HL-13a)", () => {
+  const inboundBinding = (conversation: string) => ({
+    ...binding(conversation),
+    caller_id: OWNER,
+    called_number: AGENT_NUMBER,
+  });
+
+  it("never counts a verify_pin for a conversation ElevenLabs does not have", async () => {
+    for (let i = 0; i < 12; i += 1) {
+      const response = await tool(
+        "verify_pin",
+        { ...inboundBinding(`conv_forged_${i}`), pin: i === 11 ? PIN : "0000" },
+        { unknownAtElevenLabs: true },
+      );
+      expect(response.json()).toEqual({ result: "refused", end_call: true });
+    }
+    expect(pins.isVerified("conv_forged_11")).toBe(false);
+    expect(unverified).toHaveLength(12);
+    expect(unverified[0]).toEqual({
+      what: "verify_pin",
+      forgery: true,
+      reason: "the provider has no such record",
+    });
+    // Nothing was spent: a real call still has both attempts, and the budget is whole.
+    expect((await tool("verify_pin", { ...inboundBinding("conv_real"), pin: "1111" })).json()).toEqual({
+      verified: false,
+      attempts_left: 1,
+      end_call: false,
+    });
+    expect((await tool("verify_pin", { ...inboundBinding("conv_real"), pin: PIN })).json()).toMatchObject({
+      verified: true,
+    });
+  });
+
+  it.each([
+    ["a finished call", (r: ConversationRecord) => Object.assign(r, { status: "done" })],
+    ["another agent's call", (r: ConversationRecord) => Object.assign(r, { agent_id: "agent_other" })],
+    [
+      "a call with someone else's number",
+      (r: ConversationRecord) => {
+        if (r.metadata?.phone_call) r.metadata.phone_call.external_number = STRANGER;
+        return r;
+      },
+    ],
+    [
+      "a call on another Hotline number",
+      (r: ConversationRecord) => {
+        if (r.metadata?.phone_call) r.metadata.phone_call.agent_number = "+15555550102";
+        return r;
+      },
+    ],
+    [
+      "a call with another call SID",
+      (r: ConversationRecord) => {
+        if (r.metadata?.phone_call) r.metadata.phone_call.call_sid = `CA${"9".repeat(32)}`;
+        return r;
+      },
+    ],
+    [
+      "a conversation that is not a phone call",
+      (r: ConversationRecord) => Object.assign(r, { metadata: {} }),
+    ],
+  ])("refuses a PIN on %s, without spending an attempt", async (_name, change) => {
+    const body = { ...inboundBinding("conv_odd"), pin: PIN };
+    conversations.set("conv_odd", change(liveRecord(body)));
+    expect((await tool("verify_pin", body)).json()).toEqual({ result: "refused", end_call: true });
+    expect(pins.isVerified("conv_odd")).toBe(false);
+    expect(unverified.map((u) => u.forgery)).toEqual([true]);
+  });
+
+  it("refuses a PIN on a call not on the configured Hotline number", async () => {
+    await app.close();
+    app = server({ agentPhoneNumberId: "phnum_hotline" });
+    const body = { ...inboundBinding("conv_num"), pin: PIN };
+    const record = liveRecord(body);
+    if (record.metadata?.phone_call) record.metadata.phone_call.phone_number_id = "phnum_other";
+    conversations.set("conv_num", record);
+    expect((await tool("verify_pin", body)).json()).toEqual({ result: "refused", end_call: true });
+    if (record.metadata?.phone_call) record.metadata.phone_call.phone_number_id = "phnum_hotline";
+    conversations.set("conv_num", record);
+    expect((await tool("verify_pin", body)).json()).toMatchObject({ verified: true });
+  });
+
+  it("refuses a PIN when ElevenLabs cannot be reached, as no forgery", async () => {
+    await app.close();
+    app = server({
+      conversation: async () => {
+        throw new PullError("Could not reach ElevenLabs", "unreachable");
+      },
+    });
+    expect((await tool("verify_pin", { ...inboundBinding("conv_down"), pin: PIN })).json()).toEqual({
+      result: "refused",
+      end_call: true,
+    });
+    expect(unverified).toEqual([
+      { what: "verify_pin", forgery: false, reason: "the provider lookup failed (unreachable)" },
+    ]);
+  });
+
+  it("hands the handler the pulled transcript, not a forged body's", async () => {
+    // ElevenLabs has the call as it happened: the owner said no.
+    const genuine = transcription("conv_forge");
+    genuine.data.transcript = [
+      { role: "agent", message: "Hey, it's your hotline." },
+      { role: "user", message: "No, don't." },
+    ];
+    recordAtElevenLabs(genuine);
+    const forged = transcription("conv_forge");
+    expect((await postCall(forged, { unknownAtElevenLabs: true })).statusCode).toBe(200);
+    expect(postCalls).toMatchObject([
+      {
+        type: "transcription",
+        conversationId: "conv_forge",
+        transcript: [
+          { role: "agent", message: "Hey, it's your hotline." },
+          { role: "owner", message: "No, don't." },
+        ],
+      },
+    ]);
+    expect(unverified).toEqual([
+      { what: "post-call", forgery: true, reason: "the webhook differs from the provider's record" },
+    ]);
+  });
+
+  it("uses the pulled metadata: a forged body cannot make a stranger's call the owner's", async () => {
+    const genuine = transcription("conv_meta");
+    genuine.data.metadata.phone_call.external_number = STRANGER;
+    recordAtElevenLabs(genuine);
+    await postCall(transcription("conv_meta"), { unknownAtElevenLabs: true });
+    expect(postCalls).toMatchObject([{ externalNumber: STRANGER, transcript: [{}, { role: "caller" }] }]);
+  });
+
+  it.each([
+    ["ElevenLabs has no such conversation", undefined, "the provider has no such record"],
+    [
+      "the conversation is another agent's",
+      (r: ConversationRecord) => Object.assign(r, { agent_id: "agent_other" }),
+      "the conversation belongs to another agent",
+    ],
+  ])("gives a failed call, so no answer, when %s", async (_name, change, reason) => {
+    const body = transcription("conv_gone");
+    if (change !== undefined) {
+      recordAtElevenLabs(body);
+      conversations.set("conv_gone", change(conversations.get("conv_gone") as ConversationRecord));
+    }
+    expect((await postCall(body, { unknownAtElevenLabs: true })).statusCode).toBe(200);
+    expect(postCalls).toEqual([
+      { type: "initiation-failure", agentId: AGENT_ID, conversationId: "conv_gone", reason: "unknown" },
+    ]);
+    expect(unverified).toEqual([{ what: "post-call", forgery: true, reason }]);
+  });
+
+  it("gives a failed call when ElevenLabs cannot be reached", async () => {
+    await app.close();
+    app = server({
+      conversation: async () => {
+        throw new PullError("ElevenLabs refused the lookup (HTTP 503)", "refused", 503);
+      },
+    });
+    expect((await postCall(transcription("conv_down"))).statusCode).toBe(200);
+    expect(postCalls).toMatchObject([{ type: "initiation-failure", reason: "unknown" }]);
+    expect(unverified).toEqual([
+      { what: "post-call", forgery: false, reason: "the provider lookup failed (refused)" },
+    ]);
+  });
+
+  it("leaves an event for a call still going on unhandled, so the genuine one counts", async () => {
+    conversations.set("conv_live", liveRecord(binding("conv_live")));
+    expect((await postCall(transcription("conv_live"), { unknownAtElevenLabs: true })).statusCode).toBe(200);
+    expect(postCalls).toEqual([]);
+    expect(unverified).toEqual([
+      { what: "post-call", forgery: true, reason: "the call is not over at the provider" },
+    ]);
+    // The call ends; ElevenLabs' own webhook arrives and is handled once.
+    expect((await postCall(transcription("conv_live"))).statusCode).toBe(200);
+    expect((await postCall(transcription("conv_live"))).statusCode).toBe(200);
+    expect(postCalls).toHaveLength(1);
+  });
+
+  it("never pulls for a call initiation failure, which confirms nothing", async () => {
+    await app.close();
+    app = server({
+      conversation: async () => {
+        throw new Error("no pull expected");
+      },
+    });
+    const failure = {
+      type: "call_initiation_failure",
+      event_timestamp: now.getTime() / 1000,
+      data: { agent_id: AGENT_ID, conversation_id: "conv_busy", failure_reason: "busy" },
+    };
+    expect((await postCall(failure)).statusCode).toBe(200);
+    expect(postCalls).toEqual([
+      { type: "initiation-failure", agentId: AGENT_ID, conversationId: "conv_busy", reason: "busy" },
+    ]);
+    expect(unverified).toEqual([]);
   });
 });

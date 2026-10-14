@@ -104,6 +104,14 @@ so the rules are strict:
   ElevenLabs tool calls carry a shared secret, and post-call webhooks are
   HMAC-checked. Anything else gets 403. Only `/hooks/*` is reachable through the
   tunnel; the agent API listens on 127.0.0.1 with a per-install token.
+- **Every approval is checked with the provider.** A signed webhook is only a
+  trigger. Before your text counts, Hotline fetches it from Twilio by its id and
+  checks that Twilio really received it from your number, with the same words,
+  just now. Before a call decides anything, Hotline fetches the conversation
+  from ElevenLabs and uses ElevenLabs' transcript, never the webhook's, and a
+  PIN is only tried on a call ElevenLabs shows is going on. Anything that does
+  not match is ignored, logged as a possible forgery, and you get a text about it.
+  Text confirmation codes are stored only as salted hashes.
 - **Decisions come from your words.** An answer counts only when it comes from
   you on the call or by text, with the transcript excerpt stored, and the daemon
   checks it against your own words. Before approving anything, the voice agent
@@ -128,13 +136,15 @@ so the rules are strict:
 
 Known limits, accepted for Tier 1:
 
-- **Same-user processes are trusted.** Any process running as you, coding
-  agents included, can read Hotline's Keychain items, `0600` files and local
-  database. With the Twilio or ElevenLabs secrets and a pending request's
-  confirmation code, such a process could forge a signed webhook that looks like
-  your reply and approve a request without your voice or PIN, or place calls and
-  texts on your account. The rules above protect against other people and other
-  accounts, not against code running as you. Use narrowly scoped keys
+- **Same-user processes can use your provider accounts.** Any process running
+  as you, coding agents included, can read Hotline's Keychain items, `0600`
+  files and local database. It can sign webhooks with those secrets, but a
+  forged reply or call transcript does not match what Twilio or ElevenLabs
+  recorded, so it approves nothing. With the API keys it can still call the
+  providers itself: place calls and texts on your account, read their history,
+  change the voice agent, or guess at the PIN on a call that is going on (within
+  the PIN limits). It cannot fake your inbound text or your voice in a real
+  call's transcript. Use narrowly scoped keys
   ([contracts.md](docs/contracts.md#secrets-secretsts)).
 - **One install token for every agent.** All local sessions share the agent API
   token, so one session can read or cancel another's asks. No agent-API route can

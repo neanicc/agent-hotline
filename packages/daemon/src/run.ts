@@ -3,8 +3,11 @@
 // down cleanly on SIGINT or SIGTERM.
 import { type Config, policySettings, type SecretStore } from "@hotline/core";
 import {
+  type ConversationRecord,
   ElevenLabsVoiceProvider,
   type HttpFetch,
+  PullError,
+  type PulledMessage,
   type SmsProvider,
   TwilioSmsProvider,
   type VoiceProvider,
@@ -18,6 +21,7 @@ import type { LogDestination, LogLevel } from "./logger.js";
 import { CallOrchestrator, type OrchestratorLog } from "./orchestrator.js";
 import { silentLog } from "./orchestrator-state.js";
 import { PinGate, verifyPin } from "./pin.js";
+import { ForgeryAlarm } from "./provider-pull.js";
 import { createRedactor, type Redactor } from "./redact.js";
 import { type Exec, openSecretStore } from "./secret-store.js";
 import { type Daemon, startDaemon, type WebhookRoute } from "./server.js";
@@ -134,10 +138,31 @@ async function twilioSetup(config: Config, secrets: SecretStore): Promise<Twilio
   return { accountSid, authToken, smsNumber };
 }
 
+/** The SMS provider's message lookup, or one that always fails closed. */
+function messageLookup(texter: SmsProvider | undefined): (messageSid: string) => Promise<PulledMessage> {
+  const fetchMessage = texter?.fetchMessage?.bind(texter);
+  return (
+    fetchMessage ??
+    (() => Promise.reject(new PullError("No SMS provider to look messages up with", "unsupported")))
+  );
+}
+
+/** The voice provider's conversation lookup, or one that always fails closed. */
+function conversationLookup(
+  caller: VoiceProvider | string,
+): (conversationId: string) => Promise<ConversationRecord> {
+  const fetchConversation = typeof caller === "string" ? undefined : caller.fetchConversation?.bind(caller);
+  return (
+    fetchConversation ??
+    (() => Promise.reject(new PullError("No voice provider to look conversations up with", "unsupported")))
+  );
+}
+
 /**
  * The Twilio SMS webhook, when the config and secret store have everything it
  * needs. Otherwise no route is registered and `/hooks/twilio/sms` stays a 403.
- * The owner's texts go to call orchestration, once per message SID.
+ * The owner's texts go to call orchestration, once per message SID, each only
+ * after Twilio's own record of it confirms it (HL-13a).
  */
 function smsWebhook(
   config: Config,
@@ -146,6 +171,8 @@ function smsWebhook(
   store: HotlineStore,
   orchestrator: CallOrchestrator,
   clock: () => Date,
+  texter: SmsProvider | undefined,
+  alarm: ForgeryAlarm,
 ): WebhookSetup {
   if (typeof twilio === "string") return { routes: [], off: twilio };
   const publicUrl = config.tunnel.publicUrl;
@@ -160,6 +187,8 @@ function smsWebhook(
     redact: (text) => redactor.text(text),
     onOwnerMessage: (message) => orchestrator.ownerText(message),
     onOtherSender: (messageSid) => store.appendAudit("sms.other-sender", { messageSid }, clock()),
+    lookup: messageLookup(texter),
+    onUnverified: (_messageSid, failure) => alarm.report("sms", "text", failure),
   });
   return { routes: [route] };
 }
@@ -221,6 +250,8 @@ async function voiceWebhook(
   orchestrator: CallOrchestrator,
   inbound: InboundLine,
   clock: () => Date,
+  caller: VoiceProvider | string,
+  alarm: ForgeryAlarm,
 ): Promise<WebhookSetup> {
   if (config.voice.provider !== "elevenlabs") return { routes: [], off: "the voice provider is fake" };
   const agentId = config.voice.agentId;
@@ -257,6 +288,12 @@ async function voiceWebhook(
     pins,
     clock,
     redact: (text) => redactor.text(text),
+    // Every PIN attempt and post-call event is checked against ElevenLabs' own record.
+    conversation: conversationLookup(caller),
+    ...(config.voice.agentPhoneNumberId === undefined
+      ? {}
+      : { agentPhoneNumberId: config.voice.agentPhoneNumberId }),
+    onUnverified: (what, failure) => alarm.report("voice", what, failure),
     handlers: {
       submitAnswer: (answer) => orchestrator.submitAnswer(answer),
       getStatus: (call) => inbound.getStatus(call),
@@ -327,8 +364,19 @@ export async function runDaemon(options: RunDaemonOptions): Promise<number> {
       ...(options.autoTick === undefined ? {} : { autoTick: options.autoTick }),
     });
     orchestrator = calls;
-    const sms = smsWebhook(config, twilio, redactor, store, orchestrator, clock);
-    const voice = await voiceWebhook(config, secrets, redactor, store, orchestrator, inbound, clock);
+    const alarm = new ForgeryAlarm({ store, clock, ...(texter === undefined ? {} : { sms: texter }) });
+    const sms = smsWebhook(config, twilio, redactor, store, orchestrator, clock, texter, alarm);
+    const voice = await voiceWebhook(
+      config,
+      secrets,
+      redactor,
+      store,
+      orchestrator,
+      inbound,
+      clock,
+      caller,
+      alarm,
+    );
     daemon = await startDaemon({
       apiToken,
       store,

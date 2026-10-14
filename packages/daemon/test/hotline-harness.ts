@@ -91,10 +91,12 @@ export interface Hotline {
   /**
    * A signed Twilio webhook for a text to the Hotline number; returns the reply text, if any.
    * The fake clock first moves on `READING_MS` (the owner reads before replying) unless `instantly`.
+   * The text is first recorded in the fake Twilio's message log, as Twilio would, unless
+   * `forged`: then only the webhook exists, as when a local process signs one itself.
    */
   text(
     body: string,
-    options?: { from?: string; messageSid?: string; instantly?: boolean },
+    options?: { from?: string; messageSid?: string; instantly?: boolean; forged?: boolean },
   ): Promise<string | undefined>;
   stop(): Promise<number>;
 }
@@ -152,7 +154,11 @@ export async function startHotline(options: HotlineOptions = {}): Promise<Hotlin
     client: options.voiceClient?.(real) ?? real,
     clock: () => clock.now,
   });
-  const sms = new FakeSmsProvider({ ownerNumber: OWNER });
+  const sms = new FakeSmsProvider({
+    ownerNumber: OWNER,
+    hotlineNumber: HOTLINE_NUMBER,
+    clock: () => clock.now,
+  });
   const signals = new EventEmitter();
   let ready!: (value: { daemon: Daemon; orchestrator: CallOrchestrator }) => void;
   const listening = new Promise<{ daemon: Daemon; orchestrator: CallOrchestrator }>((resolve) => {
@@ -245,9 +251,14 @@ export async function startHotline(options: HotlineOptions = {}): Promise<Hotlin
         outcome?: AskOutcome;
       };
     },
-    async text(body, { from = OWNER, messageSid: sid = messageSid(), instantly = false } = {}) {
+    async text(
+      body,
+      { from = OWNER, messageSid: sid = messageSid(), instantly = false, forged = false } = {},
+    ) {
       await orchestrator.idle();
       if (!instantly) clock.now = new Date(clock.now.getTime() + READING_MS);
+      // Twilio records the message before it calls the webhook; a forged webhook has no record.
+      if (!forged) sms.receive(body, { from, messageSid: sid });
       const params: [string, string][] = [
         ["MessageSid", sid],
         ["AccountSid", ACCOUNT_SID],

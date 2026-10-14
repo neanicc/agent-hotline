@@ -49,6 +49,14 @@ Never fabricate an entry; "not tested" is a valid result.
 - Call the number yourself: PIN, hear status, give an instruction, see it delivered.
 - Call from another phone: rejected, nothing disclosed.
 - Quiet hours: an ask texts instead of calling.
+- Verify by pull (HL-13a): after the text and call scenarios above, the audit
+  log has no `security.possible-forgery` or `security.unverified` entry, and no
+  "did not match Twilio's or ElevenLabs' records" text arrived. If one did, note
+  its `reason`: `the webhook differs from the provider's record` means
+  ElevenLabs' webhook and its API disagree; `the call is not over at the
+  provider` means the post-call webhook came before the API said `done`; a
+  refused PIN on a real call means the live conversation record lacks the phone
+  metadata the PIN check needs.
 
 ## Record
 

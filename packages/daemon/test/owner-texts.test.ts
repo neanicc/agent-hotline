@@ -1,6 +1,6 @@
 import type { Ask } from "@hotline/core";
 import { describe, expect, it } from "vitest";
-import { MIN_REPLY_DELAY_MS, planTextReply, textFor, type WaitingText } from "../src/index.js";
+import { hashCode, MIN_REPLY_DELAY_MS, planTextReply, textFor, type WaitingText } from "../src/index.js";
 
 const SENT = new Date("2026-10-13T22:00:00.000Z");
 const LATER = new Date(SENT.getTime() + 60_000);
@@ -55,7 +55,7 @@ describe("planTextReply", () => {
       const waiting = [
         {
           ask: ask({ kind: "permission", toolName: "Bash", risk, text: "npm install" }),
-          code: "482913",
+          codeHash: hashCode("482913"),
           sentAt: SENT,
         },
       ];
@@ -73,7 +73,7 @@ describe("planTextReply", () => {
     const waiting = [
       {
         ask: ask({ kind: "permission", toolName: "Bash", text: "npm install" }),
-        code: "111111",
+        codeHash: hashCode("111111"),
         sentAt: SENT,
       },
     ];

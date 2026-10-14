@@ -6,6 +6,8 @@
 // A small hand-written REST call rather than the `@elevenlabs/elevenlabs-js` SDK:
 // Hotline sends one request type, and a required injected `fetch` means no test
 // can reach the network.
+import { type ConversationRecord, parseConversation } from "./elevenlabs-webhook.js";
+import { PullError, pullJson } from "./pull.js";
 import { requirePhoneNumber } from "./sms.js";
 import type { HttpFetch } from "./twilio-sms.js";
 import {
@@ -18,6 +20,8 @@ import {
 
 export const ELEVENLABS_API_ORIGIN = "https://api.elevenlabs.io";
 export const OUTBOUND_CALL_PATH = "/v1/convai/twilio/outbound-call";
+/** Where one conversation is fetched: `${CONVERSATIONS_PATH}/{conversation_id}`. */
+export const CONVERSATIONS_PATH = "/v1/convai/conversations";
 export const DEFAULT_ELEVENLABS_TIMEOUT_MS = 15_000;
 
 export interface ElevenLabsVoiceOptions {
@@ -50,6 +54,32 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
     }
     requirePhoneNumber(options.ownerNumber, "The owner's number");
     this.#options = options;
+  }
+
+  /**
+   * GET /v1/convai/conversations/{conversation_id} (HL-13a).
+   * https://elevenlabs.io/docs/api-reference/conversations/get
+   * Rejects with `PullError`: `not-found` for an id ElevenLabs does not know,
+   * `malformed` for a body that is not that conversation. The daemon checks
+   * the agent id, status and numbers itself.
+   */
+  async fetchConversation(conversationId: string): Promise<ConversationRecord> {
+    const { apiKey, fetch, timeoutMs } = this.#options;
+    if (!ELEVENLABS_ID.test(conversationId)) {
+      throw new PullError("The conversation id is malformed", "malformed");
+    }
+    const body = await pullJson(
+      fetch,
+      `${ELEVENLABS_API_ORIGIN}${CONVERSATIONS_PATH}/${conversationId}`,
+      { "xi-api-key": apiKey },
+      timeoutMs ?? DEFAULT_ELEVENLABS_TIMEOUT_MS,
+      "ElevenLabs",
+    );
+    const record = parseConversation(body);
+    if (record === undefined || record.conversation_id !== conversationId) {
+      throw new PullError("ElevenLabs' answer is not the conversation asked for", "malformed");
+    }
+    return record;
   }
 
   async callOwner(call: OutboundCall): Promise<PlacedCall> {

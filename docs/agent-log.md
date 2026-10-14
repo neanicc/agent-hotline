@@ -2495,3 +2495,96 @@ Template:
   are tested on the fake's transcripts only; real ElevenLabs turn splitting
   needs the live check. PinGate counters and the held instructions are in
   memory (HL-13).
+
+## 2026-10-14 — HL-13a Verify every approval by pulling from the provider (#58)
+
+- Threat (from the HL-15 Greptile review on #51): any process running as the
+  owner, a coding agent included, can read the Twilio auth token and the
+  ElevenLabs webhook and tool secrets (Keychain via `/usr/bin/security`
+  without a prompt, or the `0600` file) and sign webhooks itself: a
+  `YES <code>` text, a post-call transcript in which the owner says yes, or
+  `verify_pin` guesses. Signature checks alone cannot tell those from the
+  provider's.
+- Decision: a signed webhook is only a trigger. SMS: before an owner's text
+  reaches call orchestration, the route fetches the message from Twilio by
+  `MessageSid` (`SmsProvider.fetchMessage`) and requires the same SID,
+  `inbound`, `received`/`receiving`, from the owner's number to the Hotline
+  number (strict E.164), the same body, and `date_created` at most 15 minutes
+  old (5 minutes of skew ahead). Voice: the post-call transcription is
+  replaced by the conversation pulled from ElevenLabs
+  (`VoiceProvider.fetchConversation`); its transcript, metadata and status are
+  what call orchestration and the inbound line see. `verify_pin` pulls first
+  and counts an attempt only on this agent's live (`initiated`/`in-progress`)
+  phone call with the owner's number on the far end, the numbers and call SID
+  the tool call carries, and `voice.agentPhoneNumberId` when set.
+  `submit_answer` and `send_instruction` already only hold decisions until the
+  post-call event, which is now the pulled record, so they need no pull.
+- Decision: failures fail closed, by kind. A text that cannot be confirmed is
+  not handled at all (not even remembered as handled, so a genuine Twilio
+  retry is pulled again) and gets "your text could not be confirmed with
+  Twilio". A post-call pull that fails, or a record of another conversation or
+  agent, becomes a failed call (initiation failure, reason `unknown`): nothing
+  confirmed, asks follow the queue's retry and text rules. A record not yet
+  finished (`initiated`, `in-progress`, `processing`) leaves the event
+  unhandled, since ElevenLabs only sends it after the call; this keeps a forged
+  early event from ending a real call. A post-call body that differs from the
+  record is used as the record and reported. Initiation-failure events are not
+  pulled: they confirm nothing.
+- Decision: a 404 or a mismatch is audited as `security.possible-forgery`
+  (channel, what, a fixed reason; never bodies or numbers) and texts the owner
+  at most once an hour (`ForgeryAlarm`, in memory); an outage is
+  `security.unverified` and texts nothing.
+- Decision: the pull methods are optional on `SmsProvider` and `VoiceProvider`
+  so other implementations (HL-12's scenario suite runs in parallel) keep
+  compiling; the daemon treats a provider without them as one that can never
+  confirm anything. Without `elevenlabs.apiKey`, the voice routes still serve
+  but no PIN or post-call event verifies.
+- Decision: SMS confirmation codes are stored only as `scrypt1$salt$hash`
+  (16-byte salt per code, N = 2^14, r = 8, p = 1) and compared in constant
+  time. State saved before HL-13a with plaintext codes is hashed on start, and
+  the store now runs with `PRAGMA secure_delete = ON` so replaced rows do not
+  linger. Consequence: a text sent again after a crash part way through its
+  send cannot repeat the old code, so it carries a fresh one that replaces it
+  (the old code then mismatches and burns the waiting codes, as any wrong code
+  does). The orchestrator test that expected the old code was replaced by two:
+  the resent text's fresh code approves, and the interrupted text's code does
+  not. A 6-digit code's hash can still be brute-forced offline in hours of
+  CPU; the pull is what stops a forged `YES <code>`.
+- Decision: the fakes play the providers' records. `FakeSmsProvider.receive`
+  records an inbound text (the harness's `text()` calls it before posting, and
+  `forged: true` skips it); its sends are recorded too. `FakeVoiceProvider`
+  keeps each call's record live while it plays and final before its webhook,
+  with the transcript it played; the webhook body is a copy.
+- Fixed the overstatement HL-15 flagged in `docs/contracts.md` (same-user access
+  "does not let an agent approve anything"); README, contracts and daemon docs
+  describe the pull and the residual risk.
+- Residual risk: a same-user process that also reads the provider API keys can
+  call the providers itself (calls, texts, history, agent configuration), and
+  can guess at the PIN on a live call whose conversation id it reads from the
+  store, within the PinGate limits. It cannot fabricate the owner's inbound
+  message or the owner's speech in a real call's transcript. It can still deny
+  service with a forged initiation failure, which fails closed.
+- Evidence: `pnpm run lint`, `pnpm run typecheck` and `pnpm run test` pass (59
+  files, 1771 tests). New tests: provider pulls with fake HTTP (Twilio GET by
+  SID, ElevenLabs GET by id, 404/401/network/malformed answers, malformed ids
+  never requested); fake providers' records; route tests for every SMS
+  mismatch, an unknown SID, an outage and its retry, every `verify_pin`
+  refusal (no attempt spent after 12 forged guesses), a forged post-call body
+  differing from the pulled transcript, pulled metadata deciding whose turns
+  count, unknown and other-agent conversations, an early event; end to end
+  through `runDaemon` (`verify-by-pull.test.ts`, `run.test.ts` with the real
+  `TwilioSmsProvider` and `ElevenLabsVoiceProvider` over a fake REST API):
+  a forged signed `YES <code>` never approves and burns nothing, a forged
+  transcript never confirms, a pull failure gives no answer, forged PIN
+  attempts never lock the owner out, codes never appear in the state or the
+  database files. Mutation checks, each reverted: handlers given the webhook
+  body instead of the pulled record (1 test fails), the SMS pull skipped (15),
+  the `verify_pin` pull skipped (10). Scenario suite not built yet (HL-12).
+  No real Twilio or ElevenLabs request was made.
+- Open issues or follow-ups: the live check must confirm that ElevenLabs' GET
+  shows `in-progress` with `metadata.phone_call` during a call (else every PIN
+  is refused) and that the post-call webhook's transcript equals the API's
+  (else every call raises a forgery alarm); both are listed in
+  `docs/live-check.md`. The forgery alarm's hourly limit is in memory. A
+  forger can make the daemon issue provider GETs (bounded by the post-call
+  route's in-flight cap, not for tool calls).

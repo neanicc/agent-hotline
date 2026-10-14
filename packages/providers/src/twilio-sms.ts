@@ -4,14 +4,25 @@
 // A small hand-written REST call rather than the `twilio` package: Hotline only
 // sends one kind of request, and the HTTP layer stays injectable so tests never
 // reach the network.
-import { prepareSmsText, requirePhoneNumber, type SentSms, type SmsProvider, SmsSendError } from "./sms.js";
+import { PullError, pullJson } from "./pull.js";
+import {
+  type PulledMessage,
+  prepareSmsText,
+  requirePhoneNumber,
+  type SentSms,
+  type SmsProvider,
+  SmsSendError,
+} from "./sms.js";
 
 export const TWILIO_API_ORIGIN = "https://api.twilio.com";
 
-/** The subset of `fetch` the client uses. Production passes `globalThis.fetch`; tests a fake. */
+/**
+ * The subset of `fetch` the clients use: a POST with a body, or a GET without
+ * one (HL-13a's pulls). Production passes `globalThis.fetch`; tests a fake.
+ */
 export type HttpFetch = (
   url: string,
-  init: { method: "POST"; headers: Record<string, string>; body: string; signal: AbortSignal },
+  init: { method: "POST" | "GET"; headers: Record<string, string>; body?: string; signal: AbortSignal },
 ) => Promise<{ status: number; json(): Promise<unknown> }>;
 
 export interface TwilioSmsOptions {
@@ -50,8 +61,50 @@ export class TwilioSmsProvider implements SmsProvider {
     this.#options = options;
   }
 
+  #authorization(): string {
+    const { accountSid, authToken } = this.#options;
+    return `Basic ${Buffer.from(`${accountSid}:${authToken}`, "utf8").toString("base64")}`;
+  }
+
+  /**
+   * Fetches one message of this account by SID (HL-13a).
+   * https://www.twilio.com/docs/messaging/api/message-resource#fetch-a-message-resource
+   * Rejects with `PullError`: `not-found` for a SID Twilio does not know.
+   */
+  async fetchMessage(messageSid: string): Promise<PulledMessage> {
+    const { accountSid, fetch, timeoutMs } = this.#options;
+    if (!MESSAGE_SID.test(messageSid)) throw new PullError("The message SID is malformed", "malformed");
+    const url = `${TWILIO_API_ORIGIN}/2010-04-01/Accounts/${accountSid}/Messages/${messageSid}.json`;
+    const body = await pullJson(
+      fetch,
+      url,
+      { authorization: this.#authorization() },
+      timeoutMs ?? DEFAULT_TWILIO_TIMEOUT_MS,
+      "Twilio",
+    );
+    const record = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
+    const text = (key: string) => (typeof record[key] === "string" ? (record[key] as string) : null);
+    const sid = text("sid");
+    const direction = text("direction");
+    const status = text("status");
+    // Only the message asked for, in this account: anything else is not a lookup result.
+    if (sid !== messageSid || direction === null || status === null || text("account_sid") !== accountSid) {
+      throw new PullError("Twilio's answer is not the message asked for", "malformed");
+    }
+    const created = Date.parse(text("date_created") ?? "");
+    return {
+      sid,
+      direction,
+      from: text("from"),
+      to: text("to"),
+      body: text("body"),
+      status,
+      ...(Number.isNaN(created) ? {} : { dateCreated: new Date(created) }),
+    };
+  }
+
   async sendToOwner(text: string): Promise<SentSms> {
-    const { accountSid, authToken, fromNumber, ownerNumber, redact, fetch, timeoutMs } = this.#options;
+    const { accountSid, fromNumber, ownerNumber, redact, fetch, timeoutMs } = this.#options;
     const body = prepareSmsText(text, redact);
     const url = `${TWILIO_API_ORIGIN}/2010-04-01/Accounts/${accountSid}/Messages.json`;
     let response: Awaited<ReturnType<HttpFetch>>;
@@ -59,7 +112,7 @@ export class TwilioSmsProvider implements SmsProvider {
       response = await fetch(url, {
         method: "POST",
         headers: {
-          authorization: `Basic ${Buffer.from(`${accountSid}:${authToken}`, "utf8").toString("base64")}`,
+          authorization: this.#authorization(),
           "content-type": "application/x-www-form-urlencoded",
           accept: "application/json",
         },

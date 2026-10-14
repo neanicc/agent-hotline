@@ -1,6 +1,6 @@
 // CallOrchestrator against a real store with in-process providers: crash
 // recovery, message claims and deadlines that the end-to-end tests cannot reach.
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Ask, parseConfig, policySettings } from "@hotline/core";
@@ -15,7 +15,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   CallOrchestrator,
   type CallOrchestratorOptions,
+  codeMatches,
   type HotlineStore,
+  hashCode,
+  isCodeHash,
   ORCHESTRATOR_STATE_KEY,
   openStore,
   RATE_STATE_KEY,
@@ -161,13 +164,18 @@ describe("crash recovery", () => {
     expect(store.listAudit().map((e) => e.event)).toContain("orchestration.recovered");
     expect(store.getAsk(ask.id)?.status).toBe("in-flight");
     clock.now = new Date(clock.now.getTime() + READ_MS);
-    expect(await second.ownerText({ messageSid: sid(1), body: "yes 100001", receivedAt: clock.now })).toBe(
+    // The code in the text that went out: a fresh one, since only hashes are kept.
+    const code = /Reply YES (\d+)/.exec(sms.sent[0]?.text ?? "")?.[1];
+    expect(code).toBe("100002");
+    expect(await second.ownerText({ messageSid: sid(1), body: `yes ${code}`, receivedAt: clock.now })).toBe(
       "Hotline: got it.",
     );
     expect(store.getAnswer(ask.id)?.decision).toEqual({ type: "allow" });
   });
 
-  it("re-sends a high-risk text with the code the owner may already have", async () => {
+  // Only a code's salted hash is stored (HL-13a), so a text sent again cannot
+  // repeat the code: it carries a fresh one, and the interrupted text's no longer works.
+  it("re-sends a high-risk text with a fresh code that replaces the one never confirmed sent", async () => {
     const first = await orchestrator({ sms: hangingSms, newCode: () => "111111" });
     addAsk({ risk: "high", text: "git push origin main" });
     void advance(first, 20_000);
@@ -176,11 +184,29 @@ describe("crash recovery", () => {
 
     const sms = new FakeSmsProvider({ ownerNumber: OWNER });
     const second = await orchestrator({ sms, newCode: () => "222222" });
-    expect(sms.sent.map((s) => s.text)).toEqual([expect.stringContaining("Reply YES 111111")]);
+    expect(sms.sent.map((s) => s.text)).toEqual([expect.stringContaining("Reply YES 222222")]);
     clock.now = new Date(clock.now.getTime() + READ_MS);
-    expect(await second.ownerText({ messageSid: sid(3), body: "yes 111111", receivedAt: clock.now })).toBe(
+    expect(await second.ownerText({ messageSid: sid(3), body: "yes 222222", receivedAt: clock.now })).toBe(
       "Hotline: got it.",
     );
+  });
+
+  it("does not take the code of a text that may never have gone out once it was sent again", async () => {
+    const first = await orchestrator({ sms: hangingSms, newCode: () => "111111" });
+    const ask = addAsk({ risk: "high", text: "git push origin main" });
+    void advance(first, 20_000);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await first.stop();
+
+    const second = await orchestrator({
+      sms: new FakeSmsProvider({ ownerNumber: OWNER }),
+      newCode: () => "222222",
+    });
+    clock.now = new Date(clock.now.getTime() + READ_MS);
+    expect(
+      await second.ownerText({ messageSid: sid(4), body: "yes 111111", receivedAt: clock.now }),
+    ).toContain("does not match");
+    expect(store.getAnswer(ask.id)).toBeUndefined();
   });
 
   it("treats a call that may never have been placed as failed, so the queue retries it", async () => {
@@ -317,5 +343,64 @@ describe("deadlines", () => {
     expect(sent).toEqual([expect.stringContaining("first request")]);
     expect(store.getAsk(late.id)?.status).toBe("expired");
     expect(store.askEndReason(late.id)).toBe("timeout");
+  });
+});
+
+describe("confirmation codes at rest (HL-13a)", () => {
+  it("keeps only a salted hash of each code: neither the state nor the database file holds the code", async () => {
+    const sms = new FakeSmsProvider({ ownerNumber: OWNER });
+    const first = await orchestrator({ sms, newCode: () => "482913" });
+    const ask = addAsk({ risk: "high", text: "git push origin main" });
+    await advance(first, 20_000);
+    await first.idle();
+    expect(sms.sent[0]?.text).toContain("Reply YES 482913");
+    const state = store.getState(ORCHESTRATOR_STATE_KEY) as { codes: Record<string, string> };
+    expect(state.codes[ask.id]).toMatch(/^scrypt1\$[\w-]{22}\$[\w-]{43}$/);
+    expect(codeMatches("482913", state.codes[ask.id] ?? "")).toBe(true);
+    expect(JSON.stringify(state)).not.toContain("482913");
+    for (const file of ["hotline.db", "hotline.db-wal", "hotline.db-journal"]) {
+      const bytes = await readFile(join(dir, file)).catch(() => Buffer.alloc(0));
+      expect(bytes.includes("482913"), file).toBe(false);
+    }
+    // The owner's reply is still matched against the hash.
+    clock.now = new Date(clock.now.getTime() + READ_MS);
+    expect(await first.ownerText({ messageSid: sid(7), body: "yes 482913", receivedAt: clock.now })).toBe(
+      "Hotline: got it.",
+    );
+  });
+
+  it("hashes a plaintext code an earlier version saved, on start", async () => {
+    const first = await orchestrator({
+      sms: new FakeSmsProvider({ ownerNumber: OWNER }),
+      newCode: () => "482913",
+    });
+    const ask = addAsk({ risk: "high", text: "git push origin main" });
+    await advance(first, 20_000);
+    await first.stop();
+    const saved = store.getState(ORCHESTRATOR_STATE_KEY) as { codes: Record<string, string> };
+    store.putState(ORCHESTRATOR_STATE_KEY, { ...saved, codes: { [ask.id]: "482913" } });
+
+    const second = await orchestrator({ sms: new FakeSmsProvider({ ownerNumber: OWNER }) });
+    const restored = store.getState(ORCHESTRATOR_STATE_KEY) as { codes: Record<string, string> };
+    expect(restored.codes[ask.id]).toMatch(/^scrypt1\$/);
+    expect(JSON.stringify(restored)).not.toContain("482913");
+    clock.now = new Date(clock.now.getTime() + READ_MS);
+    expect(await second.ownerText({ messageSid: sid(8), body: "yes 482913", receivedAt: clock.now })).toBe(
+      "Hotline: got it.",
+    );
+  });
+});
+
+describe("hashCode and codeMatches", () => {
+  it("salts each hash and matches only the code it was made from, failing closed on a bad hash", () => {
+    const a = hashCode("482913");
+    const b = hashCode("482913");
+    expect(a).not.toBe(b);
+    expect([codeMatches("482913", a), codeMatches("482913", b)]).toEqual([true, true]);
+    expect(codeMatches("482914", a)).toBe(false);
+    expect(codeMatches("48291", a)).toBe(false);
+    expect(codeMatches("482913", "482913")).toBe(false);
+    expect(codeMatches("482913", `${a}x`)).toBe(false);
+    expect([isCodeHash(a), isCodeHash("482913")]).toEqual([true, false]);
   });
 });
