@@ -138,6 +138,17 @@ export const MIGRATIONS: readonly string[] = [
   ) STRICT;
   CREATE INDEX tool_deliveries_by_expiry ON tool_deliveries (expires_at_ms);
   `,
+  // Post-call deliveries that found ElevenLabs' record still processing
+  // (HL-13c), counted per conversation so the retries they ask for stay
+  // bounded across a restart. Times are epoch milliseconds.
+  `
+  CREATE TABLE post_call_waits (
+    conversation_id TEXT PRIMARY KEY,
+    count INTEGER NOT NULL,
+    expires_at_ms INTEGER NOT NULL
+  ) STRICT;
+  CREATE INDEX post_call_waits_by_expiry ON post_call_waits (expires_at_ms);
+  `,
 ];
 
 /** The two PIN failure budgets: calls to the Hotline number, and calls Hotline placed. */
@@ -871,6 +882,30 @@ export class HotlineStore {
   /** Forgets tool deliveries that expired at or before `nowMs`. */
   pruneToolDeliveries(nowMs: number): void {
     this.db.prepare("DELETE FROM tool_deliveries WHERE expires_at_ms <= ?").run(Math.trunc(nowMs));
+  }
+
+  // Post-call waits ------------------------------------------------------------
+
+  /**
+   * Counts one more post-call delivery of `conversationId` that found the
+   * record still processing, and returns how many there have been while the
+   * count has not expired, this one included. Expired counts are forgotten
+   * first; the count's expiry is set when it starts.
+   */
+  addPostCallWait(conversationId: string, nowMs: number, expiresAtMs: number): number {
+    const now = Math.trunc(nowMs);
+    this.db.prepare("DELETE FROM post_call_waits WHERE expires_at_ms <= ?").run(now);
+    const row = this.db
+      .prepare(
+        `INSERT INTO post_call_waits (conversation_id, count, expires_at_ms) VALUES (?, 1, ?)
+         ON CONFLICT (conversation_id) DO UPDATE SET count = count + 1
+         RETURNING count`,
+      )
+      .get(conversationId, Math.trunc(expiresAtMs));
+    const count = Number(row?.count);
+    if (!Number.isSafeInteger(count) || count < 1)
+      throw new StoreError("A post-call wait count is unreadable");
+    return count;
   }
 
   // Audit ------------------------------------------------------------------

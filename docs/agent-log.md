@@ -3441,3 +3441,147 @@ Template:
   macOS) and "keep the daily cap of 10" (1152 ms, 1134 ms); each restarts the
   real daemon several times and checks the real budgets, so they are left
   as they are.
+
+## 2026-10-14 — HL-13c Don't lose genuine answers in verify-by-pull (#80)
+
+- Decision: a post-call transcription whose pulled record is `processing`
+  gets `503` so ElevenLabs sends it again, audited as `security.unverified`
+  ("the call is still being processed at the provider"). The bound is
+  `MAX_PROCESSING_RETRIES` = 4 per conversation. ElevenLabs' documented
+  schedule (https://elevenlabs.io/docs/eleven-api/resources/webhooks#retries)
+  lists attempts as immediate, then 30 s, 2, 8 and 30 minutes, but also says
+  it "retries up to 5 times", so it is 5 or 6 deliveries in all; a webhook
+  is turned off after 10 consecutive failures when it has not succeeded in 7
+  days. With 4 waits the deciding fifth delivery exists on either reading
+  (about 40 minutes after the first if the immediate attempt is the
+  original, about 10 if it is a retry) and stays well under 10 failures. The
+  first push used 3, which on the second reading covered only 2.5 minutes
+  (Greptile, see below). The delivery after the bound ends the call as a
+  failed call (no answer, never an approval), audited "the provider did not
+  finish processing the call".
+  Only `processing` is retried: `initiated` and `in-progress` keep HL-13a's
+  behaviour (possible forgery, `200`, unhandled), so forged events during a
+  live call can neither end it nor use up its retries.
+- Decision: the count is persisted the way HL-13b persisted its limits: a
+  table (`post_call_waits`, migration 6, appended) with an expiry two hours
+  from the first count, pruned on the next count, behind an injected
+  `PostCallWaitMemory` (`storedPostCallWaits(store)` in `runDaemon`, memory in
+  tests). The route also counts every delivery in this run's memory and uses
+  the higher of the two counts, so a store that fails for good, or for a
+  while and then recovers, never allows more than the bound.
+- Decision: `smsMismatch` compares bodies after `comparableSmsText` on both
+  sides: NFC, every `\s+` run (Unicode whitespace, no-break space included)
+  to one space, trimmed. Case, compatibility characters (a ligature) and any
+  changed word or digit still refuse. The owner handler gets Twilio's record
+  of the body rather than the webhook's.
+- Decision (gate parity, from the issue's second comment): every text path
+  is pulled before any effect. The owner's paths were already pulled; the
+  other-sender path now is too (record `from`/`to` must equal the webhook's
+  `From`/`To` exactly, as another sender's number need not be E.164), so a
+  forged signed webhook can no longer record `sms.other-sender` or spend the
+  5-an-hour generic replies. A refused text of any kind gets the bare empty
+  TwiML; `UNCONFIRMED_SMS_REPLY` is removed, because the response goes back
+  to whoever posted the webhook. `onUnverified` gains the claimed sender and
+  the alarm audits `what: other-sender-text` for another number. An outage
+  now gets no reply at all (it used to get "could not be confirmed"); Twilio's
+  own retry, if any, is pulled again.
+- Decision: the `status` reply is texted to the owner's number
+  (`sendToOwner`, redacted, audited `text.sent` reason `status` or
+  `text.failed` about `status`) and never put in the TwiML. The other owner
+  replies (got it, calling you now, a reply hint, the count of waiting
+  requests when a reply is ambiguous, why no call was placed) stay in the
+  TwiML: they are sent only after Twilio's record confirmed that very
+  message, and moving them all to outgoing texts would change most of the
+  orchestration tests' text counts. Recorded as a follow-up.
+- No route-level in-flight cap was added to the SMS route (HL-13b's finding
+  stands); the later limit on other senders' lookups (see the review of
+  94c2213 below) applies only after the signature check and never to the
+  owner.
+- `docs/security.md` (landed with HL-13, #77, while this branch was open):
+  the verify-by-pull row now covers every text path and the normalised
+  comparison, a row covers the processing retries, and the #80 follow-up is
+  marked done with the remaining TwiML-replies follow-up.
+- Existing expectations changed, each because the ticket requires it:
+  `sms-webhook.test.ts`, the HL-13a unconfirmed cases (unknown SID, ten
+  mismatching records, Twilio unreachable) now expect the bare TwiML instead
+  of `UNCONFIRMED_SMS_REPLY`; "never looks up a text from another number"
+  became "looks up a text from another number too" (it asserted the old
+  gap). `verify-by-pull.test.ts`, three forged or unreachable `h.text` calls
+  expect no reply instead of `UNCONFIRMED_SMS_REPLY`. `run.test.ts`, the
+  forged owner's text expects the bare TwiML, and the fake Twilio API now
+  holds the stranger's message, since it is pulled.
+  `apps/cli/test/inbound-line.test.ts` ("answers the owner's status text"),
+  the same exact status is now read from the outgoing text, and the webhook
+  reply is asserted empty. The HL-13a not-final test for an in-progress call
+  is unchanged.
+- Evidence: route tests for each text path (status, call me, STOP and stop,
+  START, HELP, a code, free text, a stranger's status and STOP) with a forged
+  signed request and an unknown SID: bare TwiML, no handler, no record, the
+  sender reported; forged texts cannot spend the generic replies; four
+  other-sender mismatches. Seven whitespace and Unicode variants accepted,
+  six other differences refused. Daemon-level tests (`verify-by-pull.test.ts`)
+  per path: no call placed, no answer, no `sms.*` audit, only the forgery text
+  sent, the possible-forgery audit; and a real `status` text answered by an
+  outgoing text with empty TwiML. Post-call: 503 three times then the done
+  record handled; never finishing ends as a failed call and stays ended; per
+  conversation; an in-progress call is never retried; the count survives a
+  store reopen; a broken store still bounds it; the store's own count and
+  expiry across a reopen. Mutation checks, each reverted: other senders not
+  pulled (8 tests fail), no normalisation (7 fail), no `processing` verdict
+  (5 fail).
+- Follow-ups: move every owner reply out of the TwiML into outgoing texts;
+  split `SavedCall` out of `inbound-line.ts` (HL-13b P3, not needed here);
+  the earlier ones from HL-13b still stand.
+- Review of 75c13d1, all fixed in the next commit:
+  - Greptile (P2): the generic-reply budget was spent at the time the text
+    came in, so lookups finishing out of order could drop newer replies from
+    the hourly count and send more than 5. It now uses the clock when the
+    reply is spent. Test: six strangers' lookups finishing newest first get
+    exactly 5 replies (fails with the old time).
+  - Greptile (P2): switching between the store and the memory fallback
+    could hand out more than the bound. Now the higher of the store's count
+    and this run's own count of every delivery is used. Test: a store that
+    fails once and then recovers gives exactly 4 `503`s (fails with the old
+    fallback).
+  - Greptile (P2): with 3 waits, the "about 10 minutes" held only if
+    ElevenLabs' immediate attempt is the original delivery. The bound is now 4
+    and the docs give both readings (above).
+  - Staff review (P2): forged signed events after a call can use up a
+    processing conversation's retries. Kept (it fails closed and needs the
+    webhook secret) and written into `docs/security.md`'s accepted residual
+    risks. (P3, one lookup per stranger's text) noted there too; (P3, the
+    bound) addressed by the change to 4.
+- Staff review of 94c2213 (P2): other senders' lookups were unbounded, so a
+  flood of strangers' texts (or a signer claiming other numbers) could drive
+  unlimited Twilio REST calls. Now at most 4 run at once and 60 an hour
+  (`OTHER_SENDER_LOOKUPS_IN_FLIGHT`, `OTHER_SENDER_LOOKUPS_PER_HOUR`); a text
+  over either gets the bare TwiML and no effect. This is deliberately not the
+  route cap HL-13b removed: it applies only after the signature check and
+  only to other senders, so the owner's texts are never held up. Tests: the
+  in-flight limit with the owner's text still handled while strangers hold
+  every slot, and the hourly limit with the owner unaffected and strangers
+  looked up again an hour later. The out-of-order reply test now runs within
+  the in-flight limit and still fails with the arrival time. (P3s: the PR
+  body's stale bound was updated; moving the other TwiML replies to texts is
+  left to the conductor as a follow-up issue.)
+- Staff review of 9b3592d (no P0 to P2): the "no in-flight cap" line above
+  is reworded to say no route-level cap. The forged-events residual risk is
+  already in `docs/security.md`'s accepted residual risks.
+- Staff review of ebe4336: (P2) the forged-events risk is now also stated in
+  the processing-retry row of `docs/security.md`'s limits table; no code
+  change, as the review says. (P3) The first text over the stranger lookup
+  limit in each hour is audited as `security.unverified` through
+  `onUnverified` (no owner text). (P3) A test shows a failed lookup gives its
+  slot back: 12 failing lookups in a row are all made (with no release, the
+  fifth would be refused).
+- Staff review of 5fdc568: (P2) the suggestion to cap the owner path's
+  lookups too (say 20 in flight) is not taken. Any signer can send texts
+  that look like the owner's, so a cap there would let forged traffic shut
+  out the owner's real texts, which is the failure HL-13b found and this
+  ticket's brief rules out ("don't add a plain in-flight cap to the SMS
+  route"). The cost is Twilio REST calls only; nothing is accepted without
+  the pull, and each forged owner text is audited and alarms the owner at
+  most hourly. Bounding it with capacity reserved for genuine Twilio
+  requests stays the open follow-up from HL-13b. (P3) `runWaits`' doc
+  comment already says the double count is deliberate; (P3) the whitespace
+  rule is in `docs/daemon.md` and `docs/security.md`'s verify-by-pull row.

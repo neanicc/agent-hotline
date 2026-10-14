@@ -141,25 +141,46 @@ the `twilio.accountSid` and `twilio.authToken` secrets exist. Otherwise it logs
 - **Owner only:** only a text from `owner.phoneNumber` to `sms.fromNumber`
   reaches the handler. Any other sender gets one generic reply ("Sorry, this
   number does not accept messages."), at most 5 per hour in total, and is
-  recorded in the audit log by message SID only.
-- **Verified by pull (HL-13a):** a valid signature only shows the request was
-  signed with the auth token, which any process running as the owner can read.
-  So before an owner's text reaches the handler, the route fetches the message
-  from Twilio's REST API by `MessageSid` (`lookup`, the SMS provider's
-  `fetchMessage`: `GET /2010-04-01/Accounts/<sid>/Messages/<MessageSid>.json`)
-  and checks Twilio's record (`smsMismatch` in `provider-pull.ts`): the same
-  SID, `direction` `inbound`, status `received` or `receiving`, `from` the
-  owner's number and `to` the Hotline number (strict E.164), the same body
-  byte for byte, and `date_created` at most 15 minutes before the webhook (5
-  minutes of clock skew ahead). A lookup that fails (network, a 404, an answer
-  that is not that message) or a record that differs means the text is not
-  used at all: the handler never sees it, the reply is "Hotline: your text could
-  not be confirmed with Twilio, so it was not used. Please send it again.", and
-  the SID is not remembered as handled, so a genuine retry is pulled again. A
-  404 or a mismatch is audited as `security.possible-forgery` and texts the
-  owner (at most once an hour); an outage is audited as `security.unverified`
-  and texts nothing. A text from any other number is never looked up: it never
-  reaches the handler anyway.
+  recorded in the audit log by message SID only. Texts from other numbers
+  are looked up at Twilio at most 4 at once and 60 an hour
+  (`OTHER_SENDER_LOOKUPS_IN_FLIGHT`, `OTHER_SENDER_LOOKUPS_PER_HOUR`, HL-13c);
+  one over either limit gets the bare empty TwiML and has no effect, and the
+  first in each hour is audited as `security.unverified` ("texts from other
+  numbers are over the lookup limit"; the owner is not texted). This is
+  not a route cap: it applies after the signature is checked and only to
+  other senders, so a request claiming another number can use it up but
+  never holds up a text from the owner.
+- **Verified by pull (HL-13a, every path since HL-13c):** a valid signature
+  only shows the request was signed with the auth token, which any process
+  running as the owner can read. So before any text has any effect, the route
+  fetches the message from Twilio's REST API by `MessageSid` (`lookup`, the SMS
+  provider's `fetchMessage`:
+  `GET /2010-04-01/Accounts/<sid>/Messages/<MessageSid>.json`) and checks
+  Twilio's record (`smsMismatch` in `provider-pull.ts`). That covers every
+  path: the owner's `status`, `call me`, `stop` and the opt-out words,
+  `start` and `help` (with or without Twilio's `OptOutType`), answers and free
+  text, and any other sender's text, whose generic reply, reply budget and
+  `sms.other-sender` record all wait for the pull. The record must have the
+  same SID, `direction` `inbound`, status `received` or `receiving`, `from`
+  and `to` as the webhook says (for the owner's text: the owner's number and
+  the Hotline number, strict E.164; for anyone else: the webhook's `From` and
+  `To`, exactly), the same body, and `date_created` at most 15 minutes before
+  the webhook (5 minutes of clock skew ahead). Bodies are compared after
+  `comparableSmsText` on both sides (HL-13c): NFC normalisation, every run of
+  whitespace collapsed to one space, and trimming, so a re-encoded space,
+  line break or accent does not refuse a genuine reply; any other difference
+  (a changed word or digit, case, a compatibility character such as a
+  ligature) still refuses. The owner handler gets the body as Twilio's record
+  has it. A lookup that fails (network, a 404, an answer that is not that
+  message) or a record that differs means the text has no effect at all: no
+  handler runs, the response is the bare empty TwiML (no reply, nothing about
+  the owner), and the SID is not remembered as handled, so a genuine retry is
+  pulled again. A 404 or a mismatch is audited as `security.possible-forgery`
+  (`what` `text` for the owner's, `other-sender-text` for anyone else's) and
+  texts the owner (at most once an hour); an outage is audited as
+  `security.unverified` and texts nothing. Until HL-13c a refused owner's
+  text got a "could not be confirmed" reply in the TwiML; that reply is gone,
+  because the response goes back to whoever posted the webhook.
 - **Once per message:** the last 1000 successfully handled message SIDs are
   remembered, so a Twilio retry or a replayed request is answered with empty
   TwiML and not handled twice. A SID counts as handled only after its handler
@@ -169,6 +190,17 @@ the `twilio.accountSid` and `twilio.authToken` secrets exist. Otherwise it logs
   with empty TwiML or, if the attempt failed, handles the message itself.
   Across restarts, call orchestration's `inbound_messages` table remembers
   each SID for 400 days (see [Store](#store)).
+- **Nothing about the owner in the response (HL-13c):** the TwiML goes back
+  to whoever posted the webhook, so the reply to `status` is never in it. Call
+  orchestration texts the status to the owner's number instead
+  (`SmsProvider.sendToOwner`, redacted; audited `text.sent` with reason
+  `status`, or `text.failed` with `about: status`) and the webhook answers with
+  empty TwiML. The other replies the owner handler returns are short
+  acknowledgements ("Hotline: got it.", "Hotline: calling you now.", a reply
+  hint, how many requests wait when a reply is ambiguous, why no call was
+  placed), sent only after Twilio's record confirmed that very message, so
+  only a webhook carrying the owner's real message SID and words can get one.
+  Moving those to outgoing texts too is a follow-up.
 - **Replies are redacted:** a reply the owner handler returns goes through the
   required `redact` option (the daemon's redactor) and the SMS length check
   before it is put in the TwiML. One that is empty after redaction or longer
@@ -344,10 +376,37 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
   it counts. ElevenLabs having no such conversation, or any other mismatch,
   becomes a failed call (an initiation failure with reason `unknown`): nothing
   is confirmed, and every ask on it ends as no answer under the queue's usual
-  retry and text rules. A record still `initiated`, `in-progress` or
-  `processing` means the event came before the call was over, which ElevenLabs
-  never does: it is audited as a possible forgery and left unhandled, so the
-  genuine event still counts when it comes.
+  retry and text rules. A record still `initiated` or `in-progress` means the
+  event came before the call was over, which ElevenLabs never does: it is
+  audited as a possible forgery and left unhandled (`200`), so the genuine
+  event still counts when it comes.
+- **A record still processing is asked for again (HL-13c):** a call that is
+  over can still be `processing` at ElevenLabs when its webhook arrives. The
+  route answers `503` so ElevenLabs delivers the event again, and audits each
+  such delivery as `security.unverified` ("the call is still being processed
+  at the provider"). At most `MAX_PROCESSING_RETRIES` (4) deliveries per
+  conversation get the `503`. The count is in SQLite (`post_call_waits`,
+  migration 6, kept two hours from the first), so a restart does not reset
+  it; the route also counts every delivery in this run's memory and uses the
+  higher of the two, so a store that fails (for good, or for a while) never
+  allows more. The next delivery that still finds the record processing ends
+  the call as a failed call (no answer for every ask on it, never an
+  approval), audited "the provider did not finish processing the call".
+  ElevenLabs lists its attempts as immediate, then 30 seconds, 2, 8 and 30
+  minutes, says it "retries up to 5 times" (so 5 or 6 deliveries in all), and
+  turns a webhook off after 10 failures in a row when it has not succeeded in
+  7 days
+  ([webhooks](https://elevenlabs.io/docs/eleven-api/resources/webhooks#retries)).
+  With 4 waits the deciding delivery is the fifth, which exists on either
+  reading: about 40 minutes after the first if the immediate attempt is the
+  original delivery, about 10 if it is the first retry. That stays well under
+  10 failures in a row.
+  Retries must be turned on for the post-call webhook in the ElevenLabs
+  settings, or the first `503` is final and the call's asks end as no answer
+  at their timeout. Only `processing` counts: a forged event during a live
+  call is `in-progress` and cannot use up the retries. A signed forged event
+  sent after the call, while the record is still processing, can use them up
+  and make the genuine answer no answer; that fails closed.
 - **Call initiation failures are pulled too:** a `call_initiation_failure` is
   acted on only when the record shows that call failed: this agent's outbound
   call on the Hotline number to `owner.phoneNumber`, placed by Hotline, status
@@ -829,7 +888,8 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
   have been recorded. `call me` becomes the queue's `call-me`
   event and gets "calling you now" or the queue's reason for not calling.
   `status` gets the [inbound line](#inbound-line)'s status of every live
-  session; `stop` and Twilio's keywords get no reply of Hotline's own. Any other text answers only an ask Hotline texted that is
+  session, texted to the owner's number rather than returned in the webhook
+  response (HL-13c); `stop` and Twilio's keywords get no reply of Hotline's own. Any other text answers only an ask Hotline texted that is
   still open, and only one: a `YES <code>` reply names the ask with that code;
   otherwise there must be exactly one such ask, texted at least 10 seconds
   before the message was first seen (the earlier of the time its SID was
@@ -887,9 +947,10 @@ anyone else's text the generic SMS reply.
   the latest text is its newest ask's. Stale
   sessions are ended first ([session lifetime](#session-lifetime)). The `status`
   text gets the same status with state and counts only: no agent-written ask
-  text goes to Twilio. It goes back only to the owner's
-  number (the webhook checked the sender, and Twilio replies to that number), so
-  a spoofed sender never sees it.
+  text goes to Twilio. It is sent as its own text to the owner's number,
+  only after Twilio's record confirmed the `status` message, and never put in
+  the webhook's response (HL-13c), so neither a spoofed sender nor a forged
+  signed webhook ever sees it.
 - **Instructions are held, then confirmed.** `send_instruction` takes only a
   session number that this call's status read out and a session still live;
   then it holds the instruction (`queued`) until the post-call transcript. Caps:
@@ -1056,6 +1117,11 @@ once the event is handled or the call is forgotten) and `tool_deliveries`
 (state-changing server-tool deliveries by hash, with the response each got,
 for two hours). Times in these three are epoch milliseconds. The forgery
 alarm's and the lockout text's last send times are in `daemon_state`.
+Migration 6 (HL-13c) adds `post_call_waits`: per conversation, how many
+post-call deliveries found ElevenLabs' record still `processing`, kept two
+hours from the first (epoch milliseconds; expired rows are deleted on the
+next count), so the bound on the `503`s that ask for the event again holds
+across a restart.
 
 - Migrations are an append-only list (`MIGRATIONS`). `PRAGMA user_version` counts
   how many have run. Each runs in its own transaction, so a failure leaves the

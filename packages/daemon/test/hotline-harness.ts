@@ -101,6 +101,11 @@ export interface Hotline {
     body: string,
     options?: { from?: string; messageSid?: string; instantly?: boolean; forged?: boolean },
   ): Promise<string | undefined>;
+  /** As `text`, but returns the webhook's raw HTTP status and body (whatever the status). */
+  textResponse(
+    body: string,
+    options?: { from?: string; messageSid?: string; instantly?: boolean; forged?: boolean },
+  ): Promise<{ status: number; body: string }>;
   stop(): Promise<number>;
 }
 
@@ -256,7 +261,13 @@ export async function startHotline(options: HotlineOptions = {}): Promise<Hotlin
         outcome?: AskOutcome;
       };
     },
-    async text(
+    async text(body, options) {
+      const response = await hotline.textResponse(body, options);
+      if (response.status !== 200) throw new Error(`sms webhook answered ${response.status}`);
+      const match = /<Message>(.*)<\/Message>/s.exec(response.body);
+      return match?.[1]?.replace(/&#(\d+);/g, (_, code: string) => String.fromCharCode(Number(code)));
+    },
+    async textResponse(
       body,
       { from = OWNER, messageSid: sid = messageSid(), instantly = false, forged = false } = {},
     ) {
@@ -281,10 +292,8 @@ export async function startHotline(options: HotlineOptions = {}): Promise<Hotlin
         },
         body: new URLSearchParams(params).toString(),
       });
-      if (response.status !== 200) throw new Error(`sms webhook answered ${response.status}`);
       await orchestrator.idle();
-      const match = /<Message>(.*)<\/Message>/s.exec(response.body);
-      return match?.[1]?.replace(/&#(\d+);/g, (_, code: string) => String.fromCharCode(Number(code)));
+      return { status: response.status, body: response.body };
     },
     async stop() {
       signals.emit("SIGTERM");

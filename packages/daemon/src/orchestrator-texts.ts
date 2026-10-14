@@ -32,7 +32,7 @@ export interface OwnerTextsOptions {
   redact: (text: string) => string;
   /** For tests: the next confirmation code. Default: 6 random digits. */
   newCode?: () => string;
-  /** The reply to a `status` text: what every live session is doing. */
+  /** What a `status` text gets back, as a text to the owner: what every live session is doing. */
   status?: () => string;
   /** The orchestrator's current logger (it can be attached after construction). */
   log: () => OrchestratorLog;
@@ -158,6 +158,34 @@ export class OwnerTexts {
     }
   }
 
+  /**
+   * Sends the reply to a `status` text as a text of its own to the owner's
+   * number, redacted. A failure is audited; the owner can ask again.
+   */
+  async #textStatus(text: string, now: Date): Promise<void> {
+    const sms = this.#options.sms;
+    if (sms === undefined) {
+      this.#store.appendAudit("text.failed", { about: "status", reason: "no SMS provider" }, now);
+      return;
+    }
+    try {
+      await sms.sendToOwner(this.#options.redact(text));
+    } catch (error) {
+      const { status, code } = error as { status?: unknown; code?: unknown };
+      this.#store.appendAudit(
+        "text.failed",
+        {
+          about: "status",
+          status: typeof status === "number" ? status : null,
+          code: typeof code === "number" ? code : null,
+        },
+        now,
+      );
+      return;
+    }
+    this.#store.appendAudit("text.sent", { reason: "status" }, now);
+  }
+
   async #handle({
     messageSid,
     body,
@@ -208,9 +236,10 @@ export class OwnerTexts {
       case "ignore":
         return undefined;
       case "status":
-        // The webhook only lets the owner's number through, and the reply goes
-        // back to that number: a spoofed sender never sees it.
-        return this.#options.status?.() ?? TEXT_REPLIES.statusUnavailable;
+        // Texted to the owner's number, never put in the webhook's response,
+        // which goes back to whoever posted it (HL-13c).
+        await this.#textStatus(this.#options.status?.() ?? TEXT_REPLIES.statusUnavailable, receivedAt);
+        return undefined;
       case "call-me": {
         const actions = await this.#options.process({ type: "call-me" });
         const ignored = actions.find((action) => action.type === "ignored" && action.event === "call-me");
