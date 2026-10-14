@@ -6,6 +6,7 @@ import { parseConfigText } from "@hotline/core";
 import { FileSecretStore, writePrivateFile } from "@hotline/daemon";
 import { AGENT_DEFINITION_VERSION, TOOL_SECRET_HEADER } from "@hotline/providers";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { deployAgent, ElevenLabsAdmin } from "../src/elevenlabs-admin.js";
 import {
   cli,
   fakeFetch,
@@ -166,6 +167,23 @@ describe("hotline voice apply", () => {
     expect(result.stderr).toContain("ElevenLabs could not create a tool (HTTP 500)");
     expect(result.stderr).not.toContain(API_KEY);
     expect((await readConfig()).voice.toolSecretId).toBe("sec_fake_1");
+  });
+
+  it("names an id it created but could not record", async () => {
+    const fetch = fakeElevenLabs();
+    const failure = deployAgent({
+      admin: new ElevenLabsAdmin(API_KEY, fetch),
+      publicUrl: "https://hotline-fake.example.com",
+      toolSecret: TOOL_SECRET,
+      save: async () => {
+        throw new Error("disk full");
+      },
+      log: () => {},
+    });
+    await expect(failure).rejects.toThrow(
+      "created toolSecretId sec_fake_1 in ElevenLabs but could not record it in the config (disk full)",
+    );
+    expect(fetch.requests).toHaveLength(1);
   });
 
   it("refuses without a public URL or API key, before any request", async () => {

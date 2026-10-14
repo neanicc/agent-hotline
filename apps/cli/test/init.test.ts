@@ -194,6 +194,18 @@ describe("hotline init", () => {
     expect(switched.stdout).toContain("the old keychain store still holds Hotline's earlier secrets");
   });
 
+  it("asks for hotline voice apply when it generates a tool secret for a deployed agent", async () => {
+    expect((await cli(["init", ...FLAGS], testContext(setup, { env: env(SECRETS) }))).code).toBe(0);
+    const configPath = join(setup.hotlineHome, "config.json");
+    const raw = JSON.parse(await readFile(configPath, "utf8"));
+    raw.voice.toolSecretId = "sec_fake_1";
+    await writeFile(configPath, JSON.stringify(raw));
+    await new FileSecretStore(join(setup.hotlineHome, "secrets.json")).delete("elevenlabs.toolSecret");
+    const again = await cli(["init", "--non-interactive", "--force"], testContext(setup, { env: env() }));
+    expect(again.code).toBe(0);
+    expect(again.stdout).toContain("A new tool secret was generated: run hotline voice apply");
+  });
+
   it("validates settings before writing anything", async () => {
     const result = await cli(
       ["init", ...FLAGS.map((flag) => (flag === "+15555550100" ? "5555550100" : flag))],

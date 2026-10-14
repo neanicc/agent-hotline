@@ -205,6 +205,10 @@ export async function initCommand(
       // Shared by the ElevenLabs tools and the daemon; `hotline voice apply` uploads it.
       await secrets.set("elevenlabs.toolSecret", randomBytes(32).toString("base64url"));
       stored.push("ElevenLabs tool secret (generated)");
+      // The deployed tools still send the old one: every answer would fail closed.
+      if (config.voice.toolSecretId !== undefined) {
+        out.stdout("A new tool secret was generated: run hotline voice apply so ElevenLabs sends it.");
+      }
     }
     await writePrivateFile(paths.config, `${JSON.stringify(raw, null, 2)}\n`);
 

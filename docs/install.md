@@ -67,7 +67,9 @@ users can open is made private.
   (`hotlineToolConfigs`, pointing at `<public URL>/hooks/el/tools/*`) and the agent
   (`hotlineAgentConfig`, tagged `definition-v<AGENT_DEFINITION_VERSION>`). The ids
   go into the config (`voice.toolSecretId`, `voice.toolIds`, `voice.agentId`) as
-  each is created, so a failure part way never leaves an orphan. Every run
+  each is created, so a failure part way leaves nothing unrecorded; if
+  recording an id itself fails, the error names the id so you can add it to
+  the config by hand (or delete it in ElevenLabs). Every run
   also sends the current local tool secret to the existing workspace secret, so
   a new store or a re-run `init` cannot leave ElevenLabs with a stale one. Run
   it again after changing the public URL, the secret store or upgrading Hotline.

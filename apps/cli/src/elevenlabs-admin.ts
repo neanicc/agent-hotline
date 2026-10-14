@@ -249,10 +249,24 @@ export interface DeployOptions {
  */
 export async function deployAgent(options: DeployOptions): Promise<string> {
   const { admin, log } = options;
+  // If recording a just-created id fails, name it, so the owner can record it
+  // by hand (or delete it in ElevenLabs) instead of a re-run creating another.
+  const save: DeployOptions["save"] = async (ids) => {
+    try {
+      await options.save(ids);
+    } catch (error) {
+      const created = Object.entries(ids)
+        .map(([key, value]) => `${key} ${typeof value === "string" ? value : JSON.stringify(value)}`)
+        .join(", ");
+      throw new ElevenLabsAdminError(
+        `created ${created} in ElevenLabs but could not record it in the config (${(error as Error).message}); add it to voice in config.json before running this again`,
+      );
+    }
+  };
   let toolSecretId = options.toolSecretId;
   if (toolSecretId === undefined) {
     toolSecretId = await admin.createSecret(TOOL_SECRET_NAME, options.toolSecret);
-    await options.save({ toolSecretId });
+    await save({ toolSecretId });
     log("created the tool secret in the ElevenLabs workspace");
   } else {
     // The local secret may have changed since (another store, a new init), and the
@@ -266,7 +280,7 @@ export async function deployAgent(options: DeployOptions): Promise<string> {
     const existing = toolIds[config.name];
     if (existing === undefined) {
       toolIds[config.name] = await admin.createTool(config);
-      await options.save({ toolIds: { ...toolIds } });
+      await save({ toolIds: { ...toolIds } });
       log(`created tool ${config.name}`);
     } else {
       await admin.updateTool(existing, config);
@@ -279,7 +293,7 @@ export async function deployAgent(options: DeployOptions): Promise<string> {
   });
   if (options.agentId === undefined) {
     const agentId = await admin.createAgent(agent);
-    await options.save({ agentId });
+    await save({ agentId });
     log(`created the agent (definition v${AGENT_DEFINITION_VERSION})`);
     return agentId;
   }

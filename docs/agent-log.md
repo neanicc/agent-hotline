@@ -1547,6 +1547,11 @@ Template:
     an aborted run leaves no stray backup.
   - `init --force` names the old store when `--secret-store` changes, and
     the docs say the `HOTLINE_*` variables are for scripted setup only.
+- Staff review fixes on PR #45 (head 7558af3): `init` tells the owner to
+  run `hotline voice apply` when it generates a new tool secret for an
+  already deployed agent (doctor can compare only the secret id, not its
+  value); `deployAgent` names an id it created but could not record. Left as
+  is: a failed real test call still starts the 2-minute cooldown (safe).
 - Open issues or follow-ups:
   - `doctor` does not show the monthly cost estimate from plan section 8 yet.
   - Move the ElevenLabs management client into `packages/providers` once
