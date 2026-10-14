@@ -422,6 +422,21 @@ Template:
   the call limit and one call at a time. Repeated owner texts after a call ended
   are honored as fresh requests; a redelivered webhook is the daemon's to dedupe
   by message id.
+- Review fixes (Greptile P1 and the bot staff review on 233d8e8): a texted ask can
+  be on a `call-me` call before its text is confirmed. A `text-failed` arriving then
+  used to be ignored, leaving the ask waiting for a reply to a text that never
+  arrived. It now marks the ask as not texted (no SMS reply counts), and when the
+  call ends the ask follows the no-pickup rules and is texted again. `text-sent`
+  is accepted during the call too. A texted ask whose call-me call goes unanswered
+  now expires as `timeout`, not as the call's `no-pickup` or `dropped`, because
+  the text is the outstanding channel. The property suite then found a stale
+  `readyAt`: a call-me call placed inside the batch window left `readyAt` in the
+  future, so a zero-delay retry looked early. The call now sets `readyAt` to the
+  call time. A regression unit test pins it, and 40 more property-suite runs
+  (about 36,000 random runs) passed. The hand mutation check now has eleven
+  mutants: the eight above, plus keeping a failed text as texted, dropping the
+  `readyAt` reset, and ignoring a text failure during the call. All are killed.
+  `scripts/ci/run.sh test` passes 379 tests (119 in core).
 - Open issues or follow-ups: HL-07 parses `call me` from a text and HL-09 maps it
   to this event, dedupes inbound texts by message id, and turns the ignore
   reasons into owner replies.

@@ -296,7 +296,8 @@ function applyEvent(ctx: Context, event: QueueEvent): string | undefined {
       return undefined;
     case "text-sent": {
       const q = findOpen(ctx.s, event.askId);
-      if (q === undefined || q.phase !== "texted") return "no open texted ask with this id";
+      // An ask can be on a `call me` call while its text is still going out.
+      if (q === undefined || !q.texted) return "no open texted ask with this id";
       if (q.ask.kind === "notify") {
         // The same notification from the same session goes out once.
         for (const done of [q, ...followersOf(ctx, q.ask.id)]) {
@@ -308,7 +309,14 @@ function applyEvent(ctx: Context, event: QueueEvent): string | undefined {
     }
     case "text-failed": {
       const q = findOpen(ctx.s, event.askId);
-      if (q === undefined || q.phase !== "texted") return "no open texted ask with this id";
+      if (q === undefined || !q.texted) return "no open texted ask with this id";
+      if (q.phase === "calling") {
+        // The text failed while a `call me` call has the ask: the call carries on, and the
+        // ask is no longer texted, so no SMS reply counts and the call's end decides what's next.
+        q.texted = false;
+        q.lastFailure = "failed";
+        return undefined;
+      }
       endWithoutAnswer(ctx, q, "failed");
       return undefined;
     }
@@ -349,7 +357,10 @@ function callMe(ctx: Context): string | undefined {
   if (!rateLimitAllows(s.callTimes, callLimit(settings), t)) {
     return "over the call limit; open asks keep going by text";
   }
-  placeCall(ctx, asks.slice(0, settings.maxAsksPerCall));
+  const batch = asks.slice(0, settings.maxAsksPerCall);
+  // They go out now, ahead of any batch window or retry delay they were waiting out.
+  for (const q of batch) q.readyAt = Math.min(q.readyAt, t);
+  placeCall(ctx, batch);
   return undefined;
 }
 
@@ -430,13 +441,14 @@ function endCall(ctx: Context, result: CallEnd): void {
   for (const askId of call.askIds) {
     const q = findOpen(ctx.s, askId);
     if (q === undefined || q.phase !== "calling") continue;
-    if (result === "no-pickup" || result === "failed") q.lastFailure = result;
-    else if (result === "dropped") q.lastFailure = "dropped";
     if (q.texted) {
-      // Already texted before a `call me` call: the owner has the text and can still reply to it.
+      // Already texted before a `call me` call: the owner has the text and can still reply to
+      // it, so an unanswered text, not this call, is what a later expiry reports.
       q.phase = "texted";
       continue;
     }
+    if (result === "no-pickup" || result === "failed") q.lastFailure = result;
+    else if (result === "dropped") q.lastFailure = "dropped";
     q.phase = "waiting";
     if ((result === "no-pickup" || result === "failed") && q.callAttempts < settings.maxCallAttempts) {
       q.readyAt = t + settings.retryDelayMs;

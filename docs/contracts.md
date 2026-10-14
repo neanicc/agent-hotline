@@ -310,8 +310,12 @@ Rules:
   daemon dials only the configured owner number. A `call-me` event is never an
   answer; each ask on that call still needs the owner's own words. When the call
   ends with an ask that was texted before it still open, the ask goes back to
-  awaiting its text reply (no retry, no second text); an ask that was never texted
-  follows the usual no-pickup rules. A call-me call counts as a call attempt for
+  awaiting its text reply (no retry, no second text), and if it then expires the
+  outcome reason is `timeout` (the unanswered text), not the call's result. A
+  `text-sent` or `text-failed` can arrive while such an ask is on the call: a
+  failed text marks the ask as not texted (no SMS reply counts for it), and when
+  the call ends it follows the usual no-pickup rules, which texts it again. An ask
+  that was never texted follows the usual no-pickup rules. A call-me call counts as a call attempt for
   each ask on it, so it uses up automatic retries (`DEFAULT_MAX_CALL_ATTEMPTS`)
   like any other call. The queue has no call-me cooldown beyond the call limit and
   the one-call-at-a-time rule; the daemon must deliver each inbound text once

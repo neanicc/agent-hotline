@@ -530,6 +530,17 @@ describe("call me", () => {
     expect(ofType(sms, "resolve").map((r) => [r.askId, r.outcome.outcome])).toEqual([["q2", "answered"]]);
   });
 
+  it("counts its call as the ask going out, so a retry after it keeps its own delay", () => {
+    // Found by the property suite: the call came before the batch window ended.
+    const h = new Harness(makeSettings({}, { retryDelayMs: 0 }));
+    h.ask({ id: "q1" });
+    h.send(callMe);
+    expect(h.state.open[0]?.readyAt).toBe(h.now);
+    expect(h.send({ type: "call-ended", callId: "test-1", result: "no-pickup" })).toEqual([
+      { type: "place-call", callId: "test-2", askIds: ["q1"] },
+    ]);
+  });
+
   it("calls about an ask waiting out its retry delay", () => {
     const h = new Harness(settings);
     h.ask({ id: "q1" });
@@ -583,6 +594,43 @@ describe("call me", () => {
     expect(ofType(h.allActions, "place-call")).toHaveLength(1);
   });
 
+  it("keeps a text failure that arrives during the call, then texts again when the call ends", () => {
+    const h = new Harness(makeSettings({}, { maxCallAttempts: 1 }));
+    h.ask({ id: "q1" });
+    h.advance(20 * SECOND);
+    h.send({ type: "call-ended", callId: "test-1", result: "no-pickup" });
+    expect(h.send(callMe)).toEqual([{ type: "place-call", callId: "test-2", askIds: ["q1"] }]);
+    // The after-call text was still going out; it fails while the owner's call rings.
+    expect(h.send({ type: "text-failed", askId: "q1" })).toEqual([]);
+    expect(h.state.open[0]?.texted).toBe(false);
+    const sms = makeAnswer("q1", { type: "option", option: 1 }, h.now, { channel: "sms" });
+    expect(ofType(h.send({ type: "answer", answer: sms }), "ignored")[0]?.reason).toBe(
+      "the ask was never texted",
+    );
+    expect(h.send({ type: "call-ended", callId: "test-2", result: "no-pickup" })).toEqual([
+      { type: "send-text", askId: "q1", reason: "after-call" },
+    ]);
+    expect(h.send({ type: "text-failed", askId: "q1" })).toEqual([
+      {
+        type: "resolve",
+        askId: "q1",
+        outcome: { outcome: "no-answer", askId: "q1", reason: "failed" },
+        status: "expired",
+      },
+    ]);
+  });
+
+  it("reports an unanswered text, not the call-me call, when a texted ask expires", () => {
+    const h = new Harness(settings, NIGHT);
+    h.ask({ id: "q1" });
+    h.advance(20 * SECOND);
+    h.send(callMe);
+    h.send({ type: "text-sent", askId: "q1" });
+    expect(h.send({ type: "call-ended", callId: "test-1", result: "dropped" })).toEqual([]);
+    const [resolved] = ofType(h.advance(30 * MINUTE), "resolve");
+    expect(resolved?.outcome).toEqual({ outcome: "no-answer", askId: "q1", reason: "timeout" });
+  });
+
   it("keeps texting over the call limit, and says why", () => {
     const h = new Harness(makeSettings({ rateLimits: { callsPerHour: 1 } }));
     h.ask({ id: "q1" });
@@ -634,8 +682,9 @@ describe("call me", () => {
     // Asked again after the text: a second call, not picked up. Still no decision.
     expect(h.send(callMe)).toEqual([{ type: "place-call", callId: "test-2", askIds: ["p1"] }]);
     expect(h.send({ type: "call-ended", callId: "test-2", result: "no-pickup" })).toEqual([]);
+    // The text is still out, so the expiry reports an unanswered text, not the missed call.
     const [resolved] = ofType(h.advance(30 * MINUTE), "resolve");
-    expect(resolved?.outcome).toEqual({ outcome: "no-answer", askId: "p1", reason: "no-pickup" });
+    expect(resolved?.outcome).toEqual({ outcome: "no-answer", askId: "p1", reason: "timeout" });
     expect(resolved && permissionVerdict(p1, resolved.outcome)).toBe("deny");
   });
 });
