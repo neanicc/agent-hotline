@@ -367,7 +367,7 @@ Template:
   An ask held only by the text limit during quiet hours is not woken when quiet
   hours end; it waits for a text slot or its expiry.
 
-## 2026-10-13 — HL-03b Call-me text event (#PR)
+## 2026-10-13 — HL-03b Call-me text event (#31)
 
 - Decision / change: the queue takes a pure `call-me` event for an owner text of
   `call me` (issue #28, plan flow E). With no call in progress and at least one
