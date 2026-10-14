@@ -263,6 +263,19 @@ no status.
 store, the providers and the webhooks through core's pure queue
 ([contracts](contracts.md#ask-queue-and-call-policy-queuets-policyts)).
 
+It is split into four files (HL-09b). The package exports the same names as
+before, all through `orchestrator.ts`: `CallOrchestrator`,
+`CallOrchestratorOptions`, `OrchestratorLog`, `ORCHESTRATOR_STATE_KEY`,
+`RATE_STATE_KEY`, `STOP_WAIT_MS` and `CALL_CENTS_PER_MINUTE`. The parts
+(`OrchestratorState`, `VoiceCalls`, `OwnerTexts`) are internal.
+
+| File | Holds |
+| --- | --- |
+| `orchestrator.ts` | The coordinator: `CallOrchestrator`, one step at a time, the queue, the timer, `start`/`stop`, resolving asks |
+| `orchestrator-state.ts` | The saved state (`daemon_state` keys `orchestrator` and `orchestrator.rates`), its fail-closed restore, crash recovery of a step's unfinished actions, and the checks made before anything goes out |
+| `orchestrator-voice.ts` | Placing calls, holding `submit_answer` answers, confirming them against the post-call transcript, call records |
+| `orchestrator-texts.ts` | Texting asks with confirmation codes and applying the owner's replies; `owner-texts.ts` (pure) plans what a reply means and words the texts |
+
 - **Driving the queue.** Every new ask the store takes (`onAskAdded`, whatever
   route stored it) and every status change made outside the queue (`onAskChange`:
   a cancel, a session end, the agent API expiring an ask) becomes a queue event.

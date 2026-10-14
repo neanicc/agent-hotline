@@ -1643,3 +1643,55 @@ Template:
   recognised and both allows confirm. The prompt's read-back rule is
   unchanged (what it wants to do and the session name); step 1 already
   lists the tool among an ask's key words. 1326 tests in 54 files pass.
+
+## 2026-10-14 — HL-09b Split the call orchestrator (#41)
+
+- Decision / change: pure refactor of `packages/daemon/src/orchestrator.ts`
+  (950 lines) before HL-10 adds the inbound line, as the HL-09 staff reviews
+  asked. Each part is now well under 400 lines. The coordinator
+  (`orchestrator.ts`) keeps
+  `CallOrchestrator`: step serialization, the queue, the timer, start/stop and
+  resolving asks. `orchestrator-state.ts` holds the saved state schema,
+  the fail-closed restore of state and rate windows, crash recovery
+  (`recoverPending`) and the before-send checks (`notReachable`, `dropEvent`).
+  `orchestrator-voice.ts` holds placing calls, holding `submit_answer`
+  answers and post-call confirmation. `orchestrator-texts.ts` holds
+  sending texts with codes and applying the owner's replies; `owner-texts.ts`
+  is unchanged.
+- Decision: a fourth file for the text side, beyond the issue's three. Keeping
+  text sending and reply handling in the coordinator would have left it near
+  520 lines; `owner-texts.ts` stays pure (planning and wording only) rather
+  than gaining store and provider effects.
+- Decision: the public API is unchanged. `index.ts` is untouched and still
+  exports `./orchestrator.js`, which re-exports `ORCHESTRATOR_STATE_KEY`,
+  `RATE_STATE_KEY`, `CALL_CENTS_PER_MINUTE` and `OrchestratorLog`; the new
+  classes are internal. The parts share one `OrchestratorState` holder and read
+  the logger through a getter, so `attachLog` still reaches them. Statement
+  order (saves, audit entries, provider calls) is the same as before.
+- Evidence: no test file changed. `pnpm run lint`, `pnpm run typecheck` pass;
+  `pnpm run test` 41 files, 907 tests, passed three times in a row. After
+  catching up with main (HL-06, HL-14b, HL-11, which did not touch the
+  orchestrator), `scripts/ci/run.sh build` passes and `test` passed 53 files,
+  1308 tests, three times in a row, including HL-14b's
+  `persona-readings.test.ts`. After a second catch-up (HL-14c, #49, which
+  added daemon tests but no daemon source), build passes and `test` passed 54
+  files, 1326 tests, three times in a row. Mutation
+  checks on moved code, each reverted: high-risk allow without the PIN
+  accepted (1 test fails), a maybe-placed call not failed on recovery (1),
+  a wrong code not burning the waiting codes (1). Scenario suite not built yet
+  (HL-12).
+- Reviews: bot staff review on b7d0d01 approved (93, one P3), and on 0f82134
+  approved with nits (90, two P3s). Greptile P2, fixed: `docs/daemon.md` now
+  lists every exported name, `OrchestratorLog` included. P3s, fixed: `VoiceCalls`
+  takes the queue step through its constructor like `OwnerTexts`, and
+  `OrchestratorState.data` documents that it is mutated in place and never
+  kept across steps. P3 left as is: the coordinator's header keeps the
+  subsystem's safety rules, as a pointer for the files it now names.
+- Open issues or follow-ups: hosted CI on 0f82134 (a docs-only commit) failed
+  once on Ubuntu in `packages/core/test/queue.property.test.ts` ("silence never
+  yields approval", fast-check seed -763136370): `expected 1767225600011 to be
+  less than or equal to 1767225600010`. It reproduces deterministically with that
+  seed and path on this branch, which does not touch `packages/core`, so it is a
+  pre-existing queue or test bug that random seeds rarely hit, not this refactor.
+  It is not fixed here (out of lane); the rerun passed. Tracked in #50
+  (`lane:core`), after the staff review on ff58e6a (P2) asked for an issue.
