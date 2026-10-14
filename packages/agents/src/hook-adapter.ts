@@ -539,9 +539,21 @@ async function stopHook(options: HookOptions): Promise<HookResult> {
     return { note: `continuation cap (${count}) reached; the agent stops` };
   }
 
+  // Taking instructions marks them delivered, so everything that could still
+  // stop the continuation is settled first: away mode, and the count saved as
+  // if it continues (any exit that does not continue clears it again).
+  const mayTake = async () => {
+    if (!(await isAway(state))) return false;
+    try {
+      await state.setContinuations(sessionId, count + 1);
+      return true;
+    } catch {
+      return false;
+    }
+  };
   // Instructions the owner left on a call to the Hotline number come first:
   // then nobody is phoned about this stop.
-  let instruction = await queuedInstructions(connection.daemon, session);
+  let instruction = (await mayTake()) ? await queuedInstructions(connection.daemon, session) : undefined;
   if (instruction === undefined) {
     const result = await askAndWait(waiting(connection, options), session, {
       kind: "stop",
@@ -549,7 +561,7 @@ async function stopHook(options: HookOptions): Promise<HookResult> {
     });
     if (result?.outcome?.outcome === "answered") instruction = stopInstruction(result.ask, result.outcome);
     // An instruction the owner left while this stop waited ends the stop as no answer.
-    else if (result !== undefined)
+    else if (result !== undefined && (await mayTake()))
       instruction = await takeInstructions(connection.daemon, result.ask.sessionId);
   }
   if (instruction === undefined || instruction.trim() === "") {
@@ -564,6 +576,7 @@ async function stopHook(options: HookOptions): Promise<HookResult> {
     // Without a count the loop guard cannot work: let the agent stop rather than loop.
     return { note: "the continuation count cannot be saved; the agent stops" };
   }
+  // Queued instructions are at most 3 of 1000 characters for a session, so they always fit.
   const reason = instruction.length <= MAX_REASON ? instruction : instruction.slice(0, MAX_REASON);
   return {
     stdout: JSON.stringify(StopBlockOutput.parse({ decision: "block", reason })),

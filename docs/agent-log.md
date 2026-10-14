@@ -1889,6 +1889,16 @@ Template:
   forgotten calls stop counting against the caps. The read-back reply uses a
   fixed yes lexicon and fails closed; switching to HL-09c's reply judge when
   it lands is a follow-up.
+- Review fixes, third round (bot staff review of aaf01c8, two P2s and two
+  P3s): every word of the read-back reply must now be a yes or one of the few
+  words around one ("yes, send it", "go ahead"), so "send it to the other
+  one" or "fine, but later" is not a yes; a table of near-miss replies tests
+  it, and "sounds good" alone fails closed by decision. The Stop hook checks
+  away mode and saves the continuation count before it takes instructions,
+  so it never marks one delivered that it then cannot pass on. The
+  `requirePhoneNumber` comment is back in place; the restart gap is in
+  docs/daemon.md. Evidence: build passes, test passed 57 files, 1492 tests,
+  three times in a row.
 - Decision: sessions are named by number. `get_status` numbers live sessions
   by registration and remembers, per call, which number is which session;
   `send_instruction` takes only a number that call's status read out

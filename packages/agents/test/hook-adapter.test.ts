@@ -698,6 +698,40 @@ describe("Stop hook loop guards", () => {
     expect(done.calls.filter((call) => call === "take:stop")).toHaveLength(1);
   });
 
+  it("never takes an instruction it could not pass on: away mode off or the count unsaved", async () => {
+    // Away mode goes off between the hook's start and the hand-over.
+    const flips = new MemoryState();
+    let reads = 0;
+    flips.isAway = async () => reads++ === 0;
+    const offDaemon = fakeDaemon({
+      take: async () => left("run the tests"),
+      outcome: async (ask) => ({
+        state: "final",
+        ask,
+        outcome: { outcome: "no-answer", askId: ask.id, reason: "timeout" },
+      }),
+    });
+    expect((await run(offDaemon, flips, false)).stdout).toBeUndefined();
+    expect(offDaemon.calls).not.toContain("take:stop");
+    // The continuation count cannot be saved.
+    class Unsaved extends MemoryState {
+      override async setContinuations(id: string, count: number) {
+        if (count > 0) throw new Error("unwritable");
+        return super.setContinuations(id, count);
+      }
+    }
+    const unsavedDaemon = fakeDaemon({
+      take: async () => left("run the tests"),
+      outcome: async (ask) => ({
+        state: "final",
+        ask,
+        outcome: { outcome: "no-answer", askId: ask.id, reason: "timeout" },
+      }),
+    });
+    expect((await run(unsavedDaemon, new Unsaved(), false)).stdout).toBeUndefined();
+    expect(unsavedDaemon.calls).not.toContain("take:stop");
+  });
+
   it("asks the owner as usual when the instructions cannot be fetched", async () => {
     const daemon = fakeDaemon({
       take: async () => {

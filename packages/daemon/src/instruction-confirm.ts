@@ -67,6 +67,17 @@ const CLOSING = set("thanks thank you");
 const YES = set(
   "yes yeah yep yup yea sure ok okay go send correct right fine absolutely definitely confirm confirmed",
 );
+/**
+ * Every word of a reply to the read-back must be one of these: a yes and the
+ * few words around one ("yes, send it", "go ahead", "sounds good"). Anything
+ * else ("send it to the other one", "fine, but later") is not a clear yes.
+ */
+const REPLY = new Set([
+  ...YES,
+  ...FILLER,
+  ...CLOSING,
+  ..."it that s is do ahead sounds good great perfect please".split(" "),
+]);
 /** Retractions. Phrases are compared as `speechTokens`, so "don't" is "don t". */
 const TAKE_BACKS = [
   "never mind",
@@ -293,8 +304,11 @@ function match(parts: readonly Block[], held: HeldInstruction): Match {
         continue;
       }
       const reply = ownerBlock(parts[i + 2]);
+      const replyWords = reply === undefined ? [] : speechTokens(textOf(reply));
       const clearYes =
-        reply?.some((turn) => speechTokens(turn.message).some((word) => YES.has(word))) === true &&
+        reply !== undefined &&
+        replyWords.some((word) => YES.has(word)) &&
+        replyWords.every((word) => REPLY.has(word)) &&
         !reply.some((turn) => soundsDoubtful(turn.message) || takesBack(turn.message));
       if (!clearYes) {
         reason = "the owner did not confirm the read-back";

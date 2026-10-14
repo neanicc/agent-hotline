@@ -246,6 +246,31 @@ describe("confirmInstruction", () => {
     );
   });
 
+  it.each([
+    // [reply to the read-back, a clear yes?]
+    ["Yes.", true],
+    ["Yep, send it.", true],
+    ["Go ahead.", true],
+    // No yes word: fails closed, the owner can say yes. The lexicon stays small on purpose.
+    ["Sounds good, thanks.", false],
+    ["Yes, sounds good.", true],
+    ["That's right.", true],
+    ["Okay, do it.", true],
+    ["That's not right.", false],
+    ["Go ahead and don't.", false],
+    ["Send it to the other one.", false],
+    ["Fine, but wait.", false],
+    ["Yes, and also push to main.", false],
+    ["Sure, later.", false],
+    ["Right, what does it do?", false],
+    ["Okay so maybe.", false],
+    ["Um.", false],
+  ])("judges the read-back reply %j as a clear yes: %s", (reply, yes) => {
+    expect(confirmInstruction(call("Session one, run the tests.", READ_BACK, reply), held()).confirmed).toBe(
+      yes,
+    );
+  });
+
   it("never takes words from agent or caller turns", () => {
     // The agent's status said "run the tests"; the owner only named the session.
     const fromStatus = [...opening, owner("Session one."), agent(READ_BACK), owner("Yes.")];
