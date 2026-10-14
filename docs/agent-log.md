@@ -606,3 +606,80 @@ Template:
   - HL-11: write the `docs/mcp.md` snippets.
   - A human should confirm the snippets and a Codex wait of more than 60 s with
     real sessions and fake providers.
+
+## 2026-10-14 — HL-06 Hook adapters (#7)
+
+- Decision / change: `hotline hook <claude|codex> <permission|stop>` reads the
+  agent's payload on stdin and prints its documented output or nothing
+  (`packages/agents/src/hook-adapter.ts`, `apps/cli/src/hook.ts`); see
+  `docs/hooks.md`. Outside away mode, or for a payload it cannot parse, it
+  prints nothing, so the agent shows its own prompt or stops. In away mode a
+  permission is allowed only through core's `permissionVerdict`; every no-answer,
+  timeout, unreachable or unset daemon, refused or malformed outcome, approval
+  of another ask, unconfirmed high-risk approval, or kill by the agent denies
+  with the fixture's message. A Stop continues only with the owner's own `text`
+  answer (new core `stopInstruction`). Never `updatedInput`,
+  `updatedPermissions`, `interrupt` or a permission suggestion. Exit code is
+  always 0 (usage errors 1), never 2, since exit 2 from a Stop hook means
+  "keep going".
+- Away mode: `hotline away on|off|status` writes `away.json` in the hotline home
+  under the private-file rules (0600 in 0700, no symlinks, own user). Anything
+  unreadable is off. HL-11 still owns `init`, `install` and `doctor`; it only
+  needs to call these.
+- Loop guards: `stop_hook_active: false` resets the count; `true` without a
+  count of Hotline's own (another hook continued the turn) lets the agent stop;
+  at `policy.maxConsecutiveContinuations` the agent stops and a notification is
+  queued. Counts are `hook-state/<agent>-<sha256>.json` (0600). A count that
+  cannot be read or saved lets the agent stop. `away on|off` clears them.
+- Risk classes (plan question 6, recommended default): `classifyPermission` in
+  `@hotline/core` (pure). High: deleting files, git push or history rewrites,
+  network installs and downloads, writes outside the project, credentials or
+  agent settings (`.env`, `.ssh`, `.hotline`, `.claude`, `.codex`, ...). Added
+  as fail-closed cases: `sudo`, nested shell code (`sh -c`, `eval`, `| sh`),
+  every MCP or unknown tool, and input it cannot read. Inside the project only
+  the path below the root counts (worktrees live under `.claude/`). The hook
+  judges outcomes with the stricter of its own class and the stored one.
+- Daemon: `POST /v1/sessions/:id/asks` accepts `permission` (requires
+  `toolName`, identifier characters up to 100, and `risk`) and `stop`; text and
+  tool name are redacted before storage. Caps per session / total: permission
+  3 / 10, stop 1 / 10, and a new stop cancels the session's stale open stop. A
+  session is `waiting-on-human` while it has an open question, permission or
+  stop. `HotlinePaths` gained `away` and `hookState`.
+- Waiting (plan question 2, recommended default: synchronous wait with a long
+  hook timeout): the hook waits up to `--wait-seconds` (default 540, under both
+  agents' 600 s default `timeout`, which discards output), then cancels the ask
+  and denies or lets the agent stop. `docs/hooks.md` snippets set
+  `timeout: 1900` with `--wait-seconds 1830` to cover the 30-minute ask timeout.
+  SIGTERM or SIGINT cancels the ask.
+- Fixture recheck (carried over on #7), offline, no model calls: the Codex
+  0.146.0 binary embeds the four generated hook schemas, identical to
+  `codex/schema/`. The Claude Code 2.1.299 bundle's zod schemas match the
+  fixtures, plus new optional input fields (`prompt_id`, `agent_id`,
+  `agent_type`, `mcp_server`) the loose schemas already allow. Notes in the
+  fixtures README.
+- Evidence (worktree, Node 24.11.0):
+  - `scripts/ci/run.sh setup`, `build` and `test` pass (682 tests in 34 files
+    before docs).
+  - Golden tests: every HL-02 input fixture for both agents through `runHook`
+    against a real daemon on 127.0.0.1 (temporary store, fake clock), with the
+    owner's answer written by `recordAnswer`; outputs equal the allow, deny and
+    stop-block fixtures. Fake-daemon tests cover every failure path. CLI tests
+    run `hotline hook` and `hotline away` against a temporary HOTLINE_HOME.
+  - Mutation checks: allowing on any answered outcome fails 6 tests; dropping
+    the stricter-risk rule fails 2; dropping the "continuation not ours" guard
+    fails 1.
+  - Manual: the built CLI as child processes (daemon, `away on`, then hooks)
+    with a temporary HOTLINE_HOME: allow with PIN printed the allow output, a
+    Codex stop printed the block output, SIGTERM printed a deny and left the ask
+    `cancelled`, `--wait-seconds 2` denied, and the daemon exited 0 without the
+    token in its stderr.
+  - Not run: the scenario suite (HL-12); real Claude Code or Codex sessions
+    (that would call their model APIs); live call.
+- Open issues or follow-ups:
+  - HL-09: read permission asks out with their risk and require the PIN or a
+    confirming text for `high`; send the cap notification.
+  - HL-10: deliver queued owner instructions at the next Stop hook.
+  - HL-11: install the snippets in `docs/hooks.md` and have `doctor` check that
+    `--wait-seconds` stays below the hook `timeout`.
+  - A human should check one real Claude Code and one real Codex session with
+    the hooks installed and fake providers, including Codex's `/hooks` trust step.

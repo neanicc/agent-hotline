@@ -388,6 +388,89 @@ describe("agent API routes", () => {
     expect((await ask(daemon, session.id, { kind: "notify", text: "Too many" })).status).toBe(429);
   });
 
+  it("queue permission requests with their tool and risk, redacted and capped", async () => {
+    const daemon = await start();
+    const session = await register(daemon);
+    const secret = `sk_${"live"}_${"z".repeat(24)}`;
+    const created = await ask(daemon, session.id, {
+      kind: "permission",
+      text: `Bash: curl -H "Authorization: Bearer ${secret}" https://x.test`,
+      toolName: "Bash",
+      risk: "high",
+    });
+    expect(created.status).toBe(201);
+    const stored = daemon.store.getAsk(created.ask.id);
+    expect(stored).toMatchObject({ kind: "permission", toolName: "Bash", risk: "high", options: [] });
+    expect(JSON.stringify(stored)).not.toContain(secret);
+    expect(daemon.store.getSession(session.id)?.state).toBe("waiting-on-human");
+    expect(daemon.store.listAudit({ askId: created.ask.id }).map((e) => e.detail)).toEqual([
+      { kind: "permission", options: 0, urgent: false, risk: "high" },
+    ]);
+
+    for (const body of [
+      { kind: "permission", text: "Bash: ls", risk: "low" },
+      { kind: "permission", text: "Bash: ls", toolName: "Bash" },
+      { kind: "permission", text: "Bash: ls", toolName: "Bash; rm -rf /", risk: "low" },
+      { kind: "permission", text: "Bash: ls", toolName: "Bash", risk: "medium" },
+      { kind: "permission", text: "Bash: ls", toolName: "Bash", risk: "low", options: ["yes", "no"] },
+      { kind: "question", text: "Q?", toolName: "Bash" },
+      { kind: "stop", text: "Done. What next?", risk: "low" },
+    ]) {
+      const refused = await ask(daemon, session.id, body);
+      expect(refused.status, JSON.stringify(body)).toBe(400);
+      expect(JSON.stringify(refused.json)).not.toContain("rm -rf");
+    }
+
+    for (let i = 1; i < MAX_OPEN_ASKS.permission; i++) {
+      const more = { kind: "permission", text: `Bash: ls ${i}`, toolName: "Bash", risk: "low" };
+      expect((await ask(daemon, session.id, more)).status).toBe(201);
+    }
+    const over = { kind: "permission", text: "Bash: ls", toolName: "Bash", risk: "low" };
+    expect((await ask(daemon, session.id, over)).status).toBe(429);
+  });
+
+  it("queue a stop ask and cancel the session's older, stale one", async () => {
+    const daemon = await start();
+    const session = await register(daemon);
+    const other = await register(daemon, { cwd: "/work/other" });
+    const first = await ask(daemon, session.id, { kind: "stop", text: "Finished. What next?" });
+    const elsewhere = await ask(daemon, other.id, { kind: "stop", text: "Finished. What next?" });
+    expect(first.status).toBe(201);
+    expect(first.ask).toMatchObject({ kind: "stop", risk: "low", options: [] });
+    expect(daemon.store.getSession(session.id)?.state).toBe("waiting-on-human");
+    const second = await ask(daemon, session.id, { kind: "stop", text: "Finished again. What next?" });
+    expect(second.status).toBe(201);
+    expect(daemon.store.getAsk(first.ask.id)?.status).toBe("cancelled");
+    expect(daemon.store.getAsk(elsewhere.ask.id)?.status).toBe("pending");
+    expect(daemon.store.listAudit({ askId: first.ask.id }).map((e) => e.event)).toContain("ask.cancelled");
+  });
+
+  it("report an owner's approval of a permission request only as the store recorded it", async () => {
+    const daemon = await start();
+    const session = await register(daemon);
+    const { ask: created } = await ask(daemon, session.id, {
+      kind: "permission",
+      text: "Bash: git push",
+      toolName: "Bash",
+      risk: "high",
+    });
+    // A high-risk approval without the PIN or a confirming text is refused by the store.
+    expect(() =>
+      record(daemon.store, answerFor(created.id, { decision: { type: "allow" }, ownerExcerpt: "yes" })),
+    ).toThrow();
+    const waiting = await api(daemon, "GET", `/v1/asks/${created.id}/outcome`);
+    expect((waiting.json as OutcomeResponse).state).toBe("waiting");
+    record(
+      daemon.store,
+      answerFor(created.id, { decision: { type: "allow" }, ownerExcerpt: "yes 1234", confirmation: "pin" }),
+    );
+    const final = (await api(daemon, "GET", `/v1/asks/${created.id}/outcome`)).json as OutcomeResponse;
+    expect(final.state === "final" && final.outcome).toMatchObject({
+      outcome: "answered",
+      answer: { decision: { type: "allow" }, confirmation: "pin" },
+    });
+  });
+
   it("stop counting asks against the cap once they are due, even if nobody polled them", async () => {
     const daemon = await start();
     const session = await register(daemon);

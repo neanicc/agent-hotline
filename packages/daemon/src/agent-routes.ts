@@ -1,8 +1,8 @@
-// Agent API routes for the MCP server (and, later, the hook adapters). They sit
-// behind the agent API's token and loopback Host checks (`buildAgentApi`).
+// Agent API routes for the MCP server and the hook adapters. They sit behind
+// the agent API's token and loopback Host checks (`buildAgentApi`).
 //
 //   POST /v1/sessions                      register a session (or refresh one by agentSessionId)
-//   POST /v1/sessions/:sessionId/asks      queue a question or notification
+//   POST /v1/sessions/:sessionId/asks      queue a question, notification, permission request or stop
 //   GET  /v1/sessions/:sessionId/inbox     owner instructions and this session's recent asks
 //   GET  /v1/asks/:askId/outcome           the outcome, waiting up to `waitSeconds` for one
 //   POST /v1/asks/:askId/cancel            the agent stopped waiting; do not call about it
@@ -21,6 +21,7 @@ import {
   type AskOutcome,
   Id,
   MAX_OPTIONS,
+  Risk as RiskSchema,
   type Session,
 } from "@hotline/core";
 import type { FastifyInstance, FastifyReply } from "fastify";
@@ -42,9 +43,14 @@ export const CLOSE_GRACE_MS = 2_000;
  * for the owner, so a few are plenty; notifications stay open until delivered or
  * expired. Beyond this the daemon answers 429 and stores no ask.
  */
-export const MAX_OPEN_ASKS = { question: 3, notify: 10 } as const;
+export const MAX_OPEN_ASKS = { question: 3, notify: 10, permission: 3, stop: 1 } as const;
 /** The same across every session, so registering many sessions does not multiply the limit. */
-export const MAX_OPEN_ASKS_TOTAL = { question: 10, notify: 30 } as const;
+export const MAX_OPEN_ASKS_TOTAL = { question: 10, notify: 30, permission: 10, stop: 10 } as const;
+/** A tool name as the agents report it: `Bash`, `apply_patch`, `mcp__server__tool`. */
+export const MAX_TOOL_NAME = 100;
+const TOOL_NAME = /^[A-Za-z0-9_.:-]+$/;
+/** Ask kinds that hold an agent until the owner answers. */
+const WAITING_KINDS = ["question", "permission", "stop"] as const;
 
 const ELLIPSIS = "…";
 
@@ -67,12 +73,35 @@ const RegisterSessionBody = z.strictObject({
   agentSessionId: Id.optional(),
 });
 
-const CreateAskBody = z.strictObject({
-  kind: z.enum(["question", "notify"]),
-  text: z.string().min(1).max(MAX_ASK_TEXT),
-  options: z.array(z.string().min(1).max(MAX_OPTION_TEXT)).max(MAX_OPTIONS).optional(),
-  urgent: z.boolean().optional(),
-});
+const CreateAskBody = z
+  .strictObject({
+    kind: z.enum(["question", "notify", "permission", "stop"]),
+    text: z.string().min(1).max(MAX_ASK_TEXT),
+    options: z.array(z.string().min(1).max(MAX_OPTION_TEXT)).max(MAX_OPTIONS).optional(),
+    /** Permission requests only: the tool, and the risk class the hook worked out from its full input. */
+    toolName: z.string().min(1).max(MAX_TOOL_NAME).regex(TOOL_NAME).optional(),
+    risk: RiskSchema.optional(),
+    urgent: z.boolean().optional(),
+  })
+  .superRefine((body, ctx) => {
+    const permission = body.kind === "permission";
+    if (permission && body.toolName === undefined) {
+      ctx.addIssue({ code: "custom", path: ["toolName"], message: "permission requests name the tool" });
+    }
+    if (permission && body.risk === undefined) {
+      ctx.addIssue({ code: "custom", path: ["risk"], message: "permission requests carry a risk class" });
+    }
+    if (!permission && (body.toolName !== undefined || body.risk !== undefined)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["kind"],
+        message: "only permission requests carry toolName and risk",
+      });
+    }
+    if (body.kind !== "question" && (body.options?.length ?? 0) > 0) {
+      ctx.addIssue({ code: "custom", path: ["options"], message: "only questions carry options" });
+    }
+  });
 
 const SessionParams = z.strictObject({ sessionId: Id });
 const AskParams = z.strictObject({ askId: Id });
@@ -185,7 +214,8 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
   const refreshSessionState = (sessionId: string) => {
     const session = store.getSession(sessionId);
     if (session === undefined || session.state === "ended") return;
-    const state = store.countOpenAsks(sessionId, "question") > 0 ? "waiting-on-human" : "working";
+    const waiting = WAITING_KINDS.some((kind) => store.countOpenAsks(sessionId, kind) > 0);
+    const state = waiting ? "waiting-on-human" : "working";
     if (session.state !== state) store.putSession({ ...session, state });
   };
   // Every status change, whoever makes it (an answer, expiry, a cancel), updates the session.
@@ -258,10 +288,21 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
     // Expired asks must not keep counting against the caps below, even if nobody
     // has polled them since (a killed agent, an undelivered notification).
     for (const open of store.listAsks(["pending", "in-flight"])) expireIfDue(open);
-    if (kind === "notify" && (body.data.options?.length ?? 0) > 0) {
-      return reply
-        .code(400)
-        .send({ error: "invalid request", issues: ["options: only questions carry options"] });
+    if (kind === "stop") {
+      // A session ends one turn at a time, so an older open stop is stale (its hook
+      // was killed before it could cancel): nobody should be called about it.
+      for (const open of store.listAsks(["pending", "in-flight"])) {
+        if (
+          open.sessionId === session.id &&
+          open.kind === "stop" &&
+          store.setAskStatus(open.id, "cancelled")
+        ) {
+          store.appendAudit("ask.cancelled", { kind: "stop", by: "newer-stop" }, clock(), {
+            askId: open.id,
+            sessionId: session.id,
+          });
+        }
+      }
     }
     // A looping or prompt-injected agent must not be able to pile up asks, in one
     // session or by registering many.
@@ -286,6 +327,10 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
         .code(400)
         .send({ error: "invalid request", issues: ["options: must be unique after redaction"] });
     }
+    // The tool name is agent-written too: redacted like the text, though the schema
+    // already limits it to identifier characters.
+    const toolName =
+      body.data.toolName === undefined ? undefined : cut(redactor.text(body.data.toolName), MAX_TOOL_NAME);
     const now = clock();
     const ask: Ask = {
       id: newId(),
@@ -293,7 +338,8 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
       kind,
       text,
       options,
-      risk: "low",
+      ...(toolName === undefined ? {} : { toolName }),
+      risk: body.data.risk ?? "low",
       urgent,
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + askTimeoutMs).toISOString(),
@@ -302,7 +348,7 @@ export function registerAgentRoutes(app: FastifyInstance, options: AgentRoutesOp
     store.addAsk(ask);
     store.putSession({ ...session, lastSeenAt: now.toISOString() });
     refreshSessionState(session.id);
-    store.appendAudit("ask.created", { kind, options: options.length, urgent }, now, {
+    store.appendAudit("ask.created", { kind, options: options.length, urgent, risk: ask.risk }, now, {
       askId: ask.id,
       sessionId: session.id,
     });

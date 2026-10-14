@@ -277,7 +277,18 @@ Outputs are strict and narrower than what the agents accept:
 
 Hotline never sends `updatedInput` or `updatedPermissions`, and never applies a
 `permission_suggestions` entry: it only answers the prompt the agent would show
-in the terminal.
+in the terminal. The adapters that print these are in `packages/agents`; see
+[hooks.md](hooks.md).
+
+## Permission risk (`permission-risk.ts`)
+
+`classifyPermission({toolName, toolInput, cwd})` returns `{risk, reasons}`:
+`high` (needs the PIN or a confirming text to approve) for deleting files, git
+push or history rewrites, network installs and downloads, writes outside the
+project, credentials or agent settings, `sudo`, nested shell code, unknown and
+MCP tools, and input it cannot read; `low` otherwise. Pure: paths are resolved
+as POSIX strings (`resolvePosix`, `insideProject`), never on the file system.
+The full table is in [hooks.md](hooks.md#risk-classes-plan-question-6).
 
 ## Ask queue and call policy (`queue.ts`, `policy.ts`)
 
@@ -327,6 +338,9 @@ Rules:
   `timeout`. `permissionVerdict(ask, outcome)` turns an outcome into `allow` only
   for an owner approval of that permission ask, with confirmation when it is high
   risk; every other input, malformed ones included, is `deny`.
+  `stopInstruction(ask, outcome)` returns the owner's next instruction only for
+  a `text` answer to that stop ask; `done`, any no-answer and malformed input
+  return undefined, which lets the agent stop.
 - **Priority.** Urgent asks first, then `permission`, `question`, `stop`,
   `notify`, then oldest, then id.
 - **Batching.** A new ask waits `policy.batchWindowSeconds`. When any callable ask
