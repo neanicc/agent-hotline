@@ -839,7 +839,7 @@ Template:
     (1 test fails), owner turns on an unplaced outbound call (2), evicting
     live post-call events (1).
 
-## 2026-10-14 — HL-09 Call orchestration (#PR)
+## 2026-10-14 — HL-09 Call orchestration (#36)
 
 - Decision / change: `packages/daemon/src/orchestrator.ts` (`CallOrchestrator`)
   drives core's pure queue with the injected clock and one real timer at
