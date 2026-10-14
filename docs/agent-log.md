@@ -1438,7 +1438,7 @@ Template:
   Today's daemon check would also refuse some of these flows, for example a
   "hmm" before the confirmed yes, until that separate ticket lands.
 
-## 2026-10-14 — HL-06b Classify the action the agent will actually run (#43)
+## 2026-10-14 — HL-06b Classify the action the agent will actually run (#46)
 
 - Decision / change: `classifyPermission` now judges what runs, not only the
   command text (`packages/core/src/permission-risk.ts`, docs/hooks.md "What is
