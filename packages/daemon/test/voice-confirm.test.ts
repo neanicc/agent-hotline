@@ -1162,3 +1162,36 @@ describe("a permission request longer than what was read out is never approved b
     ).toEqual({ confirmed: true, excerpt: "yes" });
   });
 });
+
+describe("taking an approval back after the agent acknowledged it", () => {
+  const approved = [GREETING, READ_PUSH, owner("sure"), BACK_PUSH, owner("yes")];
+  const check = (transcript: TranscriptTurn[]) =>
+    confirmVoiceDecision({ transcript, asks: [PUSH, INSTALL], index: 0, decision: allow, ownerWords: "yes" });
+
+  it.each(["wait, no, don't", "hold on", "actually, cancel that", "stop", "never mind", "no, don't do that"])(
+    "%j after 'Got it.' takes it back",
+    (said) => {
+      expect(check([...approved, agent("Got it, approving."), owner(said)])).toEqual({
+        confirmed: false,
+        reason: "the owner took the approval back",
+      });
+    },
+  );
+
+  it.each(["no, that's all", "nope", "no thanks, bye", "that's it", "thanks"])(
+    "%j to 'anything else?' leaves it approved",
+    (said) => {
+      expect(check([...approved, agent("Got it. Anything else?"), owner(said)])).toEqual({
+        confirmed: true,
+        excerpt: "yes",
+      });
+    },
+  );
+
+  it("stops at the next ask: a 'wait' about that one does not take this one back", () => {
+    expect(check([...approved, agent("Got it."), READ_INSTALL, owner("no wait")])).toEqual({
+      confirmed: true,
+      excerpt: "yes",
+    });
+  });
+});

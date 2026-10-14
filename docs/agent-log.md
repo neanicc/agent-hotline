@@ -2184,3 +2184,20 @@ Template:
   - P3: `owner-unclear` calls are stored with `CallRecord.outcome`
     `answered`. A distinct outcome is a `packages/core` contract change and
     joins the lane:core follow-up for an "owner stayed unclear" reason.
+- Bot staff review of eb2f553 (approve with nits, 86; P2 1, P3 2):
+  - P2 fixed: an approval the owner takes back after the agent's
+    acknowledgement ("Got it." then "wait, no, don't") is no longer
+    confirmed. Owner turns after the reply are scanned until another ask is
+    read or the call ends. Decision: the scan uses stricter retraction
+    markers ("wait", "stop", "cancel", "hold on", "actually", "never mind",
+    any "n't", ...), not the whole doubt list. A bare "no" or "nope" there
+    usually answers "anything else?", and counting it would cancel nearly
+    every last approval on a call. Tests cover the retractions, closing
+    replies that leave the approval standing, and a "wait" about the next
+    ask. Mutation checks: no retraction (7 tests fail), the scan not stopping
+    at the next ask (3), a bare no retracting (3).
+  - P3: docs say the running daemon always uses `FailClosedJudge`, and any
+    other judge runs only in tests.
+  - P3 (entry length and relayed quotes): kept. The dispatcher required this
+    entry to record the owner's direction, and the quotes are what the
+    decisions rest on.

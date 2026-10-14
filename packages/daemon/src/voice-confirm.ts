@@ -196,6 +196,27 @@ const DONE_PHRASES = [
 const QUESTION_WORDS = wordSet("what why how which when where who whose explain wonder curious question");
 /** Doubt that only shows as a phrase. */
 const DOUBT_PHRASES = ["hang on", "hold on", "not yet", "no way", "never mind", "dont do", "uh uh", "uh oh"];
+/**
+ * Words that take an approval back when said after the agent acknowledged it
+ * ("Got it." then "wait, no, don't"). Stricter than `DOUBT_WORDS` on purpose:
+ * a bare "no" or "nope" there is usually the answer to "anything else?".
+ */
+const RETRACT_WORDS = wordSet(
+  "wait stop cancel abort hold undo actually scratch nevermind dont deny revoke reject",
+);
+const RETRACT_PHRASES = ["hang on", "hold on", "never mind", "dont do", "not that", "take that back"];
+
+/** Whether a turn said after an approval was acknowledged takes it back. */
+function retracts(text: string): boolean {
+  const plain = normalized(text);
+  const words = tokens(plain);
+  const joined = ` ${words.join(" ")} `;
+  return (
+    /n't\b/.test(plain) ||
+    words.some((word) => RETRACT_WORDS.has(word)) ||
+    RETRACT_PHRASES.some((phrase) => joined.includes(` ${phrase} `))
+  );
+}
 /** Words in an agent turn that ask the owner for a yes, besides a question mark. */
 const ASKS_FOR_YES = wordSet("yes confirm");
 /** Apostrophe look-alikes a transcript may use for "don't". */
@@ -360,10 +381,9 @@ interface ReadingWindow {
 
 /**
  * The owner's turns right after each agent turn that reads ask `index`, up to
- * the next agent turn of any kind. That boundary is deliberate: a reply after
- * the agent's acknowledgement ("Got it." then "wait, no!") is not part of the
- * judged reply. The answer was already submitted by then, and such a turn is
- * a reply to the acknowledgement, which the agent then has to take up itself.
+ * the next agent turn of any kind. A turn after the agent's acknowledgement
+ * ("Got it." then "wait, no!") is not part of the judged reply; for an allow,
+ * `confirmAllow` scans those later turns separately for a retraction.
  */
 function readingWindows(
   transcript: readonly TranscriptTurn[],
@@ -621,6 +641,17 @@ function confirmAllow(
     .flatMap((window) => ownerTurns(window.turns))
     .map((turn) => turn.message);
   const excerpt = match.text.slice(0, MAX_EXCERPT);
+  // After the reply, until another ask is read (or the call ends), the owner
+  // may take the approval back even once the agent acknowledged it.
+  const last = windows.filter((window) => window.at >= from).at(-1);
+  const afterReply = last === undefined ? transcript.length : last.at + 1 + last.turns.length;
+  for (let at = afterReply; at < transcript.length; at++) {
+    const turn = transcript[at];
+    if (turn?.role === "agent" && read[at] !== undefined && read[at] !== index) break;
+    if (turn?.role === "owner" && retracts(turn.message)) {
+      return { confirmed: false, reason: "the owner took the approval back" };
+    }
+  }
   const verdict = replyVerdict(reply, transcript[from]?.message ?? "", askWords);
   if (verdict === "agreed") return { confirmed: true, excerpt };
   if (verdict === "declined") {

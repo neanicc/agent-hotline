@@ -441,10 +441,18 @@ before, all through `orchestrator.ts`: `CallOrchestrator`,
       enabling it, and should then retire the fast path's doubt tables rather
       than grow them. `VoiceCalls`
       takes `judge` and `judgeTimeoutMs` options, and the orchestrator does
-      not pass them yet. A call's held decisions are all
+      not pass them yet, so in the running daemon the judge is always
+      `FailClosedJudge`; any other judge runs only in tests. A call's held decisions are all
       checked at once, so a slow judge costs one timeout per call, not one per
       ask.
 
+    The owner can also take an approval back after the agent acknowledged
+    it ("Got it." then "wait, no, don't"): an owner turn after the reply,
+    before another ask is read or the call ends, with a retraction marker
+    ("wait", "stop", "cancel", "hold on", "actually", "never mind", any
+    "n't", ...) leaves the allow not confirmed and the ask is texted. A bare
+    "no" or "nope" there does not count, since it usually answers "anything
+    else?".
     Doubt markers no longer reject a reply on their own: they keep the fast
     path from agreeing and send the reply to the judge. A clear-no reply, or a
     judge's `declined`, to the read-back of a submitted allow ends the request
