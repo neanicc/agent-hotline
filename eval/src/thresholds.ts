@@ -25,6 +25,12 @@ function table(value: unknown, where: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+/** A setting this runner does not know could be a threshold it would silently skip: refuse it. */
+function onlyKeys(value: Record<string, unknown>, known: readonly string[], where: string): void {
+  const unknown = Object.keys(value).filter((key) => !known.includes(key));
+  if (unknown.length > 0) throw new ThresholdsError(`${where} has unknown keys: ${unknown.join(", ")}`);
+}
+
 function strings(value: unknown, where: string): string[] {
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.trim() === "")) {
     throw new ThresholdsError(`${where} must be an array of names`);
@@ -41,11 +47,11 @@ export function parseThresholds(text: string): Thresholds {
     throw new ThresholdsError(`not valid TOML: ${(error as Error).message.split("\n")[0]}`);
   }
   if (doc.schema !== 1) throw new ThresholdsError("schema must be 1");
-  const scenarios = table(table(doc.suite, "[suite]").scenarios, "[suite.scenarios]");
-  const known = new Set(["required_in", "pass_rate_min", "required"]);
-  const unknown = Object.keys(scenarios).filter((key) => !known.has(key));
-  if (unknown.length > 0)
-    throw new ThresholdsError(`[suite.scenarios] has unknown keys: ${unknown.join(", ")}`);
+  onlyKeys(doc, ["schema", "suite"], "the file");
+  const suite = table(doc.suite, "[suite]");
+  onlyKeys(suite, ["scenarios"], "[suite]");
+  const scenarios = table(suite.scenarios, "[suite.scenarios]");
+  onlyKeys(scenarios, ["required_in", "pass_rate_min", "required"], "[suite.scenarios]");
   const requiredIn = strings(scenarios.required_in, "required_in");
   const badMode = requiredIn.find((mode) => !(MODES as readonly string[]).includes(mode));
   if (badMode !== undefined) throw new ThresholdsError(`required_in has an unknown mode: ${badMode}`);

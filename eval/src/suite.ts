@@ -53,8 +53,18 @@ async function runOne(scenario: Scenario, options: RunOptions): Promise<Scenario
   } finally {
     clearTimeout(timer);
     // Stopping the hotlines ends anything still waiting (children, MCP sessions, the daemon).
-    for (const hotline of hotlines.reverse()) await hotline.stop().catch(() => {});
+    // Every one is stopped; a daemon that did not shut down cleanly fails a scenario that passed.
+    const problems: string[] = [];
+    for (const hotline of hotlines.reverse()) {
+      try {
+        const code = await hotline.stop();
+        if (code !== 0) problems.push(`the daemon exited with ${code} on shutdown`);
+      } catch (error) {
+        problems.push(`shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     await Promise.race([running.catch(() => {}), new Promise((resolve) => setTimeout(resolve, 5_000))]);
+    if (failure === undefined && problems.length > 0) failure = oneLine(problems.join("; "));
   }
   return {
     name: scenario.name,

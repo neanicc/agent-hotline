@@ -65,6 +65,7 @@ function parseArgs(argv: readonly string[]): Args | string {
       args.out = value;
     } else if (flag === "--only") {
       const names = value.split(",").map((name) => name.trim());
+      if (names.some((name) => name === "")) return "--only needs scenario names separated by commas";
       const unknown = names.filter((name) => !SCENARIOS.some((s) => s.name === name));
       if (unknown.length > 0) return `--only names unknown scenarios: ${unknown.join(", ")}`;
       args.only = names;

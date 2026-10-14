@@ -104,6 +104,14 @@ describe("the runner", () => {
     const out = { stdout: () => {}, stderr: () => {} };
     expect(await main(["--mode", "nightly"], out)).toBe(2);
     expect(await main(["--only", "no-such-scenario"], out)).toBe(2);
+    const errors: string[] = [];
+    expect(
+      await main(["--only", "silence-denies,,high-risk-needs-pin"], {
+        ...out,
+        stderr: (l) => errors.push(l),
+      }),
+    ).toBe(2);
+    expect(errors.join("\n")).toContain("--only needs scenario names separated by commas");
     expect(await main(["--fault", "approve-some"], out)).toBe(2);
     expect(await main(["--verbose", "yes"], out)).toBe(2);
   });

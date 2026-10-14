@@ -48,6 +48,9 @@ describe("eval/thresholds.toml", () => {
       base.replace('required = ["a"]', 'required = ["a", "a"]'),
       base.replace('required = ["a"]', "required = [1]"),
       `${base}timeout_seconds = 5\n`,
+      // Unknown settings at the top and under [suite] are refused too.
+      `strict = true\n${base}`,
+      `${base}[suite.timing]\nmax_seconds = 60\n`,
       "schema = 1\n",
     ]) {
       expect(() => parseThresholds(broken), broken).toThrow(ThresholdsError);

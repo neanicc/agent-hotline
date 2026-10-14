@@ -1,8 +1,9 @@
 // Hook payloads as Claude Code and Codex send them (the shapes of the HL-02
 // fixtures in packages/agents/test/fixtures/hooks, from the Claude Code hooks
 // reference and the Codex hooks schema), and readers for what the hooks print.
+import { ClaudePermissionRequestOutput, CodexPermissionRequestOutput, StopBlockOutput } from "@hotline/core";
 import { check, ScenarioFailure, show } from "./check.js";
-import type { CliRun } from "./hotline.js";
+import type { HookRun } from "./hotline.js";
 
 export const CLAUDE_SESSION = "00000000-0000-4000-8000-0000000000c1";
 export const CODEX_SESSION = "00000000-0000-4000-8000-0000000000c2";
@@ -71,39 +72,56 @@ export function codexStop(
   };
 }
 
-function hookJson(run: CliRun, what: string): Record<string, unknown> | undefined {
+function hookJson(run: HookRun, what: string): unknown {
   check(run.code === 0, `${what} exited with ${run.code} (${run.stderr.trim()})`);
   const out = run.stdout.trim();
   if (out === "") return undefined;
   try {
-    return JSON.parse(out) as Record<string, unknown>;
+    return JSON.parse(out);
   } catch {
     throw new ScenarioFailure(`${what} printed something that is not JSON: ${show(out)}`);
   }
 }
 
-/** The permission hook's decision: what the agent will do. */
-export function permissionDecision(run: CliRun): { behavior: string; message?: string } {
-  const output = hookJson(run, "the permission hook");
-  const decision = (output?.hookSpecificOutput as { decision?: { behavior: string; message?: string } })
-    ?.decision;
-  if (decision === undefined)
-    throw new ScenarioFailure(`the permission hook printed no decision: ${show(output)}`);
-  return decision;
+/**
+ * The permission hook's decision: what the agent will do. The whole output must
+ * match that agent's documented PermissionRequest output (core's strict schemas),
+ * so output the agent would reject never counts as an allow or a deny.
+ */
+export function permissionDecision(run: HookRun): { behavior: string; message?: string } {
+  check(run.event === "permission", `expected a permission hook run, got ${run.event}`);
+  const what = `the ${run.agent} permission hook`;
+  const output = hookJson(run, what);
+  if (output === undefined) throw new ScenarioFailure(`${what} printed nothing`);
+  const schema = run.agent === "codex" ? CodexPermissionRequestOutput : ClaudePermissionRequestOutput;
+  const parsed = schema.safeParse(output);
+  if (!parsed.success)
+    throw new ScenarioFailure(`${what} printed output the agent would reject: ${show(output)}`);
+  return parsed.data.hookSpecificOutput.decision;
 }
 
-export function expectAllow(run: CliRun, what: string): void {
+export function expectAllow(run: HookRun, what: string): void {
   const decision = permissionDecision(run);
   check(decision.behavior === "allow", `${what}: expected the hook to allow, got ${show(decision)}`);
 }
 
-export function expectDeny(run: CliRun, what: string): string {
+export function expectDeny(run: HookRun, what: string): string {
   const decision = permissionDecision(run);
   check(decision.behavior === "deny", `${what}: expected the hook to deny, got ${show(decision)}`);
   return decision.message ?? "";
 }
 
-/** The Stop hook's output: undefined when the agent stops, else `{decision, reason}`. */
-export function stopOutput(run: CliRun): Record<string, unknown> | undefined {
-  return hookJson(run, "the Stop hook");
+/**
+ * The Stop hook's output: undefined when the agent stops, else `{decision, reason}`,
+ * which must match the documented block output both agents read.
+ */
+export function stopOutput(run: HookRun): Record<string, unknown> | undefined {
+  check(run.event === "stop", `expected a Stop hook run, got ${run.event}`);
+  const what = `the ${run.agent} Stop hook`;
+  const output = hookJson(run, what);
+  if (output === undefined) return undefined;
+  const parsed = StopBlockOutput.safeParse(output);
+  if (!parsed.success)
+    throw new ScenarioFailure(`${what} printed output the agent would reject: ${show(output)}`);
+  return parsed.data;
 }

@@ -2569,3 +2569,11 @@ Template:
   uses the fakes only through their public `script`, `placed`, `sent`,
   `inboundCall` and `playPending`, so it should keep working. A replayed
   `submit_answer` tool call is not a scenario yet (the route test covers it).
+- Review fixes (staff review and Greptile on #68):
+  - Hook output is now parsed with core's strict per-agent schemas, so output the agent would reject never counts.
+  - The thresholds parser refuses unknown keys at every level.
+  - A failed hotline or MCP start cleans up what it started.
+  - A daemon that does not shut down cleanly fails its scenario.
+  - `--only` refuses empty names.
+  - docs/eval.md states the self-test's limit: it catches an approval the agent sees, not a flaw injected inside the daemon (the mutation checks above covered those once).
+  - After the fixes, build passes, test passes (60 files, 1727 tests) and `eval --local` prints 22 PASS lines and `THRESHOLDS: PASS`.

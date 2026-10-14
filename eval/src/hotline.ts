@@ -108,6 +108,12 @@ export interface CliRun {
   stderr: string;
 }
 
+/** A finished `hotline hook` run, with what ran, so its output is checked against that agent's schema. */
+export interface HookRun extends CliRun {
+  agent: AgentKind;
+  event: "permission" | "stop";
+}
+
 export interface McpSession {
   /** The server's working directory (real path): its session's `cwd`. */
   folder: string;
@@ -143,7 +149,7 @@ export interface Hotline {
   /** `hotline away on|off`. */
   away(on: boolean): Promise<void>;
   /** `hotline hook <claude|codex> <permission|stop>` with `payload` on stdin. Resolves when it exits. */
-  hook(agent: AgentKind, event: "permission" | "stop", payload: Record<string, unknown>): Promise<CliRun>;
+  hook(agent: AgentKind, event: "permission" | "stop", payload: Record<string, unknown>): Promise<HookRun>;
   /** `hotline mcp --agent <claude|codex>` in `<dir>/src/<folder>`, with an MCP client connected. */
   mcp(agent: AgentKind, folder: string): Promise<McpSession>;
   /** Registers a session through the agent API, as the hook adapters do. */
@@ -163,7 +169,8 @@ export interface Hotline {
     body: string,
     options?: { from?: string; messageSid?: string },
   ): { form: string; signature: string };
-  stop(): Promise<void>;
+  /** Stops everything and removes the temporary home; resolves with the daemon's exit code. */
+  stop(): Promise<number>;
 }
 
 const messageSid = () => `SM${randomBytes(16).toString("hex")}`;
@@ -203,6 +210,21 @@ export async function startHotline(options: HotlineOptions = {}): Promise<Hotlin
   }
   pinHash ??= hashPin(PIN);
   const dir = await realpath(await mkdtemp(join(tmpdir(), "hotline-scenario-")));
+  // Undone in reverse if the start fails part way, so a failed start leaves nothing running.
+  const undo: (() => Promise<unknown>)[] = [() => rm(dir, { recursive: true, force: true })];
+  try {
+    return await build(dir, options, undo);
+  } catch (error) {
+    for (const step of undo.reverse()) await step().catch(() => {});
+    throw error;
+  }
+}
+
+async function build(
+  dir: string,
+  options: HotlineOptions,
+  undo: (() => Promise<unknown>)[],
+): Promise<Hotline> {
   const home = join(dir, "home");
   const paths = hotlinePaths({ env: { HOTLINE_HOME: home }, homeDir: "/nonexistent" });
   const config = {
@@ -272,6 +294,10 @@ export async function startHotline(options: HotlineOptions = {}): Promise<Hotlin
     autoTick: false,
     onReady: (daemon, orchestrator) => ready({ daemon, orchestrator }),
   });
+  undo.push(() => {
+    signals.emit("SIGTERM");
+    return exit;
+  });
   const { daemon, orchestrator } = await Promise.race([
     listening,
     exit.then((code) => {
@@ -282,6 +308,7 @@ export async function startHotline(options: HotlineOptions = {}): Promise<Hotlin
   const token = (await secrets.get("daemon.apiToken")) ?? "";
   const proxy: FaultProxy | undefined =
     options.fault === "always-approve" ? await alwaysApproveProxy(daemon.apiPort) : undefined;
+  if (proxy !== undefined) undo.push(() => proxy.close());
   /** Where the hooks and MCP servers find the daemon: the proxy when a fault is injected. */
   const agentPort = proxy?.port ?? daemon.apiPort;
 
@@ -388,8 +415,8 @@ export async function startHotline(options: HotlineOptions = {}): Promise<Hotlin
       const run = await cli(["away", on ? "on" : "off"]);
       check(run.code === 0, `hotline away ${on ? "on" : "off"} exited with ${run.code}: ${run.stderr}`);
     },
-    hook(agent, event, payload) {
-      return cli(
+    async hook(agent, event, payload) {
+      const run = await cli(
         [
           "hook",
           agent === "codex" ? "codex" : "claude",
@@ -401,6 +428,7 @@ export async function startHotline(options: HotlineOptions = {}): Promise<Hotlin
         ],
         JSON.stringify(payload),
       );
+      return { ...run, agent, event };
     },
     async mcp(agent, folderName) {
       const folder = join(dir, "src", folderName);
@@ -425,13 +453,6 @@ export async function startHotline(options: HotlineOptions = {}): Promise<Hotlin
         name: agent === "codex" ? "codex-mcp-client" : "claude-code",
         version: "1.0.0",
       });
-      await mcp.connect(transport);
-      // The server registers its session once the client has initialized.
-      await waitFor(
-        () =>
-          daemon.store.listSessions().find((s) => s.agent === agent && s.cwd === cwd && s.state !== "ended"),
-        `the ${agent} MCP server's session`,
-      );
       let closed = false;
       const session: McpSession = {
         folder: cwd,
@@ -444,9 +465,25 @@ export async function startHotline(options: HotlineOptions = {}): Promise<Hotlin
           closed = true;
           sessions.delete(session);
           await mcp.close().catch(() => {});
+          await transport.close().catch(() => {});
         },
       };
+      // Tracked before anything can fail, so `stop` (or the catch below) always ends the child.
       sessions.add(session);
+      try {
+        await mcp.connect(transport);
+        // The server registers its session once the client has initialized.
+        await waitFor(
+          () =>
+            daemon.store
+              .listSessions()
+              .find((s) => s.agent === agent && s.cwd === cwd && s.state !== "ended"),
+          `the ${agent} MCP server's session`,
+        );
+      } catch (error) {
+        await session.close();
+        throw error;
+      }
       return session;
     },
     async register(agent, cwd, agentSessionId) {
@@ -481,8 +518,9 @@ export async function startHotline(options: HotlineOptions = {}): Promise<Hotlin
       for (const child of children) child.kill("SIGKILL");
       await proxy?.close();
       signals.emit("SIGTERM");
-      await exit;
+      const code = await exit;
       await rm(dir, { recursive: true, force: true });
+      return code;
     },
   };
   return hotline;

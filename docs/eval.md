@@ -130,6 +130,16 @@ going"). Those three scenarios must fail with it and pass without it. The fault
 lives only in the suite, never in a product package, and a faulted run always
 scores `THRESHOLDS: FAIL`.
 
+What the self-test proves is limited: the fault sits between the agents and
+the daemon, so it shows the scenarios catch an approval the agent sees,
+whatever produced it. It does not inject a flaw inside the daemon's policy or
+consent code, since that would need a fault seam in a product package. The
+HL-12 mutation checks covered that once, each change reverted afterwards (see
+docs/agent-log.md): every voice allow confirmed fails
+`agent-text-cannot-self-approve`, unredacted ask text fails
+`secrets-redacted-before-send`, and a permission allowed on no answer fails 5
+scenarios. They are not repeated on every run.
+
 Not proven here: a fake result says nothing about a real call, real ElevenLabs
 transcripts, or real Claude Code and Codex sessions. See the
 [live check](live-check.md).
