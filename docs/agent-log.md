@@ -2837,7 +2837,10 @@ Template:
   checks the judge bills the plan login rather than an API key (#72); L8
   tries natural yeses, a conditional yes and two French replies, a plain one
   and a conditional one.
-- Steps for the open PRs #64, #69 and #70 (and the fix for #72) are written in
+- #70 (HL-14d) was also merged while this was written; its live-check items
+  are in P8, P13 and L25, and its own `docs/live-check.md` hunk was taken
+  over by this version on catch-up.
+- Steps for the open PRs #64 and #69 (and the fix for #72) are written in
   and marked N/A until each is merged. Each of those PRs also edits
   `docs/live-check.md`; when one lands after this, keep this version (it
   already covers their items).

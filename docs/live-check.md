@@ -81,15 +81,15 @@ Record: the plan names (not account ids) in the results header.
 
 1. In your checkout: `git switch main && git pull`, then
    `git rev-parse --short HEAD`. Record the commit.
-2. The reply judge (HL-09d, #65) is on `main`. These pull requests, open
-   when this was written, add features some steps check. For each, run
+2. The reply judge (HL-09d, #65) and the voice model setting (HL-14d, #70)
+   are on `main`. These pull requests, open when this was written, add
+   features some steps check. For each, run
    `gh pr view <n> --json state -q .state`:
 
    | PR | Adds | Steps that need it |
    | --- | --- | --- |
    | #64 (HL-22) | the `keychain` self-test line in `hotline doctor` | P13 |
    | #69 (HL-13a) | verifying every approval by pulling from Twilio and ElevenLabs | L26 |
-   | #70 (HL-14d) | the voice model setting (`voice.llm`, definition v6) | P13, L25 |
    | the fix for #72 (HL-09e) | `doctor` naming which credential the judge uses | P14 step 4 |
 
    A feature that is not merged makes its steps (or that part of a step) N/A
@@ -195,9 +195,10 @@ No `not set:` line. The secret store must be `keychain`.
 
 1. `hotline voice apply`. Expected: it creates the tool secret, the four tools
    and the agent, and ends with `ElevenLabs agent <id> is up to date; hotline
-   doctor checks it`. With #70 merged it also names the model. If ElevenLabs
+   doctor checks it`, and names the model it set (`claude-haiku-4-5` unless
+   `voice.llm` says otherwise; [voice.md](voice.md#the-model)). If ElevenLabs
    refuses the agent body, record the HTTP status the error gives
-   (`thinking_budget` and `backup_llm_config` are the fields #70 added).
+   (`thinking_budget` and `backup_llm_config` are the fields HL-14d added).
 2. Run it again: it must say the agent is up to date and create nothing new
    (the ids in the config do not change).
 3. In ElevenLabs, **Phone Numbers**, your number: set its agent to the Hotline
@@ -301,24 +302,21 @@ Expected, with no `FAIL` line (exit code 0):
 | `PASS away` | `away mode is off` |
 | `PASS claude code`, `PASS codex` | MCP server installed, both hooks with their wait and timeout, Codex `tool_timeout_sec 2100 is above the ask timeout` |
 | `PASS claude code` | `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT 2400000 ms is above the ask timeout` |
-| `PASS elevenlabs` | phone number id set; `agent definition v<N> is deployed`; all 4 Hotline tools |
+| `PASS elevenlabs` | phone number id set; `agent definition v<N> is deployed`; `the agent runs on claude-haiku-4-5`; all 4 Hotline tools |
 | `PASS webhooks` | `public URL https://<your-static-domain>/hooks/*` |
 | `PASS judge` | `claude-code: ...; only your short spoken reply is sent to it` (the backend P7 recorded); `WARN judge not chosen` means P7 answered nothing |
 | `INFO cost` | a monthly estimate |
 
 `<N>` is `AGENT_DEFINITION_VERSION` in
-`packages/providers/src/elevenlabs-agent.ts` (5 on `main` today, 6 with #70).
+`packages/providers/src/elevenlabs-agent.ts` (6 when this was written).
 A line saying the deployed agent is an older definition means P8 was skipped:
 run `hotline voice apply` again.
 
-With the open PRs merged, also:
-
-- **#64:** `PASS keychain`. This is the only place the real `/usr/bin/security`
-  runs: it adds, reads back and deletes a throwaway item (service
-  `agent-hotline-doctor-check`), never your credentials
-  ([install.md](install.md#hotline-doctor)). Record PASS, or the FAIL line's
-  step and exit codes. A timeout usually means the login Keychain was locked.
-- **#70:** `PASS elevenlabs the agent runs on claude-haiku-4-5`.
+With #64 merged, also `PASS keychain`. This is the only place the real
+`/usr/bin/security` runs: it adds, reads back and deletes a throwaway item
+(service `agent-hotline-doctor-check`), never your credentials
+([install.md](install.md#hotline-doctor)). Record PASS, or the FAIL line's
+step and exit codes. A timeout usually means the login Keychain was locked.
 
 Save the output: `hotline doctor > "$EV/doctor.txt"`. Record the doctor
 summary line (`doctor: <n> pass, <n> warn, <n> fail`) and every `WARN` line's
@@ -812,11 +810,12 @@ curl -s -o /dev/null -w '%{http_code}\n' "$D/v1/health"
 ```
 
 Expected: `403`, `403`, `403` (the post-call route has its own HMAC check),
-and anything but `200` for the last (the agent API is not on the tunnel). The audit tail shows no state change.
+and anything but `200` for the last (the agent API is not on the tunnel).
+The audit tail shows no state change.
 
 ### L25. Voice model, latency and tools
 
-HL-14d (with #70 merged) and HL-08.
+HL-14d (#70) and HL-08.
 
 1. Model: `hotline doctor` says "the agent runs on claude-haiku-4-5". In the
    ElevenLabs dashboard, the agent's LLM is Claude Haiku 4.5, thinking is off
@@ -949,7 +948,7 @@ issue (#17), and close that issue once acceptance items 4 to 6 pass.
 Date:
 Hotline commit (P2):              hotline --version:
 Claude Code:          Codex:          Node:          macOS:          ngrok:
-Features merged (P2): #64 yes/no  #69 yes/no  #70 yes/no  #72 fix yes/no
+Features merged (P2): #64 yes/no  #69 yes/no  #72 fix yes/no
 Plans: Twilio (upgraded) yes/no; ElevenLabs plan:
 Voice: library / clone / default      Voice model (doctor):
 Agent definition (doctor):            Reply judge (P7, P12): backend or off; judge credential (P14): login / API key
