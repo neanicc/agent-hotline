@@ -150,8 +150,29 @@ fine). The daemon package implements it:
   `0700` directory. A file other users can access is refused.
 - `openSecretStore` picks one from `config.secrets.store` and the platform.
 
+Both the config and the secrets file are read and written only when neither the
+file nor its directory is a symlink, both belong to the current user, the file
+has no group or other permission bits (`0600`), and the directory has none
+either (`0700`). Hotline refuses rather than repairs: the error names the path
+and the `chmod` to run. A Keychain store failure reports only `security`'s exit
+code, because interactive mode can echo the command and its hex-encoded value.
+
 Tests use an injected fake `security` and temporary directories; they never touch
 the real Keychain or home directory.
+
+**Known limitation: same-user access.** Neither store protects secrets from other
+processes running as the owner's own user account, coding agents included. A
+Keychain item that `/usr/bin/security` added lists that binary as trusted, so any
+same-user process can run `security find-generic-password -s agent-hotline -a <name> -w`
+and read it without a prompt. The `0600` file is just as readable to that user.
+The stores protect against other accounts and against secrets landing in the
+repository, config or process lists, not against the owner's own processes. This
+does not let an agent approve anything: decisions come only from the owner's own
+words on the owner's phone, high-risk approvals also need the PIN or a confirming
+text, and the PIN is stored only as a scrypt hash. An agent holding the Twilio or
+ElevenLabs keys could still place calls or texts on the owner's account, or forge
+a provider webhook to the daemon. The daemon token likewise lets an agent talk to
+the local API, which it is meant to do.
 
 ## Hook payloads (`hooks.ts`)
 

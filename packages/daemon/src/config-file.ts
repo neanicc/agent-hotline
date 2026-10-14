@@ -2,7 +2,7 @@
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { type Config, ConfigError, parseConfigText } from "@hotline/core";
-import { privateFileProblem, statIfExists } from "./private-file.js";
+import { privatePathProblem } from "./private-file.js";
 
 export interface HotlinePaths {
   /** Directory holding Hotline's local state. */
@@ -35,9 +35,8 @@ export function hotlinePaths({ env, homeDir }: PathOptions): HotlinePaths {
  * missing, readable by other users, or invalid; the message never quotes the file.
  */
 export async function loadConfig(path: string): Promise<Config> {
-  const info = await statIfExists(path);
-  if (info === undefined) throw new ConfigError(`No hotline config at ${path}; run "hotline init"`, []);
-  const problem = privateFileProblem(info);
+  const problem = await privatePathProblem(path);
+  if (problem === "missing") throw new ConfigError(`No hotline config at ${path}; run "hotline init"`, []);
   if (problem !== undefined) throw new ConfigError(`Hotline config ${path} ${problem}`, []);
   return parseConfigText(await readFile(path, "utf8"));
 }

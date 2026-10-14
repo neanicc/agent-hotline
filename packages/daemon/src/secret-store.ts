@@ -10,7 +10,7 @@ import {
   SecretStoreError,
   SecretValue,
 } from "@hotline/core";
-import { privateFileProblem, statIfExists, writePrivateFile } from "./private-file.js";
+import { privatePathProblem, writePrivateFile } from "./private-file.js";
 
 export interface ExecResult {
   exitCode: number;
@@ -50,6 +50,11 @@ export const SECURITY_PATH = "/usr/bin/security";
 export const KEYCHAIN_SERVICE = "agent-hotline";
 /** errSecItemNotFound, which `security` returns as its exit status. */
 const ITEM_NOT_FOUND = 44;
+
+/** Masks every run of 8 or more hex digits, the encoding `set` sends secrets in. */
+export function redactHex(text: string): string {
+  return text.replace(/[0-9a-fA-F]{8,}/g, "[redacted]");
+}
 
 function checkValue(value: string): void {
   if (!SecretValue.safeParse(value).success) {
@@ -91,10 +96,20 @@ export class KeychainSecretStore implements SecretStore {
     const hex = Buffer.from(value, "utf8").toString("hex");
     const command = `add-generic-password -U -s ${this.service} -a ${name} -X ${hex}\n`;
     const result = await this.exec(SECURITY_PATH, ["-i"], command);
+    // Interactive mode can echo the failing command, which carries the hex-encoded
+    // secret, so a store failure reports the exit code only and never security's output.
+    const failed = new SecretStoreError(
+      `Could not store ${name} in the Keychain (security exit ${result.exitCode})`,
+    );
+    if (result.exitCode !== 0) throw failed;
     // Interactive mode can exit 0 after a failed command, so the read-back is the real check.
-    if (result.exitCode !== 0 || (await this.get(name)) !== value) {
-      throw this.failure("store", name, result);
+    let stored: string | undefined;
+    try {
+      stored = await this.get(name);
+    } catch {
+      throw failed;
     }
+    if (stored !== value) throw failed;
   }
 
   async delete(name: SecretName): Promise<void> {
@@ -109,9 +124,11 @@ export class KeychainSecretStore implements SecretStore {
       throw this.failure("delete", name, result);
   }
 
-  // stderr from `security` describes the error, never the secret; stdout is never included.
-  private failure(action: string, name: SecretName, result: ExecResult): SecretStoreError {
-    const detail = result.stderr.trim().split("\n")[0] ?? "";
+  // For reads and deletes only; stores never pass security's output on. stdout (where
+  // find -w prints the secret) is never included, and long hex runs in stderr are
+  // masked as a second line of defence.
+  private failure(action: "read" | "delete", name: SecretName, result: ExecResult): SecretStoreError {
+    const detail = redactHex(result.stderr.trim().split("\n")[0] ?? "");
     return new SecretStoreError(
       `Could not ${action} ${name} in the Keychain (security exit ${result.exitCode}${detail ? `: ${detail}` : ""})`,
     );
@@ -142,9 +159,8 @@ export class FileSecretStore implements SecretStore {
   }
 
   private async read(): Promise<SecretFile> {
-    const info = await statIfExists(this.path);
-    if (info === undefined) return { version: 1, secrets: {} };
-    const problem = privateFileProblem(info);
+    const problem = await privatePathProblem(this.path);
+    if (problem === "missing") return { version: 1, secrets: {} };
     if (problem !== undefined) throw new SecretStoreError(`Secrets file ${this.path} ${problem}`);
     let decoded: unknown;
     try {
@@ -159,7 +175,12 @@ export class FileSecretStore implements SecretStore {
   }
 
   private async write(file: SecretFile): Promise<void> {
-    await writePrivateFile(this.path, `${JSON.stringify(file, null, 2)}\n`);
+    try {
+      await writePrivateFile(this.path, `${JSON.stringify(file, null, 2)}\n`);
+    } catch (error) {
+      // writePrivateFile's own messages name paths only; fs errors name paths and codes.
+      throw new SecretStoreError(`Could not write secrets file: ${(error as Error).message}`);
+    }
   }
 }
 

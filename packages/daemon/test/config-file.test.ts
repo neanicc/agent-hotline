@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConfigError } from "@hotline/core";
@@ -64,6 +64,33 @@ describe("loadConfig", () => {
     await expect(loadConfig(path)).rejects.toThrow(/chmod 600/);
   });
 
+  it.skipIf(process.platform === "win32")(
+    "refuses a config in a directory other users can access",
+    async () => {
+      const { home, config } = hotlinePaths({ env: {}, homeDir: dir });
+      await writePrivateFile(config, JSON.stringify(CONFIG));
+      for (const mode of [0o755, 0o770, 0o701]) {
+        await chmod(home, mode);
+        await expect(loadConfig(config), mode.toString(8)).rejects.toThrow(/directory .*chmod 700/);
+      }
+    },
+  );
+
+  it.skipIf(process.platform === "win32")("refuses a symlinked config or config directory", async () => {
+    const target = join(dir, "real-config.json");
+    await writeFile(target, JSON.stringify(CONFIG), { mode: 0o600 });
+    const home = join(dir, ".hotline");
+    await mkdir(home, { mode: 0o700 });
+    await symlink(target, join(home, "config.json"));
+    await expect(loadConfig(join(home, "config.json"))).rejects.toThrow(/symbolic link/);
+
+    const realHome = join(dir, "real-home");
+    await mkdir(realHome, { mode: 0o700 });
+    await writePrivateFile(join(realHome, "config.json"), JSON.stringify(CONFIG));
+    await symlink(realHome, join(dir, "linked-home"));
+    await expect(loadConfig(join(dir, "linked-home", "config.json"))).rejects.toThrow(/symbolic link/);
+  });
+
   it("reports invalid content without quoting it", async () => {
     const path = join(dir, "config.json");
     await writePrivateFile(path, JSON.stringify({ ...CONFIG, elevenlabsApiKey: "fake-key-should-not-echo" }));
@@ -85,5 +112,24 @@ describe("writePrivateFile", () => {
     expect((await stat(home)).mode & 0o777).toBe(0o700);
     expect((await stat(path)).mode & 0o777).toBe(0o600);
     expect(await readdir(home)).toEqual(["config.json"]);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "refuses an existing directory other users can access",
+    async () => {
+      const home = join(dir, "shared");
+      await mkdir(home, { mode: 0o700 });
+      await chmod(home, 0o777);
+      await expect(writePrivateFile(join(home, "config.json"), "x")).rejects.toThrow(/mode 777.*chmod 700/);
+      expect(await readdir(home)).toEqual([]);
+    },
+  );
+
+  it.skipIf(process.platform === "win32")("does not write through a symlink", async () => {
+    const target = join(dir, "target.txt");
+    await writeFile(target, "original", { mode: 0o600 });
+    await symlink(target, join(dir, "config.json"));
+    await expect(writePrivateFile(join(dir, "config.json"), "replaced")).rejects.toThrow(/symbolic link/);
+    expect(await readFile(target, "utf8")).toBe("original");
   });
 });

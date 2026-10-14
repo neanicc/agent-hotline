@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SecretStoreError } from "@hotline/core";
@@ -27,7 +27,7 @@ interface Call {
  * documented commands: find-generic-password -w prints the password, a missing
  * item exits 44, and `-i` reads commands from stdin.
  */
-function fakeSecurity(options: { failAdd?: boolean; addExit?: number } = {}) {
+function fakeSecurity(options: { failAdd?: boolean; addExit?: number; echoCommand?: boolean } = {}) {
   const items = new Map<string, string>();
   const calls: Call[] = [];
   const result = (exitCode: number, stdout = "", stderr = ""): ExecResult => ({ exitCode, stdout, stderr });
@@ -54,7 +54,9 @@ function fakeSecurity(options: { failAdd?: boolean; addExit?: number } = {}) {
         if (line[0] !== "add-generic-password" || !line.includes("-U"))
           return result(0, "", "unknown command\n");
         if (!options.failAdd) items.set(key(line), Buffer.from(flag(line, "-X"), "hex").toString("utf8"));
-        return result(options.addExit ?? 0);
+        // Interactive mode may echo the failing command, hex secret included.
+        const stderr = options.echoCommand ? `security> ${input ?? ""}add-generic-password: failed\n` : "";
+        return result(options.addExit ?? 0, options.echoCommand ? `security> ${input ?? ""}` : "", stderr);
       }
       default:
         return result(1, "", "unexpected\n");
@@ -103,6 +105,54 @@ describe("KeychainSecretStore", () => {
       expect(error).toBeInstanceOf(SecretStoreError);
       expect((error as Error).message).toMatch(/Could not store twilio.authToken/);
       expect((error as Error).message).not.toContain(SECRET);
+    }
+  });
+
+  it("never passes security's output on when a store fails, even if it echoes the command", async () => {
+    const hex = Buffer.from(SECRET).toString("hex");
+    const cases = [
+      { echoCommand: true, addExit: 1 },
+      { echoCommand: true, failAdd: true },
+      { echoCommand: true, failAdd: true, addExit: 1 },
+    ];
+    for (const options of cases) {
+      const error = await new KeychainSecretStore(fakeSecurity(options).exec)
+        .set("twilio.authToken", SECRET)
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(SecretStoreError);
+      const message = (error as Error).message;
+      expect(message).toMatch(/^Could not store twilio\.authToken in the Keychain \(security exit \d+\)$/);
+      expect(message).not.toContain(SECRET);
+      expect(message).not.toContain(hex);
+      expect(message).not.toContain(hex.slice(0, 8));
+    }
+  });
+
+  it("hides security's output when the read-back itself fails", async () => {
+    const hex = Buffer.from(SECRET).toString("hex");
+    const exec: Exec = async (_file, args, input) =>
+      args[0] === "-i"
+        ? { exitCode: 0, stdout: "", stderr: "" }
+        : { exitCode: 51, stdout: SECRET, stderr: `security: failed after ${input ?? ""}${hex}\n` };
+    const error = await new KeychainSecretStore(exec)
+      .set("twilio.authToken", SECRET)
+      .catch((e: unknown) => e);
+    expect((error as Error).message).toBe(
+      "Could not store twilio.authToken in the Keychain (security exit 0)",
+    );
+  });
+
+  it("masks long hex runs in read and delete errors and never includes stdout", async () => {
+    const hex = Buffer.from(SECRET).toString("hex");
+    const exec: Exec = async () => ({ exitCode: 51, stdout: SECRET, stderr: `security: bad item ${hex}\n` });
+    for (const attempt of [
+      new KeychainSecretStore(exec).get("daemon.apiToken"),
+      new KeychainSecretStore(exec).delete("daemon.apiToken"),
+    ]) {
+      const message = ((await attempt.catch((e: unknown) => e)) as Error).message;
+      expect(message).toMatch(/security exit 51: security: bad item \[redacted\]/);
+      expect(message).not.toContain(SECRET);
+      expect(message).not.toContain(hex.slice(0, 8));
     }
   });
 
@@ -170,6 +220,32 @@ describe("FileSecretStore", () => {
     await expect(store.get("twilio.authToken")).rejects.toThrow(/chmod 600/);
     await expect(store.set("daemon.apiToken", "x")).rejects.toThrow(SecretStoreError);
   });
+
+  it.skipIf(process.platform === "win32")("refuses a secrets directory other users can access", async () => {
+    const store = new FileSecretStore(path);
+    await store.set("twilio.authToken", SECRET);
+    await chmod(join(dir, ".hotline"), 0o755);
+    await expect(store.get("twilio.authToken")).rejects.toThrow(/directory .*mode 755.*chmod 700/);
+    const error = await store.set("daemon.apiToken", "fake-daemon-token").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(SecretStoreError);
+    expect((error as Error).message).toMatch(/chmod 700/);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "refuses a symlinked secrets file and leaves its target alone",
+    async () => {
+      const target = join(dir, "elsewhere.json");
+      await writeFile(target, JSON.stringify({ version: 1, secrets: { "twilio.authToken": SECRET } }), {
+        mode: 0o600,
+      });
+      await mkdir(join(dir, ".hotline"), { mode: 0o700 });
+      await symlink(target, path);
+      const store = new FileSecretStore(path);
+      await expect(store.get("twilio.authToken")).rejects.toThrow(/symbolic link/);
+      await expect(store.set("daemon.apiToken", "fake-daemon-token")).rejects.toThrow(/symbolic link/);
+      expect(JSON.parse(await readFile(target, "utf8")).secrets).toEqual({ "twilio.authToken": SECRET });
+    },
+  );
 
   it("reports a corrupt file without quoting it", async () => {
     const store = new FileSecretStore(path);

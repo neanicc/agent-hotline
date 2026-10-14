@@ -86,8 +86,24 @@ Template:
   validates the Codex fixtures against them. Hook inputs are parsed loosely and
   outputs strictly: Hotline never sends `updatedInput`, `updatedPermissions`, or
   `interrupt` to Codex.
+- Security changes (from review): a Keychain store failure reports `security`'s
+  exit code only, because interactive mode can echo the command with the hex
+  value. Read and delete errors mask hex runs of 8 or more characters and never
+  include stdout. The config and secrets file are opened with `lstat`, so a
+  symlinked file or directory is refused. Their directory must belong to the user
+  and have no group or other bits (`0700`), and an existing wider directory is
+  refused with the `chmod 700` to run, not silently fixed.
+- Known limitation: same-user processes, coding agents included, can read every
+  secret. The `security` binary that added a Keychain item is on that item's
+  trusted list, so `security find-generic-password -w` reads it without a prompt.
+  The `0600` file is equally readable to the same user. This cannot make an
+  approval happen: decisions come only from the owner's own words or keypresses on
+  the owner's phone, high-risk approvals also need the PIN or a confirming text,
+  and the PIN is stored only as a scrypt hash. It does mean an agent could misuse
+  the provider keys, by placing calls or texts or forging provider webhooks.
+  Documented in `docs/contracts.md`.
 - Evidence (automated, worktree, Node 22.23.1 and 24.11.0): `run.sh setup`,
-  `build` and `test` pass, with 97 tests in 12 files. Tests use temporary
+  `build` and `test` pass, with 106 tests in 12 files. Tests use temporary
   directories and a fake `security`. `nodeExec` is exercised only by running Node
   itself. No scenario suite exists yet (HL-12). No real agent or live call evidence
   applies.
@@ -96,4 +112,10 @@ Template:
   stored text. The read-back makes a wrong assumption fail loudly instead of
   silently. Check it once by hand (HL-11 `hotline doctor` is a natural place).
   Recheck the fixtures against `claude --version` and `codex --version` before
-  HL-06 golden tests rely on them. Neither docs page carries a version.
+  HL-06 golden tests rely on them. Neither docs page carries a version. On the
+  same-user limitation, the cheap mitigation is for `hotline init` and the docs
+  (HL-11, HL-14) to recommend a narrowly scoped ElevenLabs API key (Agents and
+  outbound calls only) and to keep Twilio credentials to what SMS and signature
+  checks need. Putting the provider calls behind a separately signed helper with
+  its own Keychain access list would close the gap. That is Tier 2 work, not a
+  Tier 1 ticket.
