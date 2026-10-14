@@ -56,7 +56,7 @@ const FILLER = ["um", "uh", "er", "oh", "well", "so", "and", "then", "please", "
 
 const words = (text: string) => text.toLowerCase().match(/[\p{L}\p{N}']+/gu) ?? [];
 
-describe("voice reply fast path fuzzing", () => {
+describe("voice reply fast path fuzzing", { timeout: 60_000 }, () => {
   it("never agrees with a reply that holds a refusal, negation, condition or hedge", () => {
     const reply = fc
       .tuple(
@@ -114,7 +114,7 @@ describe("voice reply fast path fuzzing", () => {
 // The model-backed judge (HL-09d) decides replies the fast path cannot. Its
 // "agreed" passes a post-check that only takes approvals away: whatever the
 // model says, a reply with a condition, correction or negation is not agreed.
-describe("reply judge post-check fuzzing", () => {
+describe("reply judge post-check fuzzing", { timeout: 60_000 }, () => {
   const VETOED = [
     "if the tests pass",
     "but not on main",

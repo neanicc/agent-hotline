@@ -88,10 +88,38 @@ const KNOWN_TOKENS: readonly RegExp[] = [
   /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, // AWS access key ids
   /\bxox[abprs]-[A-Za-z0-9-]{10,}/g, // Slack tokens
   /\b(?:AC|SK)[0-9a-f]{32}\b/g, // Twilio account and API key SIDs
-  // JWTs. Not after a token character: with `\b`, every `eyJ` in `eyJ-eyJ-...`
-  // started a scan to the end of the run, which was quadratic (HL-13 fuzzing).
-  /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/g,
 ];
+
+/** A run of the characters JWTs (and dotted tokens around them) are made of. */
+const TOKEN_RUN = /[A-Za-z0-9_.-]+/g;
+
+/**
+ * Whether a run holds a JWT: `eyJ` and at least 5 more characters, then two
+ * dot-separated parts of at least 5 characters. This replaces a regex whose
+ * scan from every `eyJ` in `eyJ-eyJ-...` was quadratic (HL-13 fuzzing): the run
+ * is split once, and each part is searched once. Like `\beyJ`, it finds a JWT
+ * after `-` or any other character, and fails closed by removing the whole run.
+ */
+function holdsJwt(run: string): boolean {
+  if (!run.includes("eyJ")) return false;
+  const parts = run.split(".");
+  for (let i = 0; i + 2 < parts.length; i++) {
+    const part = parts[i] ?? "";
+    const at = part.indexOf("eyJ");
+    if (
+      at !== -1 &&
+      part.length - at >= 8 &&
+      (parts[i + 1] ?? "").length >= 5 &&
+      (parts[i + 2] ?? "").length >= 5
+    )
+      return true;
+  }
+  return false;
+}
+
+function removeJwts(text: string): string {
+  return text.replace(TOKEN_RUN, (run) => (holdsJwt(run) ? REDACTED : run));
+}
 
 /**
  * Long runs of letters and digits look like keys or tokens (a Twilio auth token is
@@ -166,13 +194,18 @@ function withoutEscapes(text: string): string {
   return text.replace(/\\[\s\S]/g, "");
 }
 
-/** The quote a segment leaves open (an odd number of unescaped `"`, else of `'`), if any. */
+/**
+ * The quote a segment leaves open, if any, read left to right: a quote opens
+ * only outside quotes and closes only the quote it opened, so the `'` in
+ * `"ab'cd"` opens nothing (the review on #77).
+ */
 function unclosedQuote(segment: string): string | undefined {
-  const unescaped = withoutEscapes(segment);
-  for (const quote of ['"', "'"]) {
-    if (unescaped.split(quote).length % 2 === 0) return quote;
+  let open: string | undefined;
+  for (const char of withoutEscapes(segment)) {
+    if (open === undefined && (char === '"' || char === "'")) open = char;
+    else if (char === open) open = undefined;
   }
-  return undefined;
+  return open;
 }
 
 function escapeRegExp(text: string): string {
@@ -232,6 +265,7 @@ export function createRedactor(knownSecrets: Iterable<string> = []): Redactor {
     SECRET_ASSIGNMENT_TEST.test(segment) ||
     AUTH_SCHEME_TEST.test(segment) ||
     KNOWN_TOKENS.some((pattern) => new RegExp(pattern.source).test(segment)) ||
+    removeJwts(segment) !== segment ||
     (exact !== undefined && new RegExp(exact.source).test(segment)) ||
     removeShortSecrets(segment) !== segment;
 
@@ -279,6 +313,7 @@ export function createRedactor(knownSecrets: Iterable<string> = []): Redactor {
       return closed ? `${name}${quote}${REDACTED}${quote}` : `${name}${REDACTED}`;
     });
     for (const pattern of KNOWN_TOKENS) out = out.replace(pattern, REDACTED);
+    out = removeJwts(out);
     out = out.replace(OPAQUE_RUN, (run) =>
       run !== REDACTED && hasLetterAndDigit(run) && !NOT_SECRET_IDS.test(run) ? REDACTED : run,
     );

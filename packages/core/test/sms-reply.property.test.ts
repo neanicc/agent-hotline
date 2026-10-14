@@ -65,7 +65,7 @@ const vocabulary = (expected: string) =>
     "\n",
   );
 
-describe("text reply fuzzing", () => {
+describe("text reply fuzzing", { timeout: 60_000 }, () => {
   it("approves only a clear yes followed by the request's own code", () => {
     fc.assert(
       fc.property(

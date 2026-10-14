@@ -16,6 +16,8 @@ import { describe, expect, it } from "vitest";
 import { createRedactor, MAX_REDACTED_TEXT } from "../src/index.js";
 import { linearTime } from "./linear-time.js";
 
+/** Thousands of runs per property: generous under a loaded machine; idle they take well under a second. */
+const FUZZ_TIMEOUT_MS = 60_000;
 /** The shortest piece of a secret that counts as a leak. */
 const WINDOW = 6;
 const PLACEHOLDER = "\u0000";
@@ -130,7 +132,7 @@ const PLAIN_NAMES = ["voiceId", "note", "detail", "agent", "conversation"];
 
 // ---------------------------------------------------------------------------
 
-describe("redactor fuzzing: secrets", () => {
+describe("redactor fuzzing: secrets", { timeout: FUZZ_TIMEOUT_MS }, () => {
   it("removes a registered secret wherever it is embedded, raw or encoded", () => {
     fc.assert(
       fc.property(
@@ -205,9 +207,50 @@ describe("redactor fuzzing: secrets", () => {
       { numRuns: 5000 },
     );
   });
+
+  it("removes every value when several secret-looking fields share one JSON object", () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.tuple(fc.constantFrom(...SECRET_NAMES), stringOf(PRINTABLE, 8, 30)), {
+          minLength: 2,
+          maxLength: 4,
+        }),
+        (fields) => {
+          const object = Object.fromEntries(fields.map(([name, value], i) => [`${name}${i}`, value]));
+          const text = JSON.stringify({ voice: "Rachel", ...object, note: "done" });
+          const template = JSON.stringify({
+            voice: "Rachel",
+            ...Object.fromEntries(fields.map(([name], i) => [`${name}${i}`, PLACEHOLDER])),
+            note: "done",
+          });
+          const forms = fields.flatMap(([, value]) => [value, JSON.stringify(value).slice(1, -1)]);
+          const output = createRedactor().text(text);
+          expect(leaks(output, template, forms), JSON.stringify({ text, output })).toEqual([]);
+        },
+      ),
+      { numRuns: 5000 },
+    );
+  });
+
+  // Found by Greptile on #77: an apostrophe inside a closed JSON string was
+  // taken for an open quote, so the next field's name went and its tail stayed.
+  it("removes a later quoted secret after an encoded field with an apostrophe", () => {
+    const output = createRedactor().text('{"token":"ab\'cd+","password":"ef\'gh,remaining-secret"}');
+    expect(output).not.toContain("remaining");
+    expect(output).not.toContain("ef'gh");
+  });
+
+  // Found by Greptile on #77: anchoring the JWT pattern after non-token
+  // characters let a JWT after `-` through.
+  it.each(["value -", "x-", "a.", "_", ""])("removes a JWT after %j", (prefix) => {
+    const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJlZmFrZQ";
+    const output = createRedactor().text(`${prefix}${jwt} end`);
+    for (const part of jwt.split(".")) expect(output).not.toContain(part);
+    expect(output.endsWith(" end")).toBe(true);
+  });
 });
 
-describe("redactor fuzzing: PINs and phone numbers", () => {
+describe("redactor fuzzing: PINs and phone numbers", { timeout: FUZZ_TIMEOUT_MS }, () => {
   const pin = fc.stringMatching(/^\d{4,8}$/);
 
   it("never lets a registered PIN through, in any format or in random text", () => {
@@ -286,7 +329,7 @@ describe("redactor fuzzing: PINs and phone numbers", () => {
   });
 });
 
-describe("redactor fuzzing: linear time", () => {
+describe("redactor fuzzing: linear time", { timeout: FUZZ_TIMEOUT_MS }, () => {
   const known = createRedactor(["plainword-secret"]);
   known.addShortSecret("4821");
   const piece = fc.constantFrom(

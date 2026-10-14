@@ -125,21 +125,22 @@ cap. Gaps it found, all failing safe (none approves anything), are listed under
 
 | File | Property | Bugs it found, fixed failing closed |
 | --- | --- | --- |
-| `packages/daemon/test/redact.property.test.ts` | Random registered secrets, values under secret-looking names, PINs and fake phone numbers embedded in JSON, nested JSON, form-encoded, URL query, `.env` (quoted, unquoted, `export`), YAML, HTTP-header and logfmt text never leave a 6-character piece in the output; random 16 KiB hostile shapes are redacted in linear time | A value after an encoded segment that opened a quote (`"token":"+,rest"`) kept its tail; an unquoted value stopped at a quote (`token=a'rest`); the JWT pattern was quadratic on `eyJ-eyJ-...` |
+| `packages/daemon/test/redact.property.test.ts` | Random registered secrets, values under secret-looking names, PINs and fake phone numbers embedded in JSON, nested JSON, form-encoded, URL query, `.env` (quoted, unquoted, `export`), YAML, HTTP-header and logfmt text never leave a 6-character piece in the output; random 16 KiB hostile shapes are redacted in linear time | A value after an encoded segment that opened a quote (`"token":"+,rest"`) kept its tail; an unquoted value stopped at a quote (`token=a'rest`); the JWT pattern was quadratic on `eyJ-eyJ-...` (now a linear scan of each run of token characters, which still finds a JWT after `-`) |
 | `packages/core/test/permission-risk.property.test.ts` | Obfuscated variants of 50+ high-risk commands (wrappers, quoting, `$'...'`, `${...}`, braces, globs, case, fullwidth and Cyrillic lookalikes, zero-width and no-break spaces, absolute command paths, attached option values, `cd`, environment prefixes, NFD) never classify as low; Codex argv arrays likewise; for random command lines the classifier calls low, `bash -n` and `zsh -n` must accept them and zsh's own word split (`${(z)...}`, the command passed as data, never run) must match `splitShell` | `git show HEAD:.env` was low (a revision's `:` was not a path boundary); `; ls`, `ls ;;` and `ls\n;` were low though bash refuses them; `ls &>>x` was low though macOS's bash 3.2 refuses it; `rg` options were a denylist, so `--hostname-bin` (runs a program) and unknown options were low |
 | `packages/core/test/sms-reply.property.test.ts` | Random and word-salad texts approve only as `<yes word> <that request's code>`; nothing approves when no code was sent; conditional, negated, hedged or wrong-code yeses never approve | none |
 | `packages/daemon/test/voice-reply.property.test.ts` | The voice fast path never agrees with a reply holding a refusal, negation, condition or hedge, in one turn or split across turns; a random reply it agrees with has no doubt marker; whatever the model judge says, a reply with a condition, correction or negation is never agreed | none |
 | `packages/daemon/test/exposure.test.ts` | The exposure audit above | none |
 
-The timing checks use `test/linear-time.ts`, which compares timings taken side
-by side (the fastest of seven interleaved runs each), so load slows both sides
-alike: hostile text against benign text of the same length (at most 100 times
-slower), and the full hostile text against its first quarter (at most 8 times
-longer; linear work grows about 4 times, quadratic about 16). A check fails
-only when both say quadratic. On the dev Mac benign 16 KiB takes about 0.19 ms,
-the slowest linear hostile shapes 40 to 50 times that, and the quadratic
-pattern HL-04 removed about 440 times. The old "under 50 ms" checks, which
-flaked under parallel load, now use the same helper.
+The timing checks use `test/linear-time.ts`. Each measurement is the fastest
+of seven interleaved runs, and one of up to five attempts must meet all three
+bounds: the old one (the full 16 KiB in under 50 ms), hostile text at most 100
+times slower than benign text of the same length, and the full hostile text at
+most 8 times slower than its first quarter (linear work grows about 4 times,
+quadratic about 16). So the old guarantee stands, and a quadratic pass that
+happens to stay under 50 ms still fails on growth; what changed is only that
+one unlucky timed run under parallel load no longer fails the check. On the dev
+Mac benign 16 KiB takes about 0.19 ms, the slowest linear hostile shapes 40 to
+50 times that, and the quadratic pattern HL-04 removed about 440 times.
 
 The bash differential only checks syntax, since bash has no way to split words
 without running them. zsh is not installed on Ubuntu runners, so there the zsh

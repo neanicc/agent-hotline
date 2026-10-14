@@ -218,7 +218,7 @@ const obfuscated = fc
     return lines.reduce((line, rewrite) => rewrite(line), words.join(" "));
   });
 
-describe("permission classifier: obfuscated high-risk commands", () => {
+describe("permission classifier: obfuscated high-risk commands", { timeout: 60_000 }, () => {
   it.each(HIGH.map((words) => words.join(" ")))("classifies the base command `%s` as high", (command) => {
     expect(classify(command).risk).toBe("high");
   });
@@ -431,33 +431,37 @@ const line = fc
   )
   .map(([first, rest, trailing]) => `${first}${rest.map(([op, cmd]) => `${op}${cmd}`).join("")}${trailing}`);
 
-describe.skipIf(BASH === undefined && ZSH === undefined)("permission classifier: parser differential", () => {
-  it("only calls a command line low when bash and zsh parse it, and zsh splits it the same way", () => {
-    let low = 0;
-    fc.assert(
-      fc.property(line, (command) => {
-        if (classify(command).risk !== "low") return;
-        low++;
-        const context = JSON.stringify(command);
-        if (BASH !== undefined) expect(parses(BASH, command), `bash -n: ${context}`).toBe(true);
-        if (ZSH !== undefined) {
-          expect(parses(ZSH, command), `zsh -n: ${context}`).toBe(true);
-          expect(zshShape(command), `zsh (z): ${context}`).toEqual(splitShape(command));
-        }
-      }),
-      { numRuns: 400 },
-    );
-    // The generator must reach low verdicts, or this compares nothing.
-    expect(low).toBeGreaterThan(20);
-  });
+describe.skipIf(BASH === undefined && ZSH === undefined)(
+  "permission classifier: parser differential",
+  { timeout: 120_000 },
+  () => {
+    it("only calls a command line low when bash and zsh parse it, and zsh splits it the same way", () => {
+      let low = 0;
+      fc.assert(
+        fc.property(line, (command) => {
+          if (classify(command).risk !== "low") return;
+          low++;
+          const context = JSON.stringify(command);
+          if (BASH !== undefined) expect(parses(BASH, command), `bash -n: ${context}`).toBe(true);
+          if (ZSH !== undefined) {
+            expect(parses(ZSH, command), `zsh -n: ${context}`).toBe(true);
+            expect(zshShape(command), `zsh (z): ${context}`).toEqual(splitShape(command));
+          }
+        }),
+        { numRuns: 400 },
+      );
+      // The generator must reach low verdicts, or this compares nothing.
+      expect(low).toBeGreaterThan(20);
+    });
 
-  it.each(["ls ;;", "; ls", "ls\n;", "ls ; ; cat a.txt", "ls &>>out.txt"])(
-    "never calls `%s` low, which a shell reads differently or refuses",
-    (command) => {
-      expect(classify(command).risk).toBe("high");
-    },
-  );
-});
+    it.each(["ls ;;", "; ls", "ls\n;", "ls ; ; cat a.txt", "ls &>>out.txt"])(
+      "never calls `%s` low, which a shell reads differently or refuses",
+      (command) => {
+        expect(classify(command).risk).toBe("high");
+      },
+    );
+  },
+);
 
 // ---------------------------------------------------------------------------
 // 3. The positive rg option list against the installed rg's help (when there is one)

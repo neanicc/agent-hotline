@@ -2897,16 +2897,25 @@ Template:
   list; `--hostname-bin` runs a program); the redactor left the tail of a quoted
   value after a removed encoded segment (`"token":"+,rest"`), stopped an unquoted
   value at a quote (`token=a'rest`), and its JWT pattern was quadratic on
-  `eyJ-eyJ-...` (now anchored after a non-token character).
-- Decision: linear-time checks replace the absolute 50 ms, which flaked under
-  load (HL-10), with two side-by-side measures (fastest of 7 interleaved runs):
-  hostile against benign text of the same length (at most 100x) and the full
-  hostile text against its first quarter (at most 8x; linear grows about 4x,
-  quadratic about 16x). A check fails only when both say quadratic: with the
-  ratio alone, a linear `%E0,9` shape (about 50x idle) once crossed 100x in a
-  full parallel run. Measured on the dev Mac: benign 16 KiB about 0.19 ms; the
-  quadratic truncation HL-04 removed about 440x; the old 50 ms was about 270x.
-  Restoring that truncation or the old JWT pattern still fails the checks.
+  `eyJ-eyJ-...` (now a linear scan of each run of token characters).
+- Decision: the linear-time checks keep the old 50 ms bound and add two
+  side-by-side measures: hostile against benign text of the same length (at
+  most 100x) and the full hostile text against its first quarter (at most 8x;
+  linear grows about 4x, quadratic about 16x). Each measurement is the fastest
+  of 7 interleaved runs, and one of up to 5 attempts must meet all three. That
+  stops one unlucky timed run from failing (the HL-10 flake) without loosening
+  the bound. A first version passed when either measure did; Greptile flagged
+  that as weaker than 50 ms on #77, so it now needs all three. Measured on the
+  dev Mac: benign 16 KiB about 0.19 ms, slowest linear shapes 40 to 50x, the
+  quadratic truncation HL-04 removed about 440x. Restoring that truncation
+  still fails. Fuzz suites get a 60 s timeout (120 s for the shell
+  differential): one full run at load average 20 timed out 18 unrelated tests
+  and two fuzz tests, while 9 runs at load 12 or less all passed.
+- Review fixes (Greptile on #77): the quoted carry-over now tracks the quote
+  that is actually open (an apostrophe inside `"ab'cd+"` opened a false quote
+  and let `"password":"ef'gh,rest"` keep its tail), and the JWT check no longer
+  skips a JWT after `-`. Both have regression tests, plus a fuzz property with
+  several secret fields in one JSON object. Reverting either fix fails them.
 - Decision: the default webhook body read before verification drops from
   256 KiB to 64 KiB (P3 from the HL-07 review); post-call keeps its own 1 MiB.
 - Decision: a bare "no" to a stop ask stays `done` (P3 from HL-07): the agent
@@ -2916,14 +2925,16 @@ Template:
 - Mutation checks, each reverted: dropping the `:` boundary, skipping attached
   option values, accepting a leading `;`, and corrupting quoted words each fail
   the classifier properties (the last one only the zsh word-split comparison);
-  dropping the quoted continuation, restoring `\beyJ`, restoring the quadratic
+  dropping the quoted continuation, restoring the quadratic JWT pattern
+  (`\beyJ`, before the run scan replaced it), restoring the quadratic
   truncation, and disabling registered-secret, PIN and phone passes each fail a
   redactor test; approving a text yes without its code or with trailing words
   fails the text-reply fuzz; ignoring doubt words fails the voice fuzz; dropping `vetoesAgreement` from `checkedVerdict` fails the reply-judge fuzz (HL-09d, merged during this ticket); a token
   bypass on one route and an extra route outside `/hooks` fail the exposure
   audit; restoring 256 KiB fails the body-limit test.
 - Evidence: `scripts/ci/run.sh build` passes; `scripts/ci/run.sh test` passed
-  6 runs in a row after catching up with main (68 files, 1935 tests). The scenario suite stage could not be
+  6 runs in a row after catching up with main (68 files, 1935 tests), and 3
+  more after the review fixes (1954 passed, 2 skipped). The scenario suite stage could not be
   run locally (the sandbox refuses command lines containing its stage name);
   hosted CI is the gate.
 - Deferred (needs #69, HL-13a, which changes the same files): persist the PIN
