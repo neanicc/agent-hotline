@@ -94,7 +94,7 @@ arguments:
 
 | Command | Allowed when |
 | --- | --- |
-| `ls`, `pwd`, `cat`, `head`, `tail`, `wc`, `grep`, `egrep`, `fgrep`, `rg`, `find`, `echo`, `diff`, `du`, `tree` | Every argument that is not an option is inside the project and names no credential. Not `find -delete`, `-exec`, `-execdir`, `-ok`, `-okdir`, `-fprint*` or `-fls`; not `rg --pre`, `--pre-glob` or `-z`, and `rg` only with options on a positive list of search and output options (HL-13: ripgrep keeps adding options that run programs, such as `--hostname-bin`); not `tree -o` |
+| `ls`, `pwd`, `cat`, `head`, `tail`, `wc`, `grep`, `egrep`, `fgrep`, `rg`, `find`, `echo`, `diff`, `du`, `tree` | Every argument that is not an option is inside the project and names no credential. Not `find -delete`, `-exec`, `-execdir`, `-ok`, `-okdir`, `-fprint*` or `-fls`; not `rg --pre`, `--pre-glob` or `-z`, and `rg` only with options on a positive list of search and output options (HL-13: ripgrep keeps adding options that run programs, such as `--hostname-bin`), which leaves out `--hidden`, `--no-ignore`, `-u`/`--unrestricted` and `-L`/`--follow`: they read `.env`, `.git` or files behind symlinks that no argument names; not `tree -o` |
 | `git status`, `diff`, `log`, `show`, `rev-parse`, `ls-files` | No option before the subcommand (`-c`, `-C`, `--exec-path`), none of `--output`, `--ext-diff`, `--git-dir`, `--work-tree`, `--exec-path`, `--no-index`, `--namespace`, and every argument checked as a path (below) |
 | `git branch` | Listing only: `-a`, `-r`, `-l`, `-v`, `-vv`, `--list`, `--all`, `--remotes`, `--show-current`, `--no-color` |
 | `npm`, `pnpm`, `yarn`, `bun` | `test`, `build`, `lint` or `typecheck` (directly or after `run`), then only options, `--` and paths inside the project |
@@ -131,8 +131,9 @@ Hotline does not know which options take a value, so it checks every form:
 
 "Checked as a path" means: inside the project, no credential or settings name,
 and no `.git` component. A `:` counts as a path boundary too, so a revision's
-path (`git show HEAD:.env`) is judged like the path itself. Every git argument, revisions included, gets this check,
-so git cannot be pointed at another or a nested repository. `--git-dir`,
+path (`git show HEAD:.env`) is judged like the path itself. Every git
+argument, revisions included, gets this check, so git cannot be pointed at
+another or a nested repository. `--git-dir`,
 `--work-tree`, `--exec-path`, `--no-index` and `--namespace` are refused, as are
 `-C` and `-c` (no option may come before the subcommand), and any `VAR=` prefix
 (`GIT_DIR=...`).

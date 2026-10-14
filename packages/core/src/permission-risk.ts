@@ -654,20 +654,24 @@ function safePath(path: string, cwd: string): boolean {
  * judged by this positive list: any other option, in any case, is high.
  * Audited against `rg --help` of ripgrep 14.1.1: every letter and name below is
  * a search, filter or output option there (`-h` is `--help`). A test checks the
- * list against the installed rg's help when rg is available.
+ * list against the installed rg's help when rg is available. Options that widen
+ * what is read past rg's defaults are left out, so they are high: `--hidden`,
+ * `--no-ignore` and `-u`/`--unrestricted` reach `.env` and `.git` with no path
+ * argument naming them, and `-L`/`--follow` reads through symlinks out of the
+ * project.
  */
 export const RIPGREP_LONG_OPTIONS: ReadonlySet<string> = new Set(
   (
     "--line-number --no-line-number --ignore-case --case-sensitive --smart-case --files-with-matches " +
     "--files-without-match --count --count-matches --word-regexp --line-regexp --fixed-strings " +
     "--invert-match --only-matching --with-filename --no-filename --type --type-not --glob --iglob " +
-    "--context --after-context --before-context --max-count --max-depth --hidden --no-ignore --files " +
+    "--context --after-context --before-context --max-count --max-depth --files " +
     "--json --color --no-heading --heading --column --stats --regexp --sort --sortr --trim --multiline " +
-    "--max-columns --vimgrep --null --quiet --unrestricted --follow --text --byte-offset"
+    "--max-columns --vimgrep --null --quiet --text --byte-offset"
   ).split(" "),
 );
 /** Single-letter rg flags that take no value (`-z`, which runs decompressors, is not one). */
-export const RIPGREP_FLAGS = "nNiIsSlLcwxFvoHhuUqab";
+export const RIPGREP_FLAGS = "nNiIsSlcwxFvoHhUqab";
 /** Single-letter rg options whose value is the next word or attached digits. */
 export const RIPGREP_VALUE_OPTIONS = "ABCmtTge";
 
