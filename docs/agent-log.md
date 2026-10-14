@@ -266,6 +266,11 @@ Template:
     - The rest goes to HL-13 (#14): base64, upper-cased or line-split copies
       of registered secrets, slash-separated phone numbers, and YAML
       continuation lines.
+  - Staff P2 (audit ids): migration 2 adds nullable `ask_id`, `session_id` and
+    `call_id` columns to `audit`. `appendAudit` takes them as typed ids,
+    validated against core's `Id` and stored unredacted, while `detail` is still
+    redacted with no exemption, so UUID ids stay queryable and a UUID-shaped
+    secret in `detail` is still removed.
 - Logging contract (documented at the top of `logger.ts` and in
   `docs/daemon.md`):
   - Callers log parsed, allowlisted fields only.

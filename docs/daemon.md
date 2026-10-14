@@ -75,6 +75,13 @@ on write and on read, next to the columns the daemon queries by.
   other way.
 - The audit log is append-only: triggers abort any `UPDATE` or `DELETE`, and
   details are redacted before they are stored.
+- `appendAudit(event, detail, at, { askId, sessionId, callId })` stores the ids
+  an entry refers to in their own nullable columns (`ask_id`, `session_id`,
+  `call_id`, migration 2). They are validated against core's `Id` and written as
+  given, so `listAudit({ askId })` can find every entry for an ask. Only the
+  free-text `detail` passes through the redactor, which stays fail-closed: it
+  removes UUID-shaped values, so an id put in `detail` is stored as
+  `[REDACTED]`. Pass ids as the typed parameter, never inside `detail`.
 - Callers pass every time in (the injected clock); the store never reads the wall
   clock.
 

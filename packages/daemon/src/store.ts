@@ -8,7 +8,7 @@
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { Answer, Ask, type AskStatus, answerProblem, CallRecord, Session } from "@hotline/core";
+import { Answer, Ask, type AskStatus, answerProblem, CallRecord, Id, Session } from "@hotline/core";
 import { privatePathProblem } from "./private-file.js";
 import { createRedactor, type Redactor } from "./redact.js";
 
@@ -65,13 +65,38 @@ export const MIGRATIONS: readonly string[] = [
   CREATE TRIGGER audit_no_delete BEFORE DELETE ON audit
     BEGIN SELECT RAISE(ABORT, 'the audit log is append-only'); END;
   `,
+  // The ask, session and call an audit entry refers to, in their own columns. The
+  // redactor removes UUID-shaped values, so ids inside `detail` would be stored as
+  // [REDACTED]. ADD COLUMN keeps the append-only triggers.
+  `
+  ALTER TABLE audit ADD COLUMN ask_id TEXT;
+  ALTER TABLE audit ADD COLUMN session_id TEXT;
+  ALTER TABLE audit ADD COLUMN call_id TEXT;
+  CREATE INDEX audit_by_ask ON audit (ask_id) WHERE ask_id IS NOT NULL;
+  CREATE INDEX audit_by_session ON audit (session_id) WHERE session_id IS NOT NULL;
+  CREATE INDEX audit_by_call ON audit (call_id) WHERE call_id IS NOT NULL;
+  `,
 ];
 
-export interface AuditEntry {
+/**
+ * The ask, session and call an audit entry refers to. Validated against core's
+ * `Id`, then stored as given in their own columns: never redacted.
+ */
+export interface AuditIds {
+  askId?: string;
+  sessionId?: string;
+  callId?: string;
+}
+
+const AUDIT_ID_COLUMNS = { askId: "ask_id", sessionId: "session_id", callId: "call_id" } as const;
+type AuditIdKey = keyof typeof AUDIT_ID_COLUMNS;
+const AUDIT_ID_KEYS = Object.keys(AUDIT_ID_COLUMNS) as AuditIdKey[];
+
+export interface AuditEntry extends AuditIds {
   seq: number;
   at: string;
   event: string;
-  /** Redacted before it was stored. */
+  /** Redacted before it was stored. Ids belong in the typed fields, not here. */
   detail: Record<string, unknown>;
 }
 
@@ -144,6 +169,18 @@ export async function openStore(path: string, options: OpenStoreOptions = {}): P
 }
 
 type Row = Record<string, unknown>;
+
+/** Checks audit ids against core's `Id`. An unknown key is an error, never dropped. */
+function auditIds(ids: AuditIds): AuditIds {
+  const valid: AuditIds = {};
+  for (const [key, value] of Object.entries(ids)) {
+    if (!Object.hasOwn(AUDIT_ID_COLUMNS, key)) throw new StoreError(`Unknown audit id "${key}"`);
+    if (value === undefined) continue;
+    if (!Id.safeParse(value).success) throw new StoreError(`Audit ${key} is not a valid id`);
+    valid[key as AuditIdKey] = value;
+  }
+  return valid;
+}
 
 /** The part of a zod schema the store uses. */
 interface Schema<T> {
@@ -313,29 +350,53 @@ export class HotlineStore {
 
   /**
    * Appends to the audit log. `event` is a dotted lowercase name such as
-   * `daemon.started`; `detail` is redacted before it is stored. Entries cannot be
-   * changed or deleted afterwards.
+   * `daemon.started`. `detail` is free text and is redacted before it is stored.
+   * `ids` are validated and stored as given in their own columns, so the entry
+   * stays linked to its ask, session and call. Entries cannot be changed or
+   * deleted afterwards.
    */
-  appendAudit(event: string, detail: Record<string, unknown>, at: Date): number {
+  appendAudit(event: string, detail: Record<string, unknown>, at: Date, ids: AuditIds = {}): number {
     if (!AUDIT_EVENT.test(event)) throw new StoreError(`Invalid audit event name "${event}"`);
     if (Number.isNaN(at.getTime())) throw new StoreError("Audit time is invalid");
+    const valid = auditIds(ids);
     const redacted = JSON.stringify(this.redactor.value(detail));
     const result = this.db
-      .prepare("INSERT INTO audit (at, event, detail) VALUES (?, ?, ?)")
-      .run(at.toISOString(), event, redacted);
+      .prepare("INSERT INTO audit (at, event, detail, ask_id, session_id, call_id) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(
+        at.toISOString(),
+        event,
+        redacted,
+        valid.askId ?? null,
+        valid.sessionId ?? null,
+        valid.callId ?? null,
+      );
     return Number(result.lastInsertRowid);
   }
 
-  listAudit(): AuditEntry[] {
+  /** Audit entries in order, optionally only those matching every id in `filter`. */
+  listAudit(filter: AuditIds = {}): AuditEntry[] {
+    const valid = auditIds(filter);
+    const keys = AUDIT_ID_KEYS.filter((key) => valid[key] !== undefined);
+    const where = keys.map((key) => `${AUDIT_ID_COLUMNS[key]} = ?`).join(" AND ");
     return this.db
-      .prepare("SELECT seq, at, event, detail FROM audit ORDER BY seq")
-      .all()
-      .map((row) => ({
-        seq: Number(row.seq),
-        at: String(row.at),
-        event: String(row.event),
-        detail: JSON.parse(String(row.detail)) as Record<string, unknown>,
-      }));
+      .prepare(
+        `SELECT seq, at, event, detail, ask_id, session_id, call_id FROM audit
+         ${where === "" ? "" : `WHERE ${where}`} ORDER BY seq`,
+      )
+      .all(...keys.map((key) => valid[key] ?? null))
+      .map((row) => {
+        const entry: AuditEntry = {
+          seq: Number(row.seq),
+          at: String(row.at),
+          event: String(row.event),
+          detail: JSON.parse(String(row.detail)) as Record<string, unknown>,
+        };
+        for (const key of AUDIT_ID_KEYS) {
+          const value = row[AUDIT_ID_COLUMNS[key]];
+          if (value !== null && value !== undefined) entry[key] = String(value);
+        }
+        return entry;
+      });
   }
 
   // Internals --------------------------------------------------------------

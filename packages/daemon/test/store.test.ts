@@ -313,4 +313,78 @@ describe("audit", () => {
     expect(() => db.appendAudit("Bad Event", {}, new Date(T0))).toThrow(StoreError);
     expect(() => db.appendAudit("daemon.started", {}, new Date(Number.NaN))).toThrow(StoreError);
   });
+
+  it("keeps UUID ids queryable in their own columns while detail is still redacted", async () => {
+    const db = await open();
+    const askId = "0b7e7c1a-3f4d-4e8a-9c2b-5d6f7a8b9c0d";
+    const sessionId = "1c8f8d2b-4a5e-4f9b-8d3c-6e7a8b9c0d1e";
+    const callId = "2d9a9e3c-5b6f-4a0c-9e4d-7f8b9c0d1e2f";
+    // A UUID-shaped secret that ends up in free text.
+    const uuidSecret = "9f1c2d3e-4b5a-6789-abcd-ef0123456789";
+    db.appendAudit("ask.answered", { note: `key ${uuidSecret}`, mentions: askId }, new Date(T0), {
+      askId,
+      sessionId,
+      callId,
+    });
+    db.appendAudit("ask.created", {}, new Date(T1), { askId: "a2", sessionId });
+    db.appendAudit("daemon.started", {}, new Date(T1));
+
+    const [first] = db.listAudit({ askId });
+    expect(first).toEqual({
+      seq: 1,
+      at: T0,
+      event: "ask.answered",
+      askId,
+      sessionId,
+      callId,
+      // The ids are kept in their columns, but detail stays fail-closed: a UUID
+      // there is removed whether it is an id or a secret.
+      detail: { note: `key ${REDACTED}`, mentions: REDACTED },
+    });
+    expect(JSON.stringify(db.listAudit())).not.toContain(uuidSecret);
+    expect(db.listAudit({ askId })).toHaveLength(1);
+    expect(db.listAudit({ sessionId }).map((entry) => entry.seq)).toEqual([1, 2]);
+    expect(db.listAudit({ callId }).map((entry) => entry.seq)).toEqual([1]);
+    expect(db.listAudit({ sessionId, askId: "a2" }).map((entry) => entry.seq)).toEqual([2]);
+    expect(db.listAudit({ askId: "missing" })).toEqual([]);
+    expect(db.listAudit().map((entry) => entry.seq)).toEqual([1, 2, 3]);
+    expect(db.listAudit()[2]).toEqual({ seq: 3, at: T1, event: "daemon.started", detail: {} });
+  });
+
+  it("validates audit ids against the core Id schema and refuses unknown ones", async () => {
+    const db = await open();
+    expect(() => db.appendAudit("ask.created", {}, new Date(T0), { askId: "" })).toThrow(/not a valid id/);
+    expect(() => db.appendAudit("ask.created", {}, new Date(T0), { callId: "x".repeat(129) })).toThrow(
+      /not a valid id/,
+    );
+    expect(() =>
+      db.appendAudit("ask.created", {}, new Date(T0), { askID: "a1" } as unknown as { askId: string }),
+    ).toThrow(/Unknown audit id/);
+    expect(() => db.listAudit({ sessionId: "" })).toThrow(/not a valid id/);
+    expect(db.listAudit()).toEqual([]);
+  });
+
+  it("adds the id columns to an existing audit log and keeps it append-only", async () => {
+    const path = join(dir, "hotline.db");
+    (await openStore(path, { migrations: MIGRATIONS.slice(0, 1) })).close();
+    const v1 = new DatabaseSync(path);
+    v1.prepare("INSERT INTO audit (at, event, detail) VALUES (?, ?, ?)").run(
+      T0,
+      "daemon.started",
+      JSON.stringify({ version: "0.0.0" }),
+    );
+    v1.close();
+    const db = await open(path);
+    expect(db.schemaVersion).toBe(MIGRATIONS.length);
+    db.appendAudit("ask.created", {}, new Date(T1), { askId: "a1" });
+    expect(db.listAudit()).toEqual([
+      { seq: 1, at: T0, event: "daemon.started", detail: { version: "0.0.0" } },
+      { seq: 2, at: T1, event: "ask.created", askId: "a1", detail: {} },
+    ]);
+    db.close();
+    const raw = new DatabaseSync(path);
+    expect(() => raw.exec("UPDATE audit SET ask_id = 'other'")).toThrow(/append-only/);
+    expect(() => raw.exec("DELETE FROM audit WHERE seq = 1")).toThrow(/append-only/);
+    raw.close();
+  });
 });
