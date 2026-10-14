@@ -366,3 +366,54 @@ Template:
   (`AskStatus` has no `delivered`). A `call me` text reply has no queue event yet.
   An ask held only by the text limit during quiet hours is not woken when quiet
   hours end; it waits for a text slot or its expiry.
+
+## 2026-10-13 — HL-03b Call-me text event (#PR)
+
+- Decision / change: the queue takes a pure `call-me` event for an owner text of
+  `call me` (issue #28, plan flow E). With no call in progress and at least one
+  open ask that needs an answer (not a notification, not a duplicate, not past
+  expiry, waiting or already texted), it places one call at once, highest
+  priority first, at most four asks. `place-call` still names asks only; the daemon
+  dials the owner number and must send `call-me` only for a text it verified came
+  from that number. The event is never an answer, so silence after it still ends
+  as `no-answer` and a permission request still denies.
+- Decisions (no human available; recorded per the ticket):
+  - An explicit owner request overrides quiet hours for that one call (the issue's
+    stated default). It also overrides the batch window, a retry delay and an
+    earlier fallback to text, because the owner asked to be called now. Later asks
+    and retries follow quiet hours again.
+  - It never overrides the call limit: over the limit the event is `ignored` with
+    the reason "over the call limit; open asks keep going by text", and the asks
+    keep their text path. A call already in progress also makes it `ignored`.
+  - No open asks: the event is `ignored` ("no open asks to call about") rather than
+    a new "nothing pending" text action. `send-text` always carries an ask id, and
+    a new action type would widen the daemon contract for one reply; HL-09 can
+    answer the owner from the ignore reason.
+  - A call already past the stuck-call timeout does not block the request: it is
+    hung up (`end-call`) and treated as dropped first, as a `tick` would.
+  - When a `call-me` call ends with an ask that had been texted still open, the ask
+    returns to awaiting its text reply instead of being retried or texted again,
+    so the owner gets no duplicate text and can still reply by SMS.
+- Evidence (automated, worktree, Node 24.11.0 locally; CI covers Node 22):
+  `scripts/ci/run.sh build` passes (Biome, `tsc -b`, test typecheck);
+  `scripts/ci/run.sh test` passes 376 tests in 22 files, 116 of them in core.
+  Nine new unit tests cover: open asks with no call (calls at once, by priority,
+  notifications left to text), an ask already texted (voice answer on the call, an
+  SMS reply afterwards, no second text), an ask in its retry delay, a call in
+  progress, a stuck call (hung up, then the owner's call placed), quiet hours (one call only, no retry call, the next ask texted), over
+  the call limit, no open asks (empty, notification only, expired), and call-me
+  never answering a high-risk permission. The property suite adds `call-me` to the
+  random event mix: the silent property still sees only `no-answer` and `deny`;
+  every place-call names asks and no number; a call-me call never starts while
+  one is in progress and covers only eligible asks; quiet-hours and retry-delay
+  checks are exempted only for the call the owner asked for; rate limits hold
+  with call-me calls counted. A liveness check requires a call-me with an open
+  ask, no call and a free call slot to place exactly the expected call; a
+  temporary counter showed it firing 384 times per suite run. A mutation check
+  broke the change eight ways (ignore the call limit, ignore a call in progress,
+  call about notifications, never call, wrong order, call about expired asks,
+  keep a stuck call blocking, retry or re-text an already texted ask);
+  each made the tests fail. `scripts/ci/run.sh eval` is not built yet (HL-12);
+  no real agent or live call evidence applies.
+- Open issues or follow-ups: HL-07 parses `call me` from a text and HL-09 maps it
+  to this event and turns its ignore reasons into owner replies.

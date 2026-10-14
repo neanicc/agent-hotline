@@ -10,7 +10,10 @@
 //   ends in `no-answer`, which denies a permission request.
 // - Every open ask ends by its `expiresAt` at the latest.
 // - Calls and texts stay within the rate limits; quiet hours mean texts, except
-//   urgent asks when the owner allowed urgent calls.
+//   urgent asks when the owner allowed urgent calls, and the one call the owner
+//   asks for by texting `call me`.
+// - A `call-me` event only places a call (to the owner; actions carry no number).
+//   It is never an answer and decides nothing.
 import { Answer, Ask, AskOutcome, type AskStatus, answerProblem, type NoAnswerReason } from "./contracts.js";
 import {
   callLimit,
@@ -84,7 +87,12 @@ export type QueueEvent =
   /** The text for this ask could not be sent. */
   | { type: "text-failed"; askId: string }
   /** The agent stopped waiting (session ended, hook killed). */
-  | { type: "cancel"; askId: string };
+  | { type: "cancel"; askId: string }
+  /**
+   * The owner texted `call me` (the daemon checked it came from the owner's number).
+   * Calls now about the open asks, within the call limit, even in quiet hours. Not an answer.
+   */
+  | { type: "call-me" };
 
 export type QueueAction =
   /** Place one call to the owner covering these asks, in this order. */
@@ -137,13 +145,18 @@ export function step(state: QueueState, event: QueueEvent, now: Date, settings: 
   s.textTimes = s.textTimes.filter((time) => time > t - DAY_MS);
 
   apply(ctx, event);
-  if (s.call !== undefined && t - s.call.placedAt >= settings.callStuckAfterMs) {
-    ctx.actions.push({ type: "end-call", callId: s.call.id });
-    endCall(ctx, "dropped");
-  }
+  giveUpStuckCall(ctx);
   expire(ctx);
   dispatch(ctx);
   return { state: s, actions: ctx.actions };
+}
+
+/** A call never reported as ended is hung up and treated as dropped once it is stuck. */
+function giveUpStuckCall(ctx: Context): void {
+  const { s, settings, t } = ctx;
+  if (s.call === undefined || t - s.call.placedAt < settings.callStuckAfterMs) return;
+  ctx.actions.push({ type: "end-call", callId: s.call.id });
+  endCall(ctx, "dropped");
 }
 
 /**
@@ -305,7 +318,53 @@ function applyEvent(ctx: Context, event: QueueEvent): string | undefined {
       endWithoutAnswer(ctx, q, "cancelled");
       return undefined;
     }
+    case "call-me":
+      return callMe(ctx);
   }
+}
+
+/**
+ * The owner asked to be called. One call now covers the open asks that need an answer
+ * (waiting or already texted, highest priority first, at most `maxAsksPerCall`). The
+ * owner's request overrides quiet hours, a batch window, a retry delay and an earlier
+ * fallback to text, for this call only. It never overrides the call limit or a call
+ * in progress, and it is not an answer: every ask still needs the owner's own words.
+ */
+function callMe(ctx: Context): string | undefined {
+  const { s, settings, t } = ctx;
+  // A call already given up on does not hold the owner's request back.
+  giveUpStuckCall(ctx);
+  const asks = s.open
+    .filter(
+      (q) =>
+        q.duplicateOf === undefined &&
+        q.ask.kind !== "notify" &&
+        (q.phase === "waiting" || q.phase === "texted") &&
+        Date.parse(q.ask.expiresAt) > t,
+    )
+    .sort((a, b) => comparePriority(a.ask, b.ask));
+  if (asks.length === 0) return "no open asks to call about";
+  if (s.call !== undefined) return "a call is already in progress";
+  if (!rateLimitAllows(s.callTimes, callLimit(settings), t)) {
+    return "over the call limit; open asks keep going by text";
+  }
+  placeCall(ctx, asks.slice(0, settings.maxAsksPerCall));
+  return undefined;
+}
+
+function placeCall(ctx: Context, batch: QueuedAsk[]): void {
+  const { s, t } = ctx;
+  s.callSeq += 1;
+  const callId = `${s.idPrefix}-${s.callSeq}`;
+  for (const q of batch) {
+    q.phase = "calling";
+    q.callAttempts += 1;
+    q.ask.status = "in-flight";
+  }
+  const askIds = batch.map((q) => q.ask.id);
+  s.call = { id: callId, askIds, placedAt: t };
+  s.callTimes.push(t);
+  ctx.actions.push({ type: "place-call", callId, askIds });
 }
 
 function enqueue(ctx: Context, input: Ask): string | undefined {
@@ -370,9 +429,14 @@ function endCall(ctx: Context, result: CallEnd): void {
   for (const askId of call.askIds) {
     const q = findOpen(ctx.s, askId);
     if (q === undefined || q.phase !== "calling") continue;
-    q.phase = "waiting";
     if (result === "no-pickup" || result === "failed") q.lastFailure = result;
     else if (result === "dropped") q.lastFailure = "dropped";
+    if (q.texted) {
+      // Already texted before a `call me` call: the owner has the text and can still reply to it.
+      q.phase = "texted";
+      continue;
+    }
+    q.phase = "waiting";
     if ((result === "no-pickup" || result === "failed") && q.callAttempts < settings.maxCallAttempts) {
       q.readyAt = t + settings.retryDelayMs;
     } else {
@@ -404,18 +468,10 @@ function dispatch(ctx: Context): void {
     if (rateLimitAllows(s.callTimes, callLimit(settings), t)) {
       // Batch every due ask and every new one still in its batch window, highest priority
       // first. An ask waiting out its retry delay keeps waiting.
-      const batch = callable.filter((q) => due(q) || q.callAttempts === 0).slice(0, settings.maxAsksPerCall);
-      s.callSeq += 1;
-      const callId = `${s.idPrefix}-${s.callSeq}`;
-      for (const q of batch) {
-        q.phase = "calling";
-        q.callAttempts += 1;
-        q.ask.status = "in-flight";
-      }
-      const askIds = batch.map((q) => q.ask.id);
-      s.call = { id: callId, askIds, placedAt: t };
-      s.callTimes.push(t);
-      ctx.actions.push({ type: "place-call", callId, askIds });
+      placeCall(
+        ctx,
+        callable.filter((q) => due(q) || q.callAttempts === 0).slice(0, settings.maxAsksPerCall),
+      );
     } else {
       callLimited = true;
     }

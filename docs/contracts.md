@@ -245,6 +245,7 @@ does I/O; `packages/core/test/purity.test.ts` scans the sources to keep it so.
 | `text-sent` | The text for an ask went out; ends a notification as `delivered` |
 | `text-failed` | The text for an ask could not be sent |
 | `cancel` | The agent stopped waiting |
+| `call-me` | The owner texted `call me`. The daemon sends it only for an inbound text it verified came from the owner's number. Not an answer |
 
 | Action | What the daemon does |
 | --- | --- |
@@ -291,7 +292,26 @@ Rules:
   though one call can read several of them out.
 - **Quiet hours** (start inclusive, end exclusive, local time in
   `quietHours.timeZone`, equal start and end meaning none): asks are texted. Only
-  urgent asks are called, and only when `allowUrgentCalls` is set.
+  urgent asks are called, and only when `allowUrgentCalls` is set, plus the one
+  call the owner asks for with `call me`.
+- **Call me.** When no call is in progress and an ask is open (not a
+  notification, not a duplicate, not past its expiry, waiting or already texted),
+  a `call-me` event places one call at once covering those asks, highest priority
+  first, at most `DEFAULT_MAX_ASKS_PER_CALL`. The owner's request overrides quiet
+  hours, the batch window, a retry delay and an earlier fallback to text for that
+  call only; later asks and retries follow the normal rules again. It counts
+  against the call limit and never overrides it: over the limit the event is
+  `ignored` ("over the call limit; open asks keep going by text") and the asks
+  carry on by text. It is also `ignored` while a call is in progress ("a call is
+  already in progress"; a call past the stuck-call timeout is hung up with
+  `end-call` first and does not count) and when nothing is open to call about ("no open asks to
+  call about"); the daemon may reply to the owner from that reason, since
+  `send-text` always carries an ask. `place-call` names asks, never a number: the
+  daemon dials only the configured owner number. A `call-me` event is never an
+  answer; each ask on that call still needs the owner's own words. When the call
+  ends with an ask that was texted before it still open, the ask goes back to
+  awaiting its text reply (no retry, no second text); an ask that was never texted
+  follows the usual no-pickup rules.
 - **Rate limits** count over a rolling hour and a rolling 24 hours; a send stamped
   after `now` (the clock moved back) still counts. With no call
   left, a due ask is texted; with no text left either, it waits for a slot or its
