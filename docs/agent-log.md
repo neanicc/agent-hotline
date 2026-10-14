@@ -3288,6 +3288,23 @@ Template:
   the wrong-guess test already pins that other responses are not rechecked.
   (P3) Follow-up issues for security.md and the SMS cap are left to the
   conductor; this run does not create issues.
+- Security review of 0b85aa5 (coordinator), both fixed failing closed:
+  - Replay through the delivery cache: a remembered response used to be
+    returned before the pull, so a recorded state-changing body replayed
+    after the call ended still got its answer. Every delivery is now pulled
+    and checked as a live call with the owner first; only then is the
+    delivery memory consulted. `get_status` is never remembered. Tests: a
+    `submit_answer` replay after a restart answers from memory without
+    re-running while the call goes on, and gets the refusal once it is over
+    (fails against the previous route code); a `get_status` replayed after
+    the call ended reveals nothing.
+  - Saved PIN drift: the saved PIN time is now stored with the call SID it
+    was given on, and counts only when the pulled record has the same call
+    SID and the time falls within the call's start and end. It never serves
+    a live tool, and it is deleted with the call. Tests: restart mid-call
+    (confirmed), a different call SID or a time outside the call (not
+    confirmed; each binding removed makes its test fail), and the existing
+    live-tool test.
 - Open issues or follow-ups: bound `/hooks/twilio/sms` with reserved capacity
   for genuine Twilio requests; security.md update after #77; count out-of-queue
   texts against the text rate limits; HL-13c (#80) retries processing records

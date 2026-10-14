@@ -146,7 +146,7 @@ export interface VoiceInstruction extends ToolCall {
   /**
    * When this call passed the PIN (the PinGate's time). Saved with the held
    * instruction so that after a restart the post-call transcript can still
-   * tell the owner's turns from the caller's (`savedPinVerifiedAt`).
+   * tell the owner's turns from the caller's (`savedPinVerification`).
    */
   pinVerifiedAt?: Date;
 }
@@ -209,13 +209,14 @@ export interface ElevenLabsRoutesOptions {
    */
   deliveries?: ToolDeliveryMemory;
   /**
-   * When a previous run's PinGate verified this conversation, as the inbound
-   * line saved it with the call's held instructions (HL-13b). Used only to
-   * tell the owner's turns from the caller's in the finished call's
-   * transcript, never to serve a tool: after a restart the live tools still
-   * need the PIN again.
+   * When a previous run's PinGate verified this conversation, and on which
+   * call SID, as the inbound line saved it with the call's held instructions
+   * (HL-13b). Used only to tell the owner's turns from the caller's in that
+   * call's finished transcript, and only when the pulled record is the same
+   * call (same SID) and the time falls within it; never to serve a tool, so
+   * after a restart the live tools still need the PIN again.
    */
-  savedPinVerifiedAt?: (conversationId: string) => Date | undefined;
+  savedPinVerification?: (conversationId: string) => { verifiedAt: Date; callSid: string } | undefined;
 }
 
 /**
@@ -300,12 +301,6 @@ function parseJson(text: string | undefined): unknown {
   }
 }
 
-/** The `conversation_id` a raw tool body names, or "" when it names none. */
-function conversationOf(raw: string): string {
-  const id = (parseJson(raw) as { conversation_id?: unknown } | null | undefined)?.conversation_id;
-  return typeof id === "string" ? id : "";
-}
-
 function cut(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
@@ -354,17 +349,24 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
     name: N,
     serve: (body: ToolBodies[N], call: ToolCall) => Promise<Record<string, unknown>>,
   ): WebhookRoute => {
-    const handleTool = async (raw: string): Promise<Record<string, unknown>> => {
+    /**
+     * Checks a delivery before anything else, a repeat included: a valid body,
+     * the owner on the call, and ElevenLabs' own record showing this agent's
+     * live call with the owner, with the numbers and call SID the body
+     * carries. A forged tool call, or a replay once the call is over, gets the
+     * refusal and never a remembered response.
+     */
+    const checkTool = async (
+      raw: string,
+    ): Promise<{ refusal: Record<string, unknown> } | { body: ToolBodies[N]; call: ToolCall }> => {
       const parsed = TOOL_BODIES[name].safeParse(parseJson(raw));
-      if (!parsed.success) return { result: "invalid" };
+      if (!parsed.success) return { refusal: { result: "invalid" } };
       // Someone else's call: nothing about Hotline, the owner or the agents.
-      if (!ownerOnCall(parsed.data)) return refused;
-      // Before any effect, ElevenLabs' own record must show this live call with
-      // the owner: a forged tool call can hold, deny or hear nothing.
+      if (!ownerOnCall(parsed.data)) return { refusal: refused };
       const live = await liveCall(parsed.data);
       if ("failure" in live) {
         await report(name, live.failure);
-        return refused;
+        return { refusal: refused };
       }
       const { conversation_id, call_sid } = parsed.data;
       const call: ToolCall = {
@@ -373,11 +375,16 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
         direction: liveCallDirection(live.record, expectations),
         receivedAt: options.clock(),
       };
-      return serve(parsed.data as ToolBodies[N], call);
+      return { body: parsed.data as ToolBodies[N], call };
     };
 
-    /** Runs the tool once per distinct delivery; see `running` and `remembered`. */
-    const once = (raw: string) => {
+    /**
+     * Runs a checked delivery once per distinct body; see `running` and
+     * `remembered`. Only the state-changing tools come here (`get_status`
+     * never does, so a status is never remembered or replayed), and a repeat
+     * gets the first response, which is only a result or a PIN verdict.
+     */
+    const once = (raw: string, call: ToolCall, run: () => Promise<Record<string, unknown>>) => {
       const busy = { response: Promise.resolve<Record<string, unknown>>({ result: "busy" }), repeat: false };
       const now = options.clock().getTime();
       // Keyed with the tool secret (Keychain or the 0600 file, never the
@@ -400,7 +407,7 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
         // checked again (a right PIN spends no budget). Any other remembered
         // response, a wrong guess included, is answered from memory.
         const recheck =
-          seen?.verified === true && name === "verify_pin" && !pins.isVerified(conversationOf(raw));
+          seen?.verified === true && name === "verify_pin" && !pins.isVerified(call.conversationId);
         if (seen !== undefined && !recheck) return { response: Promise.resolve(seen), repeat: true };
         full = running.size + fallback.size(now) + remembered.size(now) >= MAX_TOOL_DELIVERIES;
       } catch {
@@ -411,7 +418,7 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
       // rather than forget one and let it run twice.
       if (full) return busy;
       // No await between the lookup and this claim, so one delivery runs the handler.
-      const response = handleTool(raw);
+      const response = run();
       running.set(key, response);
       // Keep only a delivery that changed state (a PIN attempt counts); forget the
       // rest, so the same call can succeed once it is allowed.
@@ -445,10 +452,18 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
       verify: (request) => sameSecret(header(request, TOOL_SECRET_HEADER), options.toolSecret),
       handler: async (request: FastifyRequest, reply: FastifyReply) => {
         const raw = rawBody(request) ?? "";
-        const { response, repeat } = ONCE_TOOLS.has(name)
-          ? once(raw)
-          : { response: handleTool(raw), repeat: false };
-        const result = await response;
+        const checked = await checkTool(raw);
+        let result: Record<string, unknown>;
+        let repeat = false;
+        if ("refusal" in checked) {
+          result = checked.refusal;
+        } else if (ONCE_TOOLS.has(name)) {
+          const delivery = once(raw, checked.call, () => serve(checked.body, checked.call));
+          result = await delivery.response;
+          repeat = delivery.repeat;
+        } else {
+          result = await serve(checked.body, checked.call);
+        }
         request.log.info({ tool: name, result: result.result ?? result.verified, repeat }, "voice tool");
         return reply.code(200).send(result);
       },
@@ -470,28 +485,52 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
   };
   const ownerContext: OwnerContext = {
     ownerNumber: options.ownerNumber,
-    // The earlier of this run's PIN and one a previous run saved with held
-    // instructions: both are this call passing the PIN. The saved one only
-    // labels a finished call's transcript; it never serves a tool. Turns
-    // after a restart but before the PIN is given again therefore count as
-    // the owner's on this call, as they would have without the restart: the
-    // person on it had already proved the PIN.
-    pinVerifiedAt: (conversationId) => {
-      const times = [pins.verifiedAt(conversationId), options.savedPinVerifiedAt?.(conversationId)].filter(
-        (at): at is Date => at !== undefined && !Number.isNaN(at.getTime()),
-      );
-      return times.length === 0 ? undefined : new Date(Math.min(...times.map((at) => at.getTime())));
-    },
-    // A PIN time saved before this run covers the call only up to the
-    // restart: turns from then on count as the owner's again only after the
-    // PIN is given again in this run.
-    pinLapse: (conversationId) => {
-      const saved = options.savedPinVerifiedAt?.(conversationId);
-      if (saved === undefined || saved.getTime() >= startedAt.getTime()) return undefined;
-      const again = pins.verifiedAt(conversationId);
-      return again === undefined ? { from: startedAt } : { from: startedAt, until: again };
-    },
+    pinVerifiedAt: (conversationId) => pins.verifiedAt(conversationId),
     placedCall: options.placedCall,
+  };
+
+  /**
+   * A PIN time a previous run saved for this record's conversation, only when
+   * it is bound to this very call: the same call SID as the pulled record,
+   * and a time within the call (from its start to its end as the record has
+   * them). Anything else is not used.
+   */
+  const savedPinFor = (record: ConversationRecord): Date | undefined => {
+    const saved = options.savedPinVerification?.(record.conversation_id);
+    if (saved === undefined || Number.isNaN(saved.verifiedAt.getTime())) return undefined;
+    const sid = record.metadata?.phone_call?.call_sid;
+    if (typeof sid !== "string" || sid === "" || sid !== saved.callSid) return undefined;
+    const start = record.metadata?.start_time_unix_secs;
+    const duration = record.metadata?.call_duration_secs;
+    if (typeof start !== "number" || typeof duration !== "number") return undefined;
+    const at = saved.verifiedAt.getTime() / 1000;
+    return at >= start && at <= start + duration ? saved.verifiedAt : undefined;
+  };
+
+  /**
+   * The owner context for one pulled, finished call. With a saved PIN time
+   * bound to it (`savedPinFor`), the owner's turns start at the earlier of
+   * that and this run's PIN, but the saved time covers the call only up to
+   * this run's start: turns after the restart count again only once the PIN
+   * is given again in this run (`pinLapse`).
+   */
+  const ownerContextFor = (record: ConversationRecord): OwnerContext => {
+    const saved = savedPinFor(record);
+    if (saved === undefined || saved.getTime() >= startedAt.getTime()) return ownerContext;
+    const id = record.conversation_id;
+    return {
+      ...ownerContext,
+      pinVerifiedAt: (conversationId) => {
+        if (conversationId !== id) return pins.verifiedAt(conversationId);
+        const again = pins.verifiedAt(conversationId);
+        return again === undefined || saved.getTime() < again.getTime() ? saved : again;
+      },
+      pinLapse: (conversationId) => {
+        if (conversationId !== id) return undefined;
+        const again = pins.verifiedAt(conversationId);
+        return again === undefined ? { from: startedAt } : { from: startedAt, until: again };
+      },
+    };
   };
   const report = async (what: ToolName | "post-call", failure: Unverified) => {
     try {
@@ -562,7 +601,7 @@ export function elevenLabsRoutes(options: ElevenLabsRoutesOptions): WebhookRoute
       await report("post-call", { forgery: true, reason: check.reason });
       return failedCall;
     }
-    const pulledEvent = conversationEvent(record, ownerContext);
+    const pulledEvent = conversationEvent(record, ownerContextFor(record));
     if (!sameCall(event, pulledEvent)) {
       await report("post-call", { forgery: true, reason: "the webhook differs from the provider's record" });
     }

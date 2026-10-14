@@ -311,7 +311,7 @@ async function voiceWebhook(
     deliveries: storedToolDeliveries(store),
     // When a previous run's PinGate verified a call holding instructions, so
     // its post-call transcript still shows the owner's turns after a restart.
-    savedPinVerifiedAt: (conversationId) => inbound.pinVerifiedAt(conversationId),
+    savedPinVerification: (conversationId) => inbound.savedPin(conversationId),
     handlers: {
       submitAnswer: (answer) => orchestrator.submitAnswer(answer),
       getStatus: (call) => inbound.getStatus(call),

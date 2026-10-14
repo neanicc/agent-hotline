@@ -199,9 +199,14 @@ the same right PIN again on the same call sends a byte-identical
 `verify_pin`; a remembered `verified: true` is therefore checked again when
 this run's PinGate has not verified the call (a right PIN spends no budget),
 while a remembered wrong guess is still answered from memory. When a call
-holds an instruction, the time it passed the PIN is saved with it, and the
-post-call check uses the earlier of that and this run's PinGate time to tell
-the owner's turns from the caller's; it never serves a live tool. The saved
+holds an instruction, the time it passed the PIN is saved with it, together
+with the call SID it was given on. The post-call check uses it only for that
+call: the pulled record must carry the same call SID, and the time must fall
+within the call (from its start to its end as the record has them).
+Otherwise it is ignored, and the held instructions are confirmed against
+this run's PinGate alone, which usually means not at all. When it counts,
+the owner's turns start at the earlier of the saved time and this run's
+PinGate time. It never serves a live tool. The saved
 time covers the call only up to this run's start: turns after the restart
 count as the owner's again only once the PIN is given again in this run
 (`pinLapse` in the owner context). Turns while the daemon was down still
@@ -249,9 +254,14 @@ Otherwise it logs `voice webhooks off` with the reason and the paths stay a
   (`MAX_TOOL_CALLS_IN_FLIGHT`, HL-13b), each given 5 seconds to deliver its
   body; more get the `403`. Only a sender with the tool secret gets that far.
 - **Once per delivery:** `submit_answer`, `verify_pin` and `send_instruction`
-  remember each delivery (tool name and exact body) for two hours. A repeat,
-  such as an ElevenLabs retry or a replay, gets the first response and the
-  handler does not run again, so a repeated wrong PIN spends no attempt. Only
+  remember each delivery (tool name and exact body) for two hours. Every
+  delivery, a repeat included, is first checked against ElevenLabs' record
+  (this agent's live call with the owner, with the same numbers and call
+  SID); only then does a repeat, such as an ElevenLabs retry or a replay,
+  get the first response (a result or a PIN verdict, nothing else), and the
+  handler does not run again, so a repeated wrong PIN spends no attempt. A
+  replay once the call is over gets the refusal, never the remembered
+  response. Only
   deliveries that changed state are remembered (`recorded`, `queued`, or a PIN
   attempt); anything else (`pin-required`, `needs-pin`, `not-recorded`,
   `invalid`, `refused`) or a failure is forgotten, so the same call can succeed

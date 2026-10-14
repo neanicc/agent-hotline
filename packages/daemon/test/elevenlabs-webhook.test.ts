@@ -1635,7 +1635,7 @@ describe("a daemon restart in the middle of things (HL-13b)", () => {
     await line.recover();
     app = server({
       deliveries: storedToolDeliveries(store),
-      savedPinVerifiedAt: (conversationId) => line.pinVerifiedAt(conversationId),
+      savedPinVerification: (conversationId) => line.savedPin(conversationId),
       handlers: {
         submitAnswer: (answer) => {
           answers.push(answer);
@@ -1667,7 +1667,13 @@ describe("a daemon restart in the middle of things (HL-13b)", () => {
    * gives the PIN again in the new run. Returns the instructions queued once
    * the real, signed post-call webhook has been handled.
    */
-  async function heldAcrossRestart(heldAt: number, restartAt: number, pinAgainAt?: number) {
+  async function heldAcrossRestart(
+    heldAt: number,
+    restartAt: number,
+    pinAgainAt?: number,
+    /** What ElevenLabs' record of the finished call says, when it differs. */
+    record: { callSid?: string; durationSecs?: number } = {},
+  ) {
     store.putSession({
       id: "s-1",
       agent: "claude-code",
@@ -1727,13 +1733,13 @@ describe("a daemon restart in the middle of things (HL-13b)", () => {
         ],
         metadata: {
           start_time_unix_secs: t0 / 1000 - 60,
-          call_duration_secs: 90,
+          call_duration_secs: record.durationSecs ?? 90,
           phone_call: {
             direction: "inbound",
             external_number: OWNER,
             agent_number: AGENT_NUMBER,
             phone_number_id: PHONE_ID,
-            call_sid: `CA${"0".repeat(31)}1`,
+            call_sid: record.callSid ?? `CA${"0".repeat(31)}1`,
           },
         },
       },
@@ -1753,6 +1759,46 @@ describe("a daemon restart in the middle of things (HL-13b)", () => {
 
   it("counts words said after the PIN is given again in the new run", async () => {
     expect(await heldAcrossRestart(11, 12, 14)).toEqual([["s-1", "run the tests", "queued"]]);
+  });
+
+  it("uses a saved PIN time only for the call SID it was given on", async () => {
+    expect(await heldAcrossRestart(22, 30, undefined, { callSid: `CA${"9".repeat(32)}` })).toEqual([]);
+  });
+
+  it("uses a saved PIN time only when it falls within the call", async () => {
+    // The record says the call ended 30 s after it began, before the PIN time.
+    expect(await heldAcrossRestart(22, 30, undefined, { durationSecs: 30 })).toEqual([]);
+  });
+
+  it("refuses a replayed submit_answer once the call is over, and never re-runs it while it goes on", async () => {
+    await answer();
+    expect(answers).toHaveLength(1);
+    await restart();
+    // The call still goes on: the first response, without running the handler again.
+    expect((await answer()).json()).toEqual({ result: "recorded" });
+    expect(answers).toHaveLength(1);
+    // The call is over at ElevenLabs: the replay gets the refusal, not the remembered response.
+    const record = conversations.get("conv_1");
+    if (record === undefined) throw new Error("no record");
+    conversations.set("conv_1", { ...record, status: "done" });
+    expect((await answer()).json()).toEqual({ result: "refused", end_call: true });
+    expect(answers).toHaveLength(1);
+  });
+
+  it("never reads out the status to a get_status replayed after the call ended", async () => {
+    unplaced.add("conv_s");
+    await tool("verify_pin", { ...inbound("conv_s"), pin: PIN });
+    const read = await tool("get_status", inbound("conv_s"));
+    expect(read.json()).toMatchObject({ result: "ok" });
+    const record = conversations.get("conv_s");
+    if (record === undefined) throw new Error("no record");
+    conversations.set("conv_s", { ...record, status: "done" });
+    const replay = await tool("get_status", inbound("conv_s"));
+    expect(replay.json()).toEqual({ result: "refused", end_call: true });
+    expect(replay.body).not.toContain("demo-app");
+    expect(replay.body).not.toContain("session");
+    // A status is never remembered.
+    expect(store.countToolDeliveries(now.getTime())).toBe(1);
   });
 
   it("never lets the saved PIN time serve a live tool after a restart", async () => {
@@ -1775,7 +1821,7 @@ describe("a daemon restart in the middle of things (HL-13b)", () => {
       owner_words: "session 1, run the tests",
     });
     await restart();
-    expect(line.pinVerifiedAt("conv_l")).toEqual(now);
+    expect(line.savedPin("conv_l")).toEqual({ verifiedAt: now, callSid: `CA${"0".repeat(31)}1` });
     expect((await tool("get_status", inbound("conv_l"))).json()).toMatchObject({ result: "pin-required" });
   });
 

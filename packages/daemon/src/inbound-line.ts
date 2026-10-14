@@ -86,6 +86,7 @@ const SavedCall = z.strictObject({
     )
     .max(MAX_INSTRUCTIONS_PER_CALL),
   pinVerifiedAt: z.number().finite().optional(),
+  pinCallSid: z.string().min(1).optional(),
 });
 /** Status lengths: what the voice route allows (1500) and one SMS (1600), with room for the cut marker. */
 const STATUS_BUDGET = 1400;
@@ -151,6 +152,8 @@ interface CallMemory {
    * can still tell the owner's turns from the caller's.
    */
   pinVerifiedAt?: number;
+  /** The call SID the PIN was given on; the saved time counts only for that call. */
+  pinCallSid?: string;
 }
 
 export interface InboundLineOptions {
@@ -205,11 +208,11 @@ export class InboundLine {
         this.#unreadable += Array.isArray(held) ? Math.min(held.length, MAX_INSTRUCTIONS_PER_CALL) : 1;
         continue;
       }
-      const { sessionIds, nicknames, held, pinVerifiedAt } = parsed.data;
+      const { sessionIds, nicknames, held, pinVerifiedAt, pinCallSid } = parsed.data;
       this.#calls.set(saved.conversationId, {
         sessionIds,
         nicknames,
-        ...(pinVerifiedAt === undefined ? {} : { pinVerifiedAt }),
+        ...(pinVerifiedAt === undefined || pinCallSid === undefined ? {} : { pinVerifiedAt, pinCallSid }),
         held: held.map(({ done, ...h }) => ({
           ...h,
           receivedAt: new Date(h.receivedAt),
@@ -242,7 +245,9 @@ export class InboundLine {
     const record: z.input<typeof SavedCall> = {
       sessionIds: memory.sessionIds,
       nicknames: memory.nicknames,
-      ...(memory.pinVerifiedAt === undefined ? {} : { pinVerifiedAt: memory.pinVerifiedAt }),
+      ...(memory.pinVerifiedAt === undefined || memory.pinCallSid === undefined
+        ? {}
+        : { pinVerifiedAt: memory.pinVerifiedAt, pinCallSid: memory.pinCallSid }),
       held: memory.held.map((h) => ({
         id: h.id,
         instruction: redact(h.instruction),
@@ -293,13 +298,15 @@ export class InboundLine {
   }
 
   /**
-   * When a call that holds instructions passed the PIN, as saved with them
-   * (also by a previous run). Only for reading that call's finished
-   * transcript (`savedPinVerifiedAt` of the ElevenLabs routes).
+   * When a call that holds instructions passed the PIN, and on which call
+   * SID, as saved with them (also by a previous run). Only for reading that
+   * call's finished transcript (`savedPinVerification` of the ElevenLabs
+   * routes, which uses it only for the same call SID and within the call).
    */
-  pinVerifiedAt(conversationId: string): Date | undefined {
-    const at = this.#calls.get(conversationId)?.pinVerifiedAt;
-    return at === undefined ? undefined : new Date(at);
+  savedPin(conversationId: string): { verifiedAt: Date; callSid: string } | undefined {
+    const memory = this.#calls.get(conversationId);
+    if (memory?.pinVerifiedAt === undefined || memory.pinCallSid === undefined) return undefined;
+    return { verifiedAt: new Date(memory.pinVerifiedAt), callSid: memory.pinCallSid };
   }
 
   /** The live sessions, ended stale ones first, in the order a status numbers them. */
@@ -471,18 +478,28 @@ export class InboundLine {
       sessionId: session.id,
       receivedAt: now,
     });
-    const before = call.pinVerifiedAt;
+    const before = { at: call.pinVerifiedAt, sid: call.pinCallSid };
     const verifiedAt = voice.pinVerifiedAt?.getTime();
-    if (verifiedAt !== undefined && Number.isFinite(verifiedAt)) {
-      call.pinVerifiedAt = before === undefined ? verifiedAt : Math.min(before, verifiedAt);
+    // Kept only with the call SID it was given on, and never moved to another SID.
+    const sid = voice.callSid;
+    if (
+      verifiedAt !== undefined &&
+      Number.isFinite(verifiedAt) &&
+      sid !== undefined &&
+      (before.sid === undefined || before.sid === sid)
+    ) {
+      call.pinVerifiedAt = before.at === undefined ? verifiedAt : Math.min(before.at, verifiedAt);
+      call.pinCallSid = sid;
     }
     try {
       // Saved before the voice agent hears "queued", so a restart keeps it.
       this.#save(voice.conversationId, call);
     } catch (error) {
       call.held.pop();
-      if (before === undefined) delete call.pinVerifiedAt;
-      else call.pinVerifiedAt = before;
+      if (before.at === undefined) delete call.pinVerifiedAt;
+      else call.pinVerifiedAt = before.at;
+      if (before.sid === undefined) delete call.pinCallSid;
+      else call.pinCallSid = before.sid;
       throw error;
     }
     return "queued";
