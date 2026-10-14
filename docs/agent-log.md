@@ -200,6 +200,14 @@ Template:
     and releases the lock if anything fails after the listeners start,
     `onReady` included.
   - The database file is created `0600` before SQLite opens it.
+  - Second review round: replacing a stale lock was racy (two starters could
+    both remove it). Only the starter that exclusively creates
+    `daemon.lock.break` may now replace it, after re-reading that it still
+    holds the stale pid. A 4-starter race test, run 25 times, fails 2 tests
+    with the old plain `rm`. The credential-assignment pattern is now anchored
+    at a name boundary with bounded repetitions. Strings over 16 KiB are cut
+    before pattern redaction, after known secrets have been replaced, and the
+    word at the cut is dropped, so no token fragment survives.
   - Not changed: webhook verification still runs after body parsing (256 KiB
     cap), which signatures over form parameters need. HL-07 can refuse a
     missing signature header earlier.

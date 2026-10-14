@@ -48,6 +48,33 @@ describe("acquireDaemonLock", () => {
     await lock.release();
   });
 
+  it("lets exactly one of several simultaneous starters replace a stale lock", async () => {
+    const starters = [1001, 1002, 1003, 1004];
+    const live = (pid: number) => starters.includes(pid);
+    for (let round = 0; round < 25; round++) {
+      await writeFile(path, "999999\n");
+      const results = await Promise.allSettled(
+        starters.map((pid) => acquireDaemonLock(path, { pid, isAlive: live })),
+      );
+      const winners = results.filter((result) => result.status === "fulfilled");
+      expect(winners).toHaveLength(1);
+      for (const result of results) {
+        if (result.status === "rejected") expect(result.reason).toBeInstanceOf(DaemonLockError);
+      }
+      const holder = Number((await readFile(path, "utf8")).trim());
+      expect(starters).toContain(holder);
+      await expect(stat(`${path}.break`)).rejects.toThrow(/ENOENT/);
+      await (winners[0] as PromiseFulfilledResult<{ release(): Promise<void> }>).value.release();
+    }
+  });
+
+  it("refuses to replace a stale lock while another starter is replacing it", async () => {
+    await writeFile(path, "999999\n");
+    await writeFile(`${path}.break`, "1001\n");
+    await expect(acquireDaemonLock(path, { pid: 4242, isAlive: () => false })).rejects.toThrow(/is starting/);
+    expect(await readFile(path, "utf8")).toBe("999999\n");
+  });
+
   it("refuses an unreadable lock rather than guessing", async () => {
     await writeFile(path, "not a pid");
     await expect(acquireDaemonLock(path)).rejects.toThrow(/unreadable/);

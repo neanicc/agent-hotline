@@ -22,6 +22,31 @@ export interface DaemonLock {
   release(): Promise<void>;
 }
 
+/**
+ * Removes a lock whose process is gone. Two starters could both see the same
+ * stale lock, and the second `rm` would then delete the first one's fresh lock.
+ * So only the starter that exclusively creates `<lock>.break` may remove it, and
+ * only after re-reading that the lock still holds the stale id. Any other starter
+ * is refused while the break file exists.
+ */
+async function breakStaleLock(path: string, staleText: string, pid: number): Promise<void> {
+  const breaker = `${path}.break`;
+  try {
+    await writeFile(breaker, `${pid}\n`, { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    throw new DaemonLockError(
+      `Another hotline daemon is starting (${breaker}); if none is, delete that file and start again`,
+    );
+  }
+  try {
+    const current = (await readFile(path, "utf8").catch(() => "")).trim();
+    if (current === staleText) await rm(path, { force: true });
+  } finally {
+    await rm(breaker, { force: true });
+  }
+}
+
 export interface AcquireLockOptions {
   pid?: number;
   isAlive?: (pid: number) => boolean;
@@ -61,9 +86,7 @@ export async function acquireDaemonLock(path: string, options: AcquireLockOption
     if (holder === pid || isAlive(holder)) {
       throw new DaemonLockError(`Another hotline daemon (pid ${holder}) is already running (lock ${path})`);
     }
-    // Stale: its process is gone. Remove it and try once more; a concurrent
-    // starter that wins the exclusive create takes the lock instead.
-    await rm(path, { force: true });
+    await breakStaleLock(path, text, pid);
   }
   throw new DaemonLockError(`Could not take the daemon lock ${path}; another daemon is starting`);
 }

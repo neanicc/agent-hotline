@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createRedactor, REDACTED, redactingStream } from "../src/index.js";
+import { createRedactor, MAX_REDACTED_TEXT, REDACTED, redactingStream } from "../src/index.js";
 
 // Obviously fake values only. Each literal is built at runtime so no scanner
 // mistakes this file for a leak.
@@ -127,6 +127,34 @@ describe("secrets", () => {
   it("ignores known secrets too short to match safely", () => {
     const known = createRedactor(["abc"]);
     expect(known.text("abc abc")).toBe("abc abc");
+  });
+
+  it("handles long hostile input in linear time and caps its length", () => {
+    for (const input of [
+      "a".repeat(200_000),
+      "token".repeat(40_000),
+      'token="'.repeat(30_000),
+      "-----BEGIN PRIVATE KEY-----".repeat(5_000),
+    ]) {
+      const started = performance.now();
+      const out = text(input);
+      expect(performance.now() - started).toBeLessThan(1_000);
+      // Replacements can lengthen the capped text a little, never without bound.
+      expect(out.length).toBeLessThanOrEqual(2 * MAX_REDACTED_TEXT);
+      expect(out.length).toBeLessThan(input.length);
+    }
+  });
+
+  it("never leaves part of a secret at the truncation point", () => {
+    const secret = "0123456789abcdef".repeat(4);
+    const padding = "x ".repeat(MAX_REDACTED_TEXT / 2 - 10);
+    const out = text(`${padding}${secret} tail`);
+    expect(out.endsWith("[truncated]")).toBe(true);
+    expect(out).not.toMatch(/[0-9a-f]{6,}/);
+    // A known secret straddling the cut is removed before cutting.
+    const known = createRedactor(["straddling-known-secret"]);
+    const cut = known.text(`${"y ".repeat(MAX_REDACTED_TEXT / 2 - 5)}straddling-known-secret`);
+    expect(cut).not.toContain("straddl");
   });
 
   it("keeps ordinary log text readable", () => {

@@ -9,9 +9,16 @@ export const REDACTED = "[REDACTED]";
 const SECRET_KEY =
   /token|secret|passw(?:or)?d|pwd|api[-_]?key|private[-_]?key|access[-_]?key|credential|signature|authorization|cookie/i;
 
-/** `name=value`, `name: value` and `"name": "value"` where the name looks like a credential. */
+/**
+ * `name=value`, `name: value` and `"name": "value"` where the name looks like a
+ * credential. The match must start at a name boundary and every repetition is
+ * bounded, so a long run without a match costs linear time, not quadratic.
+ */
 const SECRET_ASSIGNMENT =
-  /(["']?[A-Za-z0-9_.-]*(?:token|secret|passw(?:or)?d|pwd|api[-_]?key|private[-_]?key|access[-_]?key|credential|signature|authorization|cookie)[A-Za-z0-9_.-]*["']?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;&"'}\]]+)/gi;
+  /(?<![A-Za-z0-9_.-])(["']?[A-Za-z0-9_.-]{0,64}(?:token|secret|passw(?:or)?d|pwd|api[-_]?key|private[-_]?key|access[-_]?key|credential|signature|authorization|cookie)[A-Za-z0-9_.-]{0,64}["']?\s{0,8}[:=]\s{0,8})("[^"]{0,4096}"|'[^']{0,4096}'|[^\s,;&"'}\]]+)/gi;
+
+/** Longer strings are cut to this many characters before redaction; logs never need more. */
+export const MAX_REDACTED_TEXT = 16 * 1024;
 
 const PRIVATE_KEY_BLOCK =
   /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/g;
@@ -94,6 +101,10 @@ export function createRedactor(knownSecrets: Iterable<string> = []): Redactor {
   const text = (input: string): string => {
     let out = input;
     if (exact) out = out.replace(exact, REDACTED);
+    if (out.length > MAX_REDACTED_TEXT) {
+      // Drop the word cut in half too, so no fragment of a token survives the cut.
+      out = `${out.slice(0, MAX_REDACTED_TEXT).replace(/[^\s,;&"'}\]]*$/, "")} [truncated]`;
+    }
     out = out.replace(PRIVATE_KEY_BLOCK, `${REDACTED} private key`);
     out = out.replace(AUTH_SCHEME, (_match, scheme: string) => `${scheme} ${REDACTED}`);
     out = out.replace(SECRET_ASSIGNMENT, (_match, name: string, value: string) => {

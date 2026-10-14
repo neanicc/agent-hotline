@@ -7,7 +7,9 @@ HL-04; call orchestration (HL-09) and the inbound line (HL-10) build on it.
 Only one daemon runs per hotline home. On start it creates `daemon.lock` (its
 process id, mode 0600) before it creates the token or opens the database, and a
 second daemon on the same home exits with "already running". A lock left by a
-process that no longer exists is replaced. A clean stop removes it.
+process that no longer exists is replaced, but only by the starter that first
+creates `daemon.lock.break`, so two simultaneous starters cannot both take
+over. A clean stop removes the lock.
 
 ## Listeners
 
@@ -96,6 +98,9 @@ message, request fields, error stacks and bindings are all covered:
   digits. Twilio call and message SIDs, ElevenLabs ids and UUIDs are kept.
 - Values under keys such as `authorization`, `cookie`, `*token*`, `*secret*`,
   `*signature*` or `*api-key*` are removed whatever they hold.
+- Strings longer than 16 KiB are cut, along with the word at the cut, and
+  marked `[truncated]`. The patterns are bounded, so redaction stays linear on
+  long or hostile input.
 
 ## Shutdown
 
