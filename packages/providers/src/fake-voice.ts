@@ -38,9 +38,26 @@ export type HumanStep =
       words: string;
       spoken?: string | null;
     }
+  /**
+   * Answers permission ask `ask` with `words`; the agent reads the request back
+   * in one short sentence ("Allow <text> for <session>? Yes?", the definition v4
+   * protocol) and the owner replies `reply`. The agent then submits `decision`
+   * (allow for a yes, deny for a no) with `reply` as `owner_words`.
+   */
+  | { kind: "read-back"; ask: number; words: string; reply: string; decision: "allow" | "deny" }
+  /**
+   * Gives an unclear reply to ask `ask` (definition v4). The first one gets
+   * "Sorry, is that a yes or a no?" with the short read-back (a re-reading for
+   * an ask that is not a permission request); the second gets the spoken
+   * promise to text instead, and nothing is submitted for that ask.
+   */
+  | { kind: "unsure"; ask: number; words: string }
   /** Says something that is not an answer ("yes, I can hear you"); no tool call. */
   | { kind: "say"; words: string }
-  /** Stays unclear after the agent asked twice: `submit_answer` with `unclear`. */
+  /**
+   * Stays unclear after the agent asked twice and submits `unclear`: what an
+   * agent on definition v3 or earlier does. Version 4 submits nothing (`unsure`).
+   */
   | { kind: "unclear"; ask: number; words: string }
   /** Asks what the agents are doing: `get_status`. */
   | { kind: "status" }
@@ -72,6 +89,19 @@ export const scriptedHuman = {
   denies: (ask = 1, words = "no, don't do that"): HumanScript => ({
     kind: "conversation",
     steps: [{ kind: "answer", ask, decision: "deny", words }],
+  }),
+  /** Says yes, hears the read-back, and confirms it (definition v4). */
+  confirms: (ask = 1, words = "yeah, go for it", reply = "yes"): HumanScript => ({
+    kind: "conversation",
+    steps: [{ kind: "read-back", ask, words, reply, decision: "allow" }],
+  }),
+  /** Stays unclear twice; the agent says it will text and submits nothing (definition v4). */
+  unsureTwice: (ask = 1, first = "hmm, let me think", second = "I'm not sure"): HumanScript => ({
+    kind: "conversation",
+    steps: [
+      { kind: "unsure", ask, words: first },
+      { kind: "unsure", ask, words: second },
+    ],
   }),
   unclear: (ask = 1, words = "hmm, maybe, I don't know"): HumanScript => ({
     kind: "conversation",
@@ -145,6 +175,9 @@ export interface PlayedTool {
   body: Record<string, unknown>;
   response: Record<string, unknown>;
 }
+
+/** What the fake agent says after the second unclear reply to an ask, as in the prompt's example. */
+export const TEXT_INSTEAD = "No worries, I'll text you about that one.";
 
 export interface PlayedCall {
   conversationId: string;
@@ -295,6 +328,15 @@ export class FakeVoiceProvider implements VoiceProvider {
     const readUpTo = (ask: number) => {
       for (; asksRead < Math.min(ask, readOut.length); asksRead++) say("agent", readOut[asksRead] ?? "");
     };
+    // The short read-back the prompt asks for before an allow: the ask's own
+    // (redacted, cut) text and session name, taken from its fenced `asks` line.
+    const readBack = (ask: number) => {
+      const line = placed?.variables.asks.split("\n")[ask - 1] ?? "";
+      const fenced = [...line.matchAll(/<agent_text>(.*?)<\/agent_text>/g)].map((m) => m[1] ?? "");
+      const what = fenced[placed?.call.asks[ask - 1]?.toolName === undefined ? 1 : 2] ?? "";
+      return `Allow ${what} for ${fenced[0] ?? ""}? Yes?`;
+    };
+    const unclearReplies = new Map<number, number>();
     const tool = async (name: ToolName, body: Record<string, unknown>) => {
       const response = await this.#client.tool(name, { ...binding, ...body });
       played.tools.push({ tool: name, body: { ...binding, ...body }, response });
@@ -310,10 +352,35 @@ export class FakeVoiceProvider implements VoiceProvider {
         say("user", step.words);
         continue;
       }
+      if (step.kind === "unsure") {
+        readUpTo(step.ask);
+        say("user", step.words);
+        const replies = (unclearReplies.get(step.ask) ?? 0) + 1;
+        unclearReplies.set(step.ask, replies);
+        if (replies >= 2) {
+          // Never silent, never a decision: the ask stays open and is texted.
+          say("agent", TEXT_INSTEAD);
+        } else if (placed?.call.asks[step.ask - 1]?.kind === "permission") {
+          say("agent", `Sorry, is that a yes or a no? ${readBack(step.ask)}`);
+        } else {
+          say("agent", `Sorry, I didn't catch that. ${readOut[step.ask - 1] ?? ""}`);
+        }
+        continue;
+      }
       let response: Record<string, unknown>;
       if (step.kind === "pin") {
         say("user", step.digits);
         response = await tool("verify_pin", { pin: step.digits });
+      } else if (step.kind === "read-back") {
+        readUpTo(step.ask);
+        say("user", step.words);
+        say("agent", readBack(step.ask));
+        say("user", step.reply);
+        response = await tool("submit_answer", {
+          ask_number: step.ask,
+          decision: step.decision,
+          owner_words: step.reply,
+        });
       } else if (step.kind === "answer" || step.kind === "unclear") {
         readUpTo(step.ask);
         const spoken = step.kind === "answer" && step.spoken !== undefined ? step.spoken : step.words;
@@ -337,7 +404,7 @@ export class FakeVoiceProvider implements VoiceProvider {
           owner_words: words,
         });
       }
-      if (step.kind === "answer") say("agent", "Got it.");
+      if (step.kind === "answer" || step.kind === "read-back") say("agent", "Got it.");
       // A well-behaved agent ends the call when a tool says so.
       if (response.end_call === true) {
         played.endedEarly = true;

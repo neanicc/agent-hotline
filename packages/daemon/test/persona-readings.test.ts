@@ -165,6 +165,55 @@ describe("the fake voice agent's readings follow the persona and are recognised"
     expect(check("write the tests for the new endpoint and deploy")).toBe(false);
   });
 
+  it("recognises the read-back before an allow as the same ask, so the reply to it confirms (HL-14c)", async () => {
+    const asks = ASKS.slice(0, 2);
+    const transcript = await playCall(asks, [
+      { kind: "read-back", ask: 1, words: "yeah, go for it", reply: "yes", decision: "allow" },
+      step(2, ANSWERS[1] as (typeof ANSWERS)[number]),
+    ]);
+    const readBack = transcript.findIndex((turn) => turn.message.startsWith("Allow "));
+    expect(transcript[readBack]?.message).toBe("Allow git push origin main for Claude in demo-app? Yes?");
+    const read = readings(transcript, asks.map(readAsk));
+    // The reading and the read-back both read ask 1, never ask 2.
+    expect(read.flatMap((ask, at) => (ask === 0 ? [at] : []))).toEqual([readBack - 2, readBack]);
+    expect(
+      confirmVoiceDecision({
+        transcript,
+        asks: asks.map(readAsk),
+        index: 0,
+        decision: { type: "allow" },
+        ownerWords: "yes",
+      }),
+    ).toEqual({ confirmed: true, excerpt: "yes" });
+    // The next ask's answer still lands after its own reading.
+    expect(
+      confirmVoiceDecision({
+        transcript,
+        asks: asks.map(readAsk),
+        index: 1,
+        decision: { type: "option", option: 2 },
+        ownerWords: "the second one, skip Windows",
+      }).confirmed,
+    ).toBe(true);
+  });
+
+  it("recognises the yes-or-no question as the same ask, and the text promise as none", async () => {
+    const asks = ASKS.slice(0, 1);
+    const transcript = await playCall(asks, [
+      { kind: "unsure", ask: 1, words: "hmm" },
+      { kind: "unsure", ask: 1, words: "not sure" },
+    ]);
+    const read = readings(transcript, asks.map(readAsk));
+    expect(transcript.map((turn, at) => [turn.role, read[at]])).toEqual([
+      ["agent", undefined],
+      ["agent", 0],
+      ["owner", undefined],
+      ["agent", 0],
+      ["owner", undefined],
+      ["agent", undefined],
+    ]);
+  });
+
   it("reads neither ask from a turn that combines two, so neither answer confirms", async () => {
     const asks = ASKS.slice(0, 2);
     const transcript = await playCall(
