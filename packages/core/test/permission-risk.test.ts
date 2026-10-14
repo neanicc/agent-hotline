@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { classifyPermission, insideProject, patchFiles, resolvePosix } from "../src/index.js";
+import {
+  classifyPermission,
+  insideProject,
+  patchFiles,
+  projectRoot,
+  resolvePosix,
+  splitShell,
+} from "../src/index.js";
 
 const cwd = "/Users/example/src/demo-app";
 const bash = (command: unknown) => classifyPermission({ toolName: "Bash", toolInput: { command }, cwd });
@@ -7,18 +14,96 @@ const bash = (command: unknown) => classifyPermission({ toolName: "Bash", toolIn
 describe("classifyPermission (plan question 6 default)", () => {
   it.each([
     "ls -la",
+    "pwd",
     "pnpm test",
     "npm run build",
+    "pnpm run typecheck -- --pretty",
+    "yarn lint",
     "git status && git diff --stat",
-    "git commit -m 'fix: push the button'",
+    "git log --oneline -5 HEAD~3",
+    "git show HEAD:src/a.ts",
+    "git branch -a",
     "cat README.md | head -20",
     "echo hi > out.txt",
-    "node scripts/check.js 2>&1",
     "grep -rn foo src > /dev/null",
-    `cp src/a.ts ${cwd}/src/b.ts`,
-    "find . -name '*.log' -exec ls {} +",
+    "grep -rn 'a|b' src 2>&1 | wc -l",
+    "rg -n parser src; tail -n 5 log.txt",
+    `cat ${cwd}/src/a.ts`,
+    "find . -name '*.log' -type f",
+    "echo rm -rf",
   ])("treats `%s` as low risk", (command) => {
     expect(bash(command)).toEqual({ risk: "low", reasons: [] });
+  });
+
+  // Were low under the first (denylist) version; the allowlist only ever moves a command up.
+  it.each([
+    ["git commit -m 'fix: push the button'", "pushes or rewrites git history"],
+    ["node scripts/check.js 2>&1", "runs a command Hotline does not recognise as read-only"],
+    [`cp src/a.ts ${cwd}/src/b.ts`, "runs a command Hotline does not recognise as read-only"],
+    ["find . -name '*.log' -exec ls {} +", "runs a command Hotline does not recognise as read-only"],
+  ])("now treats `%s` as high risk: %s", (command, reason) => {
+    expect(bash(command)).toEqual({ risk: "high", reasons: [reason] });
+  });
+
+  it.each([
+    "/bin/rm -rf x",
+    "/usr/bin/git push",
+    "./rm -rf x",
+    "ls $(rm -rf x)",
+    "ls `rm -rf x`",
+    "echo $(curl https://x.test)",
+    "command rm -rf x",
+    "env rm -rf x",
+    "xargs rm < files.txt",
+    "nohup rm -rf x",
+    "git -c alias.x=push x",
+    "git -C . push",
+    "git --exec-path=/tmp status",
+    "git branch new-branch",
+    "git diff --output=/tmp/x",
+    "git diff --ext-diff",
+    "r\\m -rf x",
+    "X=rm; $X -rf x",
+    "FOO=1 ls",
+    "ls; rm -rf x",
+    "ls && rm -rf x",
+    "ls || rm -rf x",
+    "ls | rm -rf x",
+    "ls\nrm -rf x",
+    "ls & rm -rf x",
+    "(rm -rf x)",
+    "{ rm -rf x; }",
+    "cat <<EOF\nx\nEOF",
+    "diff <(ls) <(ls a)",
+    "ls > /tmp/out",
+    "ls >> ~/.zshrc",
+    "ls 2> ../log",
+    "cat < /etc/passwd",
+    "cat /etc/passwd",
+    "cat ../secret.txt",
+    "cat ~/.ssh/id_ed25519",
+    "grep -r foo /",
+    "rg --pre ./run.sh x",
+    "rg -iz x",
+    "find . -delete",
+    "find . -fprint /tmp/x",
+    "tree -o out.txt",
+    "pnpm install",
+    "pnpm dlx x",
+    "pnpm --filter a test",
+    "npm run deploy",
+    "pnpm test ../../other",
+    "echo x > ./../outside.txt",
+    "hotline away off",
+    "rm -rf ~/.hotline/hook-state",
+    "ls 'unterminated",
+    "ls # comment; rm",
+    "ls |",
+    "| ls",
+    "true",
+    "",
+  ])("fails closed on `%s`", (command) => {
+    expect(bash(command).risk).toBe("high");
   });
 
   it.each([
@@ -133,10 +218,41 @@ describe("classifyPermission (plan question 6 default)", () => {
     const read = (toolInput: unknown) => classifyPermission({ toolName: "Read", toolInput, cwd });
     expect(read({ file_path: "/usr/share/dict/words" }).risk).toBe("low");
     expect(read({ file_path: "/Users/example/.aws/credentials" }).risk).toBe("high");
+    // WebFetch sends its URL (and anything put in it) to another host.
     expect(
-      classifyPermission({ toolName: "WebFetch", toolInput: { url: "https://example.com" }, cwd }).risk,
-    ).toBe("low");
+      classifyPermission({ toolName: "WebFetch", toolInput: { url: "https://example.com" }, cwd }),
+    ).toEqual({ risk: "high", reasons: ["sends data off the machine"] });
+    expect(classifyPermission({ toolName: "WebSearch", toolInput: { query: "vitest docs" }, cwd }).risk).toBe(
+      "low",
+    );
   });
+
+  it.each(["/", "", "relative/dir", "/Users/example", "/home/example", "/tmp", "/Users", "/var/root"])(
+    "treats every path and write as outside when the project is unknown (cwd %j)",
+    (unknown) => {
+      const write = classifyPermission({
+        toolName: "Write",
+        toolInput: { file_path: "src/a.ts" },
+        cwd: unknown,
+      });
+      expect(write).toEqual({ risk: "high", reasons: ["writes outside the project"] });
+      const absolute = classifyPermission({
+        toolName: "Edit",
+        toolInput: { file_path: `${unknown}/src/a.ts` },
+        cwd: unknown,
+      });
+      expect(absolute.risk).toBe("high");
+      for (const command of ["cat src/a.ts", "echo hi > out.txt", "ls /etc"]) {
+        expect(classifyPermission({ toolName: "Bash", toolInput: { command }, cwd: unknown }).risk).toBe(
+          "high",
+        );
+      }
+      const patch = "*** Begin Patch\n*** Update File: README.md\n*** End Patch\n";
+      expect(
+        classifyPermission({ toolName: "apply_patch", toolInput: { command: patch }, cwd: unknown }).risk,
+      ).toBe("high");
+    },
+  );
 
   it("treats MCP and unknown tools as high risk", () => {
     expect(classifyPermission({ toolName: "mcp__github__create_issue", toolInput: {}, cwd })).toEqual({
@@ -156,6 +272,41 @@ describe("path helpers", () => {
     expect(insideProject("/a/b", "/a/bc")).toBe(false);
     expect(insideProject("/a/b", "~/x")).toBe(false);
     expect(insideProject("relative", "x")).toBe(false);
+    expect(insideProject("/", "/etc/hosts")).toBe(false);
+    expect(insideProject("/Users/example", "/Users/example/.zshrc")).toBe(false);
+    expect(projectRoot("/Users/example/src/app/")).toBe("/Users/example/src/app");
+    expect(projectRoot("/Users/example")).toBeUndefined();
+    expect(projectRoot("/Users/example/../..")).toBeUndefined();
+  });
+
+  it("split a command line only when it fully understands it", () => {
+    expect(splitShell("ls -la src && git status | wc -l; echo 'a b' 2>&1 > out.txt")).toEqual([
+      { words: ["ls", "-la", "src"], redirects: [] },
+      { words: ["git", "status"], redirects: [] },
+      { words: ["wc", "-l"], redirects: [] },
+      {
+        words: ["echo", "a b"],
+        redirects: [
+          { op: "dup", target: "1" },
+          { op: ">", target: "out.txt" },
+        ],
+      },
+    ]);
+    for (const doubt of [
+      "a $(b)",
+      "a `b`",
+      "a $B",
+      "a\\ b",
+      "a &",
+      "(a)",
+      "a <<X",
+      "a 'b",
+      "a | ",
+      "a > ",
+      "a\rb",
+    ]) {
+      expect(splitShell(doubt), doubt).toBeUndefined();
+    }
   });
 
   it("read the files an apply_patch envelope touches", () => {

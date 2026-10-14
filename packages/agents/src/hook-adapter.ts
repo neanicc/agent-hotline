@@ -32,13 +32,16 @@ import {
   classifyPermission,
   Id,
   insideProject,
+  isShellTool,
   type PermissionRisk,
   patchFiles,
   permissionVerdict,
+  projectRoot,
   resolvePosix,
   StopBlockOutput,
   shellCommand,
   stopInstruction,
+  withRiskReason,
 } from "@hotline/core";
 import type { CreateAskRequest, HotlineDaemon } from "./daemon-client.js";
 
@@ -58,6 +61,8 @@ export const MAX_SUMMARY = 300;
 const MAX_TOOL_NAME = 100;
 const MAX_REASON = 4000;
 const MAX_OWNER_WORDS = 300;
+/** Tools whose `url`, `pattern` or `query` is the preview. Other unknown tools show argument names only. */
+const KNOWN_FIELD_TOOLS: ReadonlySet<string> = new Set(["WebFetch", "WebSearch", "Grep", "Glob"]);
 
 /** The deny message for every case where nobody approved. Matches the HL-02 fixtures. */
 export const NOT_APPROVED = "The owner did not approve this by phone.";
@@ -105,9 +110,27 @@ export interface HookResult {
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters is the point.
 const CONTROL = /[\u0000-\u001f\u007f]+/g;
 
+function collapse(text: string): string {
+  return text.replace(CONTROL, " ").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * The first `max` characters of a collapsed line, cut back to a word boundary:
+ * a cut through a word could leave the start of a secret that the daemon's
+ * redactor no longer recognises. One word longer than `max` leaves nothing.
+ */
+function cutAtWord(line: string, max: number): string {
+  if (line.length <= max) return line;
+  const head = line.slice(0, max);
+  const space = head.lastIndexOf(" ");
+  return space > 0 ? head.slice(0, space) : "";
+}
+
 function oneLine(text: string, max: number): string {
-  const line = text.replace(CONTROL, " ").replace(/\s+/g, " ").trim();
-  return line.length <= max ? line : `${line.slice(0, max - 1)}…`;
+  const line = collapse(text);
+  if (line.length <= max) return line;
+  const cut = cutAtWord(line, max - 1);
+  return cut === "" ? "…" : `${cut}…`;
 }
 
 function field(input: unknown, key: string): string | undefined {
@@ -117,10 +140,18 @@ function field(input: unknown, key: string): string | undefined {
 }
 
 function shownPath(cwd: string, path: string): string {
-  if (!insideProject(cwd, path)) return path;
-  const root = resolvePosix("/", cwd);
-  const below = resolvePosix(root, path).slice(root === "/" ? 1 : root.length + 1);
+  const root = projectRoot(cwd);
+  if (root === undefined || !insideProject(cwd, path)) return path;
+  const below = resolvePosix(root, path).slice(root.length + 1);
   return below === "" ? "." : below;
+}
+
+/** For a tool Hotline does not know: its argument names only, never their values (they can hold file bodies). */
+function argumentNames(input: unknown): string {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return "(no named arguments)";
+  const names = Object.keys(input).map((name) => safeToolName(name));
+  if (names.length === 0) return "(no arguments)";
+  return `arguments ${names.slice(0, 5).join(", ")}${names.length > 5 ? ` and ${names.length - 5} more` : ""}`;
 }
 
 /** A tool name the daemon accepts: identifier characters only. */
@@ -128,18 +159,25 @@ export function safeToolName(name: string): string {
   return name.replace(/[^A-Za-z0-9_.:-]/g, "_").slice(0, MAX_TOOL_NAME) || "unknown";
 }
 
+/** What the hook sends the daemon for a permission request. */
+export interface PermissionAsk {
+  /** The line the owner hears or reads. */
+  text: string;
+  /** From the full tool input, made high when the preview had to be shortened. */
+  risk: PermissionRisk;
+}
+
 /**
- * The short line the owner hears or reads for a permission request: the tool,
- * a one-line preview (a command, the files a patch touches, a path), the
- * agent's own description, and why it is high risk. Never file contents.
+ * The short line the owner hears or reads for a permission request, in this
+ * order: why it is high risk, the tool and a one-line preview (a command, the
+ * files a patch touches, a path), then the agent's own description, labelled as
+ * the agent's words. Never file contents. A preview too long to read out says
+ * how much was cut and makes the request high risk, since the cut part could
+ * hold anything. The description is untrusted and never replaces the preview.
  */
-export function permissionText(
-  toolName: string,
-  toolInput: unknown,
-  cwd: string,
-  risk: PermissionRisk,
-): string {
-  const command = shellCommand(toolInput);
+export function permissionAsk(toolName: string, toolInput: unknown, cwd: string): PermissionAsk {
+  let risk = classifyPermission({ toolName, toolInput, cwd });
+  const command = isShellTool(toolName) || toolName === "apply_patch" ? shellCommand(toolInput) : undefined;
   const patch = toolName === "apply_patch" && command !== undefined ? patchFiles(command) : undefined;
   const path = field(toolInput, "file_path") ?? field(toolInput, "notebook_path") ?? field(toolInput, "path");
   let preview: string;
@@ -152,17 +190,27 @@ export function permissionText(
     preview = command;
   } else if (path !== undefined) {
     preview = shownPath(cwd, path);
+  } else if (KNOWN_FIELD_TOOLS.has(toolName)) {
+    preview = field(toolInput, "url") ?? field(toolInput, "pattern") ?? field(toolInput, "query") ?? "";
   } else {
-    const url = field(toolInput, "url") ?? field(toolInput, "pattern") ?? field(toolInput, "query");
-    preview = url ?? (JSON.stringify(toolInput ?? null) || "");
+    preview = argumentNames(toolInput);
   }
-  const description = field(toolInput, "description");
-  const parts = [`${oneLine(toolName, MAX_TOOL_NAME)}: ${oneLine(preview, MAX_PREVIEW) || "(no details)"}`];
-  if (description !== undefined && oneLine(description, MAX_DESCRIPTION) !== "") {
-    parts.push(`(${oneLine(description, MAX_DESCRIPTION)})`);
+  const line = collapse(preview);
+  let shown = line === "" ? "(no details)" : line;
+  if (line.length > MAX_PREVIEW) {
+    const head = cutAtWord(line, MAX_PREVIEW);
+    const more = line.length - head.length;
+    const what = command === undefined ? "details" : "command";
+    shown = `${head === "" ? "" : `${head} `}(${what} shortened, ${more} more characters)`;
+    risk = withRiskReason(risk, "is too long to read out in full");
   }
+  const parts: string[] = [];
   if (risk.risk === "high") parts.push(`High risk: ${risk.reasons.join(", ")}.`);
-  return parts.join(" ");
+  parts.push(`${oneLine(toolName, MAX_TOOL_NAME)}: ${shown}`);
+  const description = oneLine(field(toolInput, "description") ?? "", MAX_DESCRIPTION);
+  // Only a description with something readable in it; the daemon redacts it with the rest.
+  if (/[\p{L}\p{N}]/u.test(description)) parts.push(`The agent says: "${description.replace(/"/g, "'")}"`);
+  return { text: parts.join(" "), risk };
 }
 
 /** "Finished a turn: <summary>. What next?" */
@@ -240,12 +288,17 @@ async function askAndWait(
     const remainingMs = deadline - w.clock().getTime();
     if (remainingMs <= 0) break;
     try {
-      const wait = Math.max(0, Math.min(w.pollSeconds, Math.ceil(remainingMs / 1000)));
-      const state = await w.daemon.outcome(ask.id, wait, w.signal);
+      // The request itself ends at the deadline, and an answer that arrives
+      // after it does not count: the hook has stopped waiting by then.
+      const wait = Math.max(0, Math.min(w.pollSeconds, Math.floor(remainingMs / 1000)));
+      const deadlineSignal = AbortSignal.timeout(Math.max(1, remainingMs));
+      const signal = w.signal === undefined ? deadlineSignal : AbortSignal.any([w.signal, deadlineSignal]);
+      const state = await w.daemon.outcome(ask.id, wait, signal);
       failures = 0;
+      if (w.clock().getTime() > deadline) break;
       if (state.state === "final") return { ask, outcome: state.outcome };
     } catch {
-      if (w.signal?.aborted) break;
+      if (w.signal?.aborted || w.clock().getTime() >= deadline) break;
       const delay = w.retryDelaysMs[failures];
       failures += 1;
       if (delay === undefined) break;
@@ -287,7 +340,7 @@ async function permissionHook(options: HookOptions): Promise<HookResult> {
     note,
   });
   const { tool_name: toolName, tool_input: toolInput, cwd, session_id: sessionId } = parsed.data;
-  const risk = classifyPermission({ toolName, toolInput, cwd });
+  const { text, risk } = permissionAsk(toolName, toolInput, cwd);
   let connection: HookConnection;
   try {
     connection = await options.connect();
@@ -299,7 +352,7 @@ async function permissionHook(options: HookOptions): Promise<HookResult> {
     { agent, cwd, agentSessionId: agentSessionIdOf(sessionId) },
     {
       kind: "permission",
-      text: permissionText(toolName, toolInput, cwd, risk),
+      text,
       toolName: safeToolName(toolName),
       risk: risk.risk,
     },
@@ -352,11 +405,18 @@ async function stopHook(options: HookOptions): Promise<HookResult> {
     return { note: "the continuation count cannot be read; the agent stops" };
   }
 
+  // Every exit that does not continue the agent clears the count, so a later
+  // continuation by another Stop hook is never mistaken for Hotline's own.
+  const stop = async (note: string): Promise<HookResult> => {
+    await state.setContinuations(sessionId, 0).catch(() => {});
+    return { note };
+  };
+
   let connection: HookConnection;
   try {
     connection = await options.connect();
   } catch {
-    return { note: "Hotline is not set up or the daemon is unreachable; the agent stops" };
+    return stop("Hotline is not set up or the daemon is unreachable; the agent stops");
   }
   const session = { agent, cwd, agentSessionId: agentSessionIdOf(sessionId) };
   // Loop guard 2: at most maxConsecutiveContinuations in a row.
@@ -382,12 +442,14 @@ async function stopHook(options: HookOptions): Promise<HookResult> {
     kind: "stop",
     text: stopText(parsed.data.last_assistant_message),
   });
-  if (result?.outcome === undefined) return { note: "no instruction from the owner; the agent stops" };
+  if (result?.outcome === undefined) return stop("no instruction from the owner; the agent stops");
   const instruction = stopInstruction(result.ask, result.outcome);
   if (instruction === undefined || instruction.trim() === "") {
-    await state.setContinuations(sessionId, 0).catch(() => {});
-    return { note: "the owner let the agent stop, or did not answer" };
+    return stop("the owner let the agent stop, or did not answer");
   }
+  // Away mode may have been switched off while the hook waited: then the owner
+  // is back at the terminal, and no continuation goes out.
+  if (!(await isAway(state))) return stop("away mode was switched off while waiting; the agent stops");
   try {
     await state.setContinuations(sessionId, count + 1);
   } catch {

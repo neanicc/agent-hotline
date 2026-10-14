@@ -282,13 +282,22 @@ in the terminal. The adapters that print these are in `packages/agents`; see
 
 ## Permission risk (`permission-risk.ts`)
 
-`classifyPermission({toolName, toolInput, cwd})` returns `{risk, reasons}`:
-`high` (needs the PIN or a confirming text to approve) for deleting files, git
-push or history rewrites, network installs and downloads, writes outside the
-project, credentials or agent settings, `sudo`, nested shell code, unknown and
-MCP tools, and input it cannot read; `low` otherwise. Pure: paths are resolved
-as POSIX strings (`resolvePosix`, `insideProject`), never on the file system.
-The full table is in [hooks.md](hooks.md#risk-classes-plan-question-6).
+`classifyPermission({toolName, toolInput, cwd})` returns `{risk, reasons}`,
+where `high` needs the PIN or a confirming text to approve. It fails closed:
+
+- A shell command is `low` only when `splitShell` understands all of it and
+  every simple command is on a short read-only allowlist with arguments inside
+  the project.
+- File edits and patches are `low` only inside a known project
+  (`projectRoot`; `/`, top-level directories and home directories are not one).
+- Read tools are `low` unless they point at credentials. `WebFetch`, MCP tools
+  and unknown tools are `high`.
+- The reasons name what the owner hears: deleting files, git push, network
+  installs and so on.
+
+Pure: paths are resolved as POSIX strings (`resolvePosix`, `insideProject`),
+never on the file system. The full rules are in
+[hooks.md](hooks.md#risk-classes-plan-question-6).
 
 ## Ask queue and call policy (`queue.ts`, `policy.ts`)
 

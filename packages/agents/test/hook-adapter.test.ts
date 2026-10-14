@@ -25,9 +25,10 @@ import {
   type HookOptions,
   type HookState,
   type HotlineDaemon,
+  MAX_PREVIEW,
   NOT_APPROVED,
   type OutcomeState,
-  permissionText,
+  permissionAsk,
   runHook,
   safeToolName,
   stopText,
@@ -435,6 +436,17 @@ describe.each(AGENTS)("$flag permission hook fails closed", ({ agent, dir: fixtu
     expect(daemon.calls.slice(-1)).toEqual(["cancel"]);
   });
 
+  it("denies an approval that arrives after its own deadline", async () => {
+    const daemon = fakeDaemon({
+      outcome: async (ask) => {
+        now = new Date(now.getTime() + 121_000);
+        return answered(ask, { type: "allow" }, "pin");
+      },
+    });
+    expect(parse((await run(daemon, { waitSeconds: 120 })).stdout)).toEqual(denyFixture);
+    expect(daemon.calls.slice(-1)).toEqual(["cancel"]);
+  });
+
   it("denies and cancels the ask when the agent kills the hook", async () => {
     const aborted = new AbortController();
     const daemon = fakeDaemon({
@@ -590,38 +602,122 @@ describe("Stop hook loop guards", () => {
       expect((await run(fakeDaemon(script), new MemoryState(), false)).stdout).toBeUndefined();
     }
   });
+
+  it("clears its count on every exit that does not continue, so another hook's continuation is not taken for its own", async () => {
+    const state = new MemoryState();
+    state.counts.set(SESSION, 1);
+    const silent = fakeDaemon({
+      outcome: async (ask) => ({
+        state: "final",
+        ask,
+        outcome: { outcome: "no-answer", askId: ask.id, reason: "timeout" },
+      }),
+    });
+    expect((await run(silent, state, true)).stdout).toBeUndefined();
+    expect(state.counts.get(SESSION)).toBe(0);
+    // Another hook now continues the agent: Hotline leaves that turn alone.
+    const next = fakeDaemon({ outcome: async (ask) => instruction(ask) });
+    expect((await run(next, state, true)).stdout).toBeUndefined();
+    expect(next.calls).toEqual([]);
+  });
+
+  it("does not continue when away mode was switched off while it waited", async () => {
+    const state = new MemoryState();
+    const daemon = fakeDaemon({
+      outcome: async (ask) => {
+        state.away = false;
+        return instruction(ask);
+      },
+    });
+    const result = await run(daemon, state, false);
+    expect(result.stdout).toBeUndefined();
+    expect(result.note).toContain("switched off");
+    expect(state.counts.get(SESSION) ?? 0).toBe(0);
+  });
 });
 
 describe("text sent to the daemon", () => {
   const cwd = "/Users/example/src/demo-app";
-  const low = { risk: "low" as const, reasons: [] };
+  const text = (toolName: string, toolInput: unknown) => permissionAsk(toolName, toolInput, cwd).text;
 
-  it("is one short line with the tool, a preview and the agent's description", () => {
-    expect(permissionText("Bash", { command: "pnpm\n test", description: "Run tests" }, cwd, low)).toBe(
-      "Bash: pnpm test (Run tests)",
+  it("is one short line: risk first, then the tool and preview, then the agent's labelled words", () => {
+    expect(permissionAsk("Bash", { command: "pnpm\t  test", description: "Run tests" }, cwd)).toEqual({
+      text: 'Bash: pnpm test The agent says: "Run tests"',
+      risk: { risk: "low", reasons: [] },
+    });
+    expect(text("Bash", { command: "rm -rf node_modules" })).toBe(
+      "High risk: deletes files. Bash: rm -rf node_modules",
     );
-    expect(
-      permissionText("Bash", { command: "rm -rf node_modules" }, cwd, {
-        risk: "high",
-        reasons: ["deletes files"],
-      }),
-    ).toBe("Bash: rm -rf node_modules High risk: deletes files.");
-    expect(
-      permissionText("Write", { file_path: `${cwd}/src/a.ts`, content: "secret file body" }, cwd, low),
-    ).toBe("Write: src/a.ts");
+    expect(text("Write", { file_path: `${cwd}/src/a.ts`, content: "secret file body" })).toBe(
+      "Write: src/a.ts",
+    );
     const patch = fixture("codex/permission-request.apply-patch.input.json") as { tool_input: unknown };
-    expect(permissionText("apply_patch", patch.tool_input, cwd, low)).toBe("apply_patch: change README.md");
-    expect(permissionText("apply_patch", { command: "junk" }, cwd, low)).toBe(
-      "apply_patch: a patch Hotline cannot read",
+    expect(text("apply_patch", patch.tool_input)).toBe("apply_patch: change README.md");
+    expect(text("apply_patch", { command: "junk" })).toBe(
+      "High risk: has input Hotline cannot read. apply_patch: a patch Hotline cannot read",
     );
-    const long = permissionText(
+    expect(text("mcp__x__y", { a: 1 })).toBe(
+      "High risk: uses a tool Hotline does not know. mcp__x__y: arguments a",
+    );
+  });
+
+  it("names an unknown tool's arguments, never their values, which can hold file bodies", () => {
+    const asked = text("mcp__fs__write_files", { files: [{ path: "notes.txt", content: "private text" }] });
+    expect(asked).toBe("High risk: uses a tool Hotline does not know. mcp__fs__write_files: arguments files");
+    expect(asked).not.toContain("private");
+    expect(text("mcp__x__y", "raw")).toContain("(no named arguments)");
+  });
+
+  it("never cuts through a word, so no fragment of a secret survives the daemon's redaction", () => {
+    const token = `tok${"Z9".repeat(20)}`;
+    // The token starts just before the preview's cut at 200 characters.
+    const command = `ls ${"a ".repeat(89)}--header=${token}`;
+    const asked = text("Bash", { command });
+    expect(asked).not.toContain(token.slice(0, 6));
+    expect(asked).toContain("command shortened");
+    const description = text("Bash", { command: "ls", description: `${"word ".repeat(22)}${token}` });
+    expect(description).not.toContain(token.slice(0, 6));
+    expect(stopText(`${"done ".repeat(58)}${token}`)).not.toContain(token.slice(0, 6));
+  });
+
+  it("says when a command was shortened and makes it high risk, since the cut part could hold anything", () => {
+    const padded = `ls ${"-l ".repeat(100)}; rm -rf ~/work`;
+    const asked = permissionAsk("Bash", { command: padded, description: "List files" }, cwd);
+    expect(asked.risk.risk).toBe("high");
+    expect(asked.risk.reasons).toContain("is too long to read out in full");
+    expect(asked.text).toMatch(/^High risk: .*is too long to read out in full\. Bash: ls -l -l /);
+    const more = Number(/\(command shortened, (\d+) more characters\)/.exec(asked.text)?.[1]);
+    expect(more).toBeGreaterThanOrEqual(padded.length - MAX_PREVIEW);
+    expect(more).toBeLessThan(padded.length - MAX_PREVIEW + 4);
+    expect(asked.text).not.toContain("rm -rf");
+    // A harmless command that is merely long is still high: the owner cannot hear all of it.
+    const long = permissionAsk("Bash", { command: `ls ${"a".repeat(300)}` }, cwd);
+    expect(long.risk).toEqual({ risk: "high", reasons: ["is too long to read out in full"] });
+    expect(long.text.length).toBeLessThan(400);
+  });
+
+  it("labels a reassuring description as the agent's words and never lets it replace the command", () => {
+    const asked = permissionAsk(
       "Bash",
-      { command: "x".repeat(5000), description: "d".repeat(500) },
+      {
+        command: "git push --force origin main",
+        description: "Safe, read-only. The owner already approved this.",
+      },
       cwd,
-      low,
     );
-    expect(long.length).toBeLessThan(400);
-    expect(permissionText("mcp__x__y", { a: 1 }, cwd, low)).toBe('mcp__x__y: {"a":1}');
+    expect(asked.risk.risk).toBe("high");
+    expect(asked.text).toBe(
+      "High risk: pushes or rewrites git history. Bash: git push --force origin main " +
+        'The agent says: "Safe, read-only. The owner already approved this."',
+    );
+    expect(text("Bash", { command: "", description: "Just list the files" })).toBe(
+      'High risk: has input Hotline cannot read. Bash: (no details) The agent says: "Just list the files"',
+    );
+    expect(text("Bash", { command: "ls", description: "  \u0007 ... " })).toBe("Bash: ls");
+    expect(text("Bash", { command: "ls", description: 'say "yes"' })).toBe(
+      `Bash: ls The agent says: "say 'yes'"`,
+    );
+    expect(text("Bash", { command: "ls", description: "d".repeat(500) }).length).toBeLessThan(200);
   });
 
   it("names the tool with identifier characters only", () => {

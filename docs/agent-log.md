@@ -634,11 +634,41 @@ Template:
 - Risk classes (plan question 6, recommended default): `classifyPermission` in
   `@hotline/core` (pure). High: deleting files, git push or history rewrites,
   network installs and downloads, writes outside the project, credentials or
-  agent settings (`.env`, `.ssh`, `.hotline`, `.claude`, `.codex`, ...). Added
-  as fail-closed cases: `sudo`, nested shell code (`sh -c`, `eval`, `| sh`),
-  every MCP or unknown tool, and input it cannot read. Inside the project only
-  the path below the root counts (worktrees live under `.claude/`). The hook
-  judges outcomes with the stricter of its own class and the stored one.
+  agent settings (`.env`, `.ssh`, `.hotline`, `.claude`, `.codex`,
+  `.git/config`, ...). Added as fail-closed cases: `sudo`, nested shell code,
+  `WebFetch` (sends data off the machine), every MCP or unknown tool, and input
+  it cannot read. Inside the project only the path below the root counts
+  (worktrees live under `.claude/`). The hook judges outcomes with the stricter
+  of its own class and the stored one.
+- Security review fixes (coordinator review of ce62b97):
+  - The first version used a denylist, which `/bin/rm`, `$(...)`, backticks,
+    `command rm`, `env rm`, `xargs rm`, `git -c alias.x=push x`, `r\m` and
+    variable-built commands slipped past.
+  - Shell commands now fail closed. `splitShell` splits on `;`, `&&`, `||`, `|`
+    and newlines with quotes, and refuses `$`, backticks, backslashes,
+    subshells, background jobs, here-documents, comments and unbalanced quotes.
+  - A command is low risk only if every simple command is on a read-only
+    allowlist (`ls`, `cat`, `grep`, `rg`, `find` without `-delete`/`-exec`/
+    `-fprint`, read-only `git`, package-manager `test`/`build`/`lint`/
+    `typecheck`) with arguments and redirections inside the project. Otherwise
+    the owner hears the denylist reason, or "runs a command Hotline does not
+    recognise as read-only".
+  - `projectRoot` treats an empty, relative, `/`, top-level or home-directory
+    `cwd` as no project, so every path there counts as outside.
+  - The owner's line now reads the risk first. A preview cut at 200 characters
+    says "command shortened, N more characters" and forces high risk.
+  - The agent's description is labelled `The agent says: "..."`, never stands
+    in for the command, and is dropped when it has no letters or digits. The
+    hook cannot see the daemon's redaction, so "empty after redaction" is
+    approximated by that cleaning step.
+- Greptile and staff review fixes on PR #34:
+  - Text is cut only between words, so a secret is never left as a fragment
+    the redactor misses.
+  - Unknown and MCP tools show argument names, never values.
+  - Each outcome poll ends at the hook's deadline, and a late answer denies.
+  - The Stop hook rechecks away mode before continuing.
+  - Every non-continuing Stop exit clears the count.
+  - `hotline away` and `.hotline/` paths are high risk.
 - Daemon: `POST /v1/sessions/:id/asks` accepts `permission` (requires
   `toolName`, identifier characters up to 100, and `risk`) and `stop`; text and
   tool name are redacted before storage. Caps per session / total: permission
@@ -658,8 +688,13 @@ Template:
   `agent_type`, `mcp_server`) the loose schemas already allow. Notes in the
   fixtures README.
 - Evidence (worktree, Node 24.11.0):
-  - `scripts/ci/run.sh setup`, `build` and `test` pass (682 tests in 34 files
-    before docs).
+  - `scripts/ci/run.sh setup`, `build` and `test` pass: 682 tests in 34 files
+    at ce62b97, and 766 after the security and review fixes.
+  - The security fixes have a bypass test for each case the review listed,
+    plus unknown-project, shortened-preview and reassuring-description tests.
+    Earlier expectations only moved from low to high. Mutations: treating
+    unknown commands as read-only fails 29 risk tests; counting `/` as a
+    project fails 2.
   - Golden tests: every HL-02 input fixture for both agents through `runHook`
     against a real daemon on 127.0.0.1 (temporary store, fake clock), with the
     owner's answer written by `recordAnswer`; outputs equal the allow, deny and
