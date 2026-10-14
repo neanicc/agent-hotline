@@ -839,7 +839,7 @@ Template:
     (1 test fails), owner turns on an unplaced outbound call (2), evicting
     live post-call events (1).
 
-## 2026-10-14 — HL-14 Voice persona and choice (#PR)
+## 2026-10-14 — HL-14 Voice persona and choice (#35)
 
 - Decision / change:
   - Persona (plan section 6) added to the agent prompt as a `# Persona` section
